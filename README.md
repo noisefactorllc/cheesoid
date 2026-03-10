@@ -27,7 +27,6 @@ my-persona/
   SOUL.md            # required — identity and voice
   prompts/
     system.md        # required — chat behavior instructions
-    wakeup.md        # optional — autonomous wakeup prompt
   tools/
     tools.js         # optional — custom tools
   memory/
@@ -42,11 +41,6 @@ display_name: "My Persona"
 model: claude-sonnet-4-6        # any Anthropic model ID
 
 tools: tools/tools.js           # path to custom tools (optional)
-
-wakeup:
-  mode: none                    # or "cron" for autonomous wakeup
-  schedule: null                # cron expression if mode is cron
-  prompt: prompts/wakeup.md
 
 chat:
   prompt: prompts/system.md

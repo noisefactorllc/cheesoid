@@ -6,22 +6,7 @@
   <title>Cheesoid — Persistent AI Personas</title>
   <link rel="stylesheet" href="https://handfish.noisefactor.io/0.9.0/styles/index.css">
   <link rel="stylesheet" href="https://handfish.noisefactor.io/0.9.0/styles/themes/terminal.css">
-  <link rel="preload"
-        href="https://fonts.noisefactor.io/fonts/fira-code/FiraCode-Blank.woff2"
-        as="font" type="font/woff2" crossorigin>
   <style>
-    @font-face {
-      font-family: 'Fira Code';
-      src: url('https://fonts.noisefactor.io/fonts/fira-code/FiraCode-VF.woff2') format('woff2');
-      font-weight: 300 700;
-      font-style: normal;
-    }
-
-    @font-face {
-      font-family: 'Fira Code Blank';
-      src: url('https://fonts.noisefactor.io/fonts/fira-code/FiraCode-Blank.woff2') format('woff2');
-    }
-
     [data-theme="terminal"] {
       --hf-color-4: oklch(28% 0.015 140);
       --hf-color-5: oklch(55% 0.015 140);
@@ -36,27 +21,26 @@
 
     .hero {
       display: flex;
-      flex-direction: column;
       align-items: center;
-      justify-content: center;
-      padding: var(--hf-space-10) var(--hf-space-6);
-      text-align: center;
-      flex: 1;
-      min-height: 80dvh;
+      gap: var(--hf-space-6);
+      padding: var(--hf-space-6);
+      max-width: 960px;
+      margin: 0 auto;
     }
 
     .hero-logo {
-      width: 160px;
-      height: 160px;
-      margin-bottom: var(--hf-space-6);
+      width: 140px;
+      height: 140px;
+      flex-shrink: 0;
       color: var(--hf-accent);
     }
 
-    .fira { font-family: 'Fira Code', 'Fira Code Blank', var(--hf-font-family-mono); }
+    .hero-text {
+      max-width: 36em;
+    }
 
     .hero h1 {
-      font-family: 'Fira Code', 'Fira Code Blank', var(--hf-font-family-mono);
-      font-size: clamp(2.5rem, 6vw, 4rem);
+      font-size: clamp(1.5rem, 4vw, 2.5rem);
       font-weight: var(--hf-weight-bold);
       color: var(--hf-text-bright);
       margin: 0 0 var(--hf-space-3) 0;
@@ -66,8 +50,7 @@
     .hero .tagline {
       font-size: var(--hf-size-lg);
       color: var(--hf-text-dim);
-      max-width: 36em;
-      margin: 0 0 var(--hf-space-8) 0;
+      margin: 0;
       line-height: var(--hf-leading-normal);
     }
 
@@ -75,7 +58,6 @@
       display: flex;
       gap: var(--hf-space-3);
       flex-wrap: wrap;
-      justify-content: center;
     }
 
     .hero-actions a {
@@ -104,7 +86,7 @@
     }
 
     .feature h3 {
-      font-family: 'Fira Code', 'Fira Code Blank', var(--hf-font-family-mono);
+      font-family: var(--hf-font-family-mono);
       font-size: var(--hf-size-base);
       font-weight: var(--hf-weight-semibold);
       color: var(--hf-accent);
@@ -118,10 +100,16 @@
       line-height: var(--hf-leading-normal);
     }
 
-    .quickstart {
-      max-width: 640px;
+    .code-sections {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: var(--hf-space-6);
+      max-width: 960px;
       margin: 0 auto;
       padding: var(--hf-space-8) var(--hf-space-6);
+    }
+
+    .quickstart {
     }
 
     .quickstart h2 {
@@ -137,7 +125,7 @@
       border: 1px solid var(--hf-border);
       border-radius: var(--hf-radius);
       padding: var(--hf-space-4);
-      font-family: 'Fira Code', 'Fira Code Blank', var(--hf-font-family-mono);
+      font-family: var(--hf-font-family-mono);
       font-size: var(--hf-size-sm);
       color: var(--hf-text-normal);
       overflow-x: auto;
@@ -153,9 +141,6 @@
     }
 
     .persona-structure {
-      max-width: 640px;
-      margin: 0 auto;
-      padding: 0 var(--hf-space-6) var(--hf-space-8);
     }
 
     .persona-structure h2 {
@@ -171,7 +156,7 @@
       border: 1px solid var(--hf-border);
       border-radius: var(--hf-radius);
       padding: var(--hf-space-4);
-      font-family: 'Fira Code', 'Fira Code Blank', var(--hf-font-family-mono);
+      font-family: var(--hf-font-family-mono);
       font-size: var(--hf-size-sm);
       color: var(--hf-text-dim);
       line-height: 1.7;
@@ -189,7 +174,7 @@
       text-align: center;
       padding: var(--hf-space-6);
       font-size: var(--hf-size-sm);
-      color: var(--hf-text-muted);
+      color: var(--hf-text-dim);
       border-top: 1px solid var(--hf-border);
     }
 
@@ -202,17 +187,31 @@
       color: var(--hf-accent-hover);
     }
 
-    @media (max-width: 600px) {
+    @media (max-width: 700px) {
       .hero {
-        padding: var(--hf-space-8) var(--hf-space-4);
-        min-height: auto;
+        flex-direction: column;
+        text-align: center;
+        padding: var(--hf-space-6) var(--hf-space-4);
+        gap: var(--hf-space-4);
       }
       .hero-logo {
-        width: 120px;
-        height: 120px;
+        width: 72px;
+        height: 72px;
+      }
+      .hero-actions {
+        justify-content: center;
       }
       .features {
+        grid-template-columns: 1fr;
         padding: var(--hf-space-6) var(--hf-space-4);
+      }
+      .code-sections {
+        grid-template-columns: 1fr;
+        padding: var(--hf-space-6) var(--hf-space-4);
+      }
+      .quickstart pre,
+      .persona-structure pre {
+        font-size: var(--hf-size-xs);
       }
     }
   </style>
@@ -238,11 +237,9 @@
         <path d="M3522 4998 c-18 -18 -15 -54 8 -98 30 -58 28 -202 -2 -265 -23 -48 -20 -67 15 -89 24 -15 68 21 86 70 22 58 20 266 -3 319 -30 69 -72 95 -104 63z"/>
       </g>
     </svg>
-    <h1>Cheesoid</h1>
-    <p class="tagline">A framework for running persistent AI personas with memory, state, and multi-user chat.</p>
-    <div class="hero-actions">
-      <a href="https://github.com/noisefactor/cheesoid"><button class="hf-btn hf-btn-primary">View on GitHub</button></a>
-      <a href="#quickstart"><button class="hf-btn">Get Started</button></a>
+    <div class="hero-text">
+      <h1>Cheesoid</h1>
+      <p class="tagline">A framework for running persistent AI personas with memory, state, and multi-user chat.</p>
     </div>
   </section>
 
@@ -273,19 +270,20 @@
     </div>
   </section>
 
-  <section class="quickstart" id="quickstart">
-    <h2>Quick Start</h2>
-    <pre><span class="cmd">git clone</span> https://github.com/noisefactor/cheesoid
+  <div class="code-sections">
+    <section class="quickstart" id="quickstart">
+      <h2>Quick Start</h2>
+      <pre><span class="cmd">git clone</span> https://github.com/noisefactor/cheesoid
 <span class="cmd">cd</span> cheesoid
 <span class="cmd">npm install</span>
 <span class="cmd">ANTHROPIC_API_KEY</span>=sk-... <span class="cmd">npm run dev</span>
 
 <span class="comment"># Open http://localhost:3000</span></pre>
-  </section>
+    </section>
 
-  <section class="persona-structure">
-    <h2>Persona Structure</h2>
-    <pre><span class="file">my-persona/</span>
+    <section class="persona-structure">
+      <h2>Persona Structure</h2>
+      <pre><span class="file">my-persona/</span>
   <span class="file">persona.yaml</span>      <span class="note"># configuration</span>
   <span class="file">SOUL.md</span>            <span class="note"># identity and voice</span>
   <span class="file">prompts/</span>
@@ -294,10 +292,11 @@
     <span class="file">tools.js</span>         <span class="note"># custom tools (optional)</span>
   <span class="file">memory/</span>
     <span class="file">MEMORY.md</span>        <span class="note"># persistent memory (auto-created)</span></pre>
-  </section>
+    </section>
+  </div>
 
   <footer>
-    <a href="https://github.com/noisefactor/cheesoid">GitHub</a>
+    MIT License &middot; <a href="https://github.com/noisefactor/cheesoid">Source</a> &middot; <a href="https://handfish.noisefactor.io">Handfish</a> terminal theme
   </footer>
 
 </body>

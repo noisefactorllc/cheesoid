@@ -17,8 +17,8 @@ export async function assemblePrompt(personaDir, config) {
   const soul = await readSafe(join(personaDir, 'SOUL.md'))
   if (soul) sections.push(soul)
 
-  // 3. System/wakeup prompt
-  const promptPath = config.chat?.prompt || config.wakeup?.prompt
+  // 3. System prompt
+  const promptPath = config.chat?.prompt
   if (promptPath) {
     const prompt = await readSafe(join(personaDir, promptPath))
     if (prompt) sections.push(prompt)
