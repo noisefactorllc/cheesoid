@@ -1,0 +1,20 @@
+name: brad
+display_name: "Brad from Monetization"
+model: claude-sonnet-4-6
+max_budget_usd: 6
+
+tools: tools/tools.js
+
+chat:
+  prompt: prompts/system.md
+  thinking_budget: 16000
+  max_turns: 20
+  idle_timeout_minutes: 30
+
+## Give him a Stripe API key and DB login info to do some real damage.
+## Configure access via environment variables and tools.
+
+memory:
+  dir: memory/
+  auto_read:
+    - MEMORY.md

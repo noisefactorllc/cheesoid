@@ -15,7 +15,7 @@ if [ -f "$PERSONA_DIR/SOUL.md" ]; then
   output+=$'\n\n---\n\n'
 fi
 
-# 2. System/wakeup prompt
+# 2. System prompt
 if [ -f "$PERSONA_DIR/$PROMPT_FILE" ]; then
   output+="$(cat "$PERSONA_DIR/$PROMPT_FILE")"
   output+=$'\n\n---\n\n'

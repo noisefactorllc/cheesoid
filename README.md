@@ -121,6 +121,59 @@ Every persona automatically gets these built-in tools (no need to define them):
 - `read_memory` / `write_memory` / `append_memory` / `list_memory` — persistent memory
 - `get_state` / `update_state` — persistent cognitive state (mood, energy, focus, open threads)
 
+### Configuring tool access
+
+Tools run as the server process, so they inherit its environment. Pass API keys and credentials as environment variables, then reference them in your tool implementations:
+
+```bash
+ANTHROPIC_API_KEY=sk-... \
+STRIPE_API_KEY=sk_live_... \
+DB_HOST=db.example.com \
+DB_PASSWORD=secret \
+PERSONA=brad \
+npm start
+```
+
+Your tools pick these up from `process.env`:
+
+```js
+export async function execute(name, input) {
+  switch (name) {
+    case 'query_mrr': {
+      const res = execSync(
+        `curl -s https://api.stripe.com/v1/subscriptions?status=active \
+         -u "${process.env.STRIPE_API_KEY}:"`,
+        { encoding: 'utf8' }
+      )
+      return { output: res }
+    }
+    case 'query_db': {
+      const res = execSync(
+        `psql "host=${process.env.DB_HOST} user=readonly password=${process.env.DB_PASSWORD}" \
+         -c "${input.query}"`,
+        { encoding: 'utf8' }
+      )
+      return { output: res }
+    }
+  }
+}
+```
+
+For SSH access, mount a key and configure the host in your environment:
+
+```bash
+docker run -p 3000:3000 \
+  -e ANTHROPIC_API_KEY=sk-... \
+  -e PERSONA=ehsre \
+  -v ~/.ssh/ehsre_key:/root/.ssh/id_ed25519:ro \
+  -v ./personas/ehsre:/app/personas/ehsre \
+  cheesoid
+```
+
+The agent can then use `bash` to run `ssh`, `docker`, `curl`, or anything else available in the container. Scope access carefully — the agent will use whatever you give it.
+
+**Important:** Cheesoid has no built-in authentication. We run it behind an authenticating reverse proxy (e.g. Caddy with basic auth, OAuth2 Proxy, Tailscale). Do not expose it directly to the internet.
+
 ## Running
 
 ### Local
