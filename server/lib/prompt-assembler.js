@@ -9,7 +9,11 @@ export async function assemblePrompt(personaDir, config) {
     sections.push(`Your name is ${config.display_name}.`)
   }
 
-  // 2. SOUL.md — persistent presence definition
+  // 2. Current date/time
+  const now = new Date()
+  sections.push(`Current date: ${now.toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}. Current time: ${now.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: true })}.`)
+
+  // 3. SOUL.md — persistent presence definition
   const soul = await readSafe(join(personaDir, 'SOUL.md'))
   if (soul) sections.push(soul)
 
