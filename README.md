@@ -4,6 +4,8 @@ A framework for running persistent AI personas with memory, state, and a multi-u
 
 You create a directory with a few files that define who your agent is. Cheesoid handles the rest: web UI, memory persistence, idle thoughts, multi-user chat, scrollback.
 
+*DO NOT* run this in any kind of public setting.
+
 ## Quick Start
 
 ```bash
