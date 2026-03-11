@@ -128,7 +128,8 @@ function connectSSE() {
   evtSource = new EventSource(`/api/chat/stream?name=${encodeURIComponent(myName)}`)
   evtSource.onmessage = handleEvent
   evtSource.onerror = () => {
-    // Debounce — EventSource can fire multiple errors before we reconnect
+    // Close immediately to prevent browser auto-reconnect racing our manual reconnect
+    if (evtSource) evtSource.close()
     if (reconnectTimer) return
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
@@ -146,6 +147,10 @@ function handleEvent(e) {
     case 'scrollback':
       messages.innerHTML = ''
       lastSender = null
+      assistantEl = null
+      assistantBuffer = ''
+      idleEl = null
+      idleBuffer = ''
       for (const msg of event.messages) {
         if (msg.type === 'user_message') {
           appendMessage('user', msg.text, msg.name, msg.timestamp)
@@ -198,11 +203,15 @@ function handleEvent(e) {
     case 'done':
       if (assistantEl) {
         for (const tc of assistantEl.querySelectorAll('.tool-call')) tc.remove()
-        // Strip any backchannel tags that leaked into streaming output
-        if (assistantBuffer.includes('<backchannel>') || assistantBuffer.includes('<thought>')) {
-          assistantBuffer = assistantBuffer.replace(/<backchannel>[\s\S]*?<\/backchannel>/g, '').replace(/<thought>[\s\S]*?<\/thought>/g, '').trim()
+        // Strip only backchannel tags (private agent coordination) from visible output
+        if (assistantBuffer.includes('<backchannel>')) {
+          assistantBuffer = assistantBuffer.replace(/<backchannel>[\s\S]*?<\/backchannel>/g, '').trim()
           const body = assistantEl.querySelector('.message-body')
           if (body) body.innerHTML = renderMarkdown(assistantBuffer)
+        }
+        // Remove empty ghost elements (backchannel-only responses)
+        if (!assistantBuffer.trim()) {
+          assistantEl.remove()
         }
       }
       assistantEl = null
