@@ -47,6 +47,7 @@ export class Room {
     this._messageQueue = [] // queued messages while busy
     this._idleInterval = IDLE_THOUGHT_INTERVAL // backs off with consecutive idle thoughts
     this._heartbeatTimer = null
+    this._destroyed = false
   }
 
   async initialize() {
@@ -294,8 +295,7 @@ export class Room {
 
   async _idleThought() {
     if (this.busy || this.messages.length === 0) {
-      this._startIdleTimer() // restart timer even on skip, preserving current backoff
-      return
+      return false // skipped — timer wrapper handles restart
     }
 
     this.busy = true
@@ -310,16 +310,21 @@ export class Room {
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
       }
 
-      // Wrap events as idle thoughts for the UI
+      // Wrap events as idle thoughts for the UI — broadcast errors must not
+      // abort the agent call, so catch them individually
       let idleText = ''
       const onEvent = (event) => {
-        if (event.type === 'text_delta') {
-          idleText += event.text
-          this.broadcast({ type: 'idle_text_delta', text: event.text })
-        } else if (event.type === 'done') {
-          this.broadcast({ type: 'idle_done' })
-        } else if (event.type === 'tool_start' || event.type === 'tool_result') {
-          this.broadcast({ ...event, idle: true })
+        try {
+          if (event.type === 'text_delta') {
+            idleText += event.text
+            this.broadcast({ type: 'idle_text_delta', text: event.text })
+          } else if (event.type === 'done') {
+            this.broadcast({ type: 'idle_done' })
+          } else if (event.type === 'tool_start' || event.type === 'tool_result') {
+            this.broadcast({ ...event, idle: true })
+          }
+        } catch (err) {
+          console.error(`[${this.persona.config.name}] Idle broadcast error:`, err.message)
         }
       }
 
@@ -332,19 +337,40 @@ export class Room {
         this.state.update({ last_idle_thought: new Date().toISOString() })
         await this.state.save()
       }
+      return true // completed
     } catch (err) {
       console.error(`[${this.persona.config.name}] Idle thought error:`, err.message)
+      return false // failed
     } finally {
       this.busy = false
-      this._idleInterval = Math.min(this._idleInterval * 2, MAX_IDLE_INTERVAL)
-      console.log(`[${this.persona.config.name}] Next idle thought in ${Math.round(this._idleInterval / 1000)}s`)
-      this._startIdleTimer()
     }
   }
 
   _startIdleTimer() {
     this._clearIdleTimer()
-    this.idleTimer = setTimeout(() => this._idleThought(), this._idleInterval)
+    const interval = this._idleInterval
+    console.log(`[${this.persona.config.name}] Idle timer set: ${Math.round(interval / 1000)}s`)
+    this.idleTimer = setTimeout(async () => {
+      this.idleTimer = null // mark as fired
+      let completed = false
+      try {
+        completed = await this._idleThought()
+      } catch (err) {
+        // Safety net — _idleThought has its own try/catch, so this should
+        // never fire, but if it does the timer must not die
+        console.error(`[${this.persona.config.name}] Idle thought unhandled error:`, err.message)
+        this.busy = false
+      } finally {
+        // ALWAYS reschedule unless destroyed or something else already set a timer
+        // (e.g. a message came in during the thought and restarted it)
+        if (!this.idleTimer && !this._destroyed) {
+          if (completed) {
+            this._idleInterval = Math.min(this._idleInterval * 2, MAX_IDLE_INTERVAL)
+          }
+          this._startIdleTimer()
+        }
+      }
+    }, interval)
   }
 
   _clearIdleTimer() {
@@ -382,6 +408,7 @@ export class Room {
   }
 
   destroy() {
+    this._destroyed = true
     this._clearIdleTimer()
     this._stopHeartbeat()
     for (const client of this.roomClients.values()) {
