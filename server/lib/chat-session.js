@@ -137,7 +137,7 @@ export class Room {
   }
 
   addAgentMessage(name, text) {
-    const taggedMessage = `[${this._timestamp()}][${name}]: ${text}`
+    const taggedMessage = `[${this._timestamp()}][home/${name}]: ${text}`
     this.messages.push({ role: 'user', content: taggedMessage })
     this.broadcast({ type: 'user_message', name, text, fromAgent: true })
     this.recordHistory({ type: 'user_message', name, text })
@@ -220,8 +220,9 @@ export class Room {
       if (!this.systemPrompt) await this.initialize()
 
       const ts = this._timestamp()
-      const tag = room === 'home' ? `[${ts}][${name}]` : `[${ts}][${room}/${name}]`
-      const presence = room === 'home' ? ` (room: ${this.participantList.join(', ')})` : ''
+      const roomLabel = room === 'home' ? 'home' : room
+      const tag = `[${ts}][${roomLabel}/${name}]`
+      const presence = room === 'home' ? ` (present: ${this.participantList.join(', ')})` : ''
       this.messages.push({ role: 'user', content: `${tag}${presence}: ${text}` })
 
       if (room === 'home') {
