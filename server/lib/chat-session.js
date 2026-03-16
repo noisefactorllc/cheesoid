@@ -177,18 +177,32 @@ export class Room {
       if (event.scrollback) {
         // Historical context from remote room — don't trigger agent
         const tag = `[${event.room}/${event.name}]`
-        this.messages.push({ role: 'user', content: `${tag}: ${event.text}` })
+        this._safeAppendMessage({ role: 'user', content: `${tag}: ${event.text}` })
       } else {
         this._processMessage(event.room, event.name, event.text)
       }
     } else if (event.type === 'assistant_message') {
       // Another room's agent responded — add context only, don't trigger
       const tag = `[${event.room}/assistant]`
-      this.messages.push({ role: 'user', content: `${tag}: ${event.text}` })
+      this._safeAppendMessage({ role: 'user', content: `${tag}: ${event.text}` })
     } else if (event.type === 'backchannel') {
       // Agent-only coordination message — add to conversation log, no UI
       const tag = `[${this._timestamp()}][backchannel/${event.room}/${event.name}]`
-      this.messages.push({ role: 'user', content: `${tag}: ${event.text}` })
+      this._safeAppendMessage({ role: 'user', content: `${tag}: ${event.text}` })
+    }
+  }
+
+  /**
+   * Safely append a context message to the conversation. If the agent is busy
+   * (mid-tool-execution), queue it — pushing directly into messages[] would
+   * insert a user message between tool_use and tool_result, which the API rejects.
+   */
+  _safeAppendMessage(message) {
+    if (this.busy) {
+      this._pendingContextMessages = this._pendingContextMessages || []
+      this._pendingContextMessages.push(message)
+    } else {
+      this.messages.push(message)
     }
   }
 
@@ -284,6 +298,15 @@ export class Room {
     } finally {
       this.busy = false
       this._pendingRoom = null
+
+      // Flush any context messages that arrived while the agent was busy
+      if (this._pendingContextMessages && this._pendingContextMessages.length > 0) {
+        for (const msg of this._pendingContextMessages) {
+          this.messages.push(msg)
+        }
+        this._pendingContextMessages = []
+      }
+
       this._startIdleTimer()
 
       if (this._messageQueue.length > 0) {
