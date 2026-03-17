@@ -15,6 +15,11 @@ const app = express()
 app.use(express.json())
 app.use(express.static(join(__dirname, 'public')))
 
+if (!process.env.ANTHROPIC_API_KEY) {
+  console.error('Error: ANTHROPIC_API_KEY not set')
+  process.exit(1)
+}
+
 // Load persona
 const personaName = process.env.PERSONA || 'example'
 const personaDir = join(__dirname, '..', 'personas', personaName)

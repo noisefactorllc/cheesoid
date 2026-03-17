@@ -1,18 +1,76 @@
 import { getClient } from './ai-client.js'
 
+const SONNET_FALLBACK = 'claude-sonnet-4-6'
+
+function isOpusModel(model) {
+  return model && model.includes('opus')
+}
+
+function isUnavailableError(err) {
+  return err.status === 529 || err.status === 503 || err.status === 404
+}
+
+async function streamOnce(client, params, onEvent) {
+  const stream = client.messages.stream(params)
+  const contentBlocks = []
+  let stopReason = null
+  const usage = { input_tokens: 0, output_tokens: 0 }
+
+  for await (const event of stream) {
+    if (event.type === 'content_block_start') {
+      const block = event.content_block
+      if (block.type === 'text') {
+        contentBlocks.push({ type: 'text', text: '' })
+      } else if (block.type === 'tool_use') {
+        contentBlocks.push({ type: 'tool_use', id: block.id, name: block.name, input: '' })
+        onEvent({ type: 'tool_start', name: block.name })
+      } else if (block.type === 'thinking') {
+        contentBlocks.push({ type: 'thinking', thinking: '', signature: '' })
+      }
+    } else if (event.type === 'content_block_delta') {
+      const current = contentBlocks[contentBlocks.length - 1]
+      if (!current) continue
+      if (event.delta.type === 'text_delta') {
+        current.text += event.delta.text
+        onEvent({ type: 'text_delta', text: event.delta.text })
+      } else if (event.delta.type === 'input_json_delta') {
+        current.input += event.delta.partial_json
+      } else if (event.delta.type === 'thinking_delta') {
+        current.thinking += event.delta.thinking
+        onEvent({ type: 'thinking_delta', text: event.delta.thinking })
+      } else if (event.delta.type === 'signature_delta') {
+        current.signature += event.delta.signature
+      }
+    } else if (event.type === 'message_delta') {
+      stopReason = event.delta?.stop_reason
+      if (event.usage) {
+        usage.input_tokens += event.usage.input_tokens || 0
+        usage.output_tokens += event.usage.output_tokens || 0
+      }
+    } else if (event.type === 'message_start' && event.message?.usage) {
+      usage.input_tokens += event.message.usage.input_tokens || 0
+      usage.output_tokens += event.message.usage.output_tokens || 0
+    }
+  }
+
+  return { contentBlocks, stopReason, usage }
+}
+
 /**
  * Run the agent loop. Calls onEvent with SSE events as it goes.
  * Handles streaming text, tool use, and thinking blocks.
+ * Falls back to sonnet if an opus model is unavailable.
  */
 export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   const client = getClient()
   let totalUsage = { input_tokens: 0, output_tokens: 0 }
   let iterations = 0
   const maxTurns = config.maxTurns || 20
+  let activeModel = config.model || SONNET_FALLBACK
 
   while (iterations < maxTurns) {
     const params = {
-      model: config.model || 'claude-sonnet-4-6',
+      model: activeModel,
       max_tokens: 16384,
       system: systemPrompt,
       messages,
@@ -20,51 +78,30 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       stream: true,
     }
 
-    if (config.thinkingBudget) {
+    if (config.thinkingBudget && isOpusModel(activeModel)) {
       params.thinking = { type: 'enabled', budget_tokens: config.thinkingBudget }
     }
 
-    // Stream the response
-    const stream = client.messages.stream(params)
-    const contentBlocks = []
-    let stopReason = null
-
-    for await (const event of stream) {
-      if (event.type === 'content_block_start') {
-        const block = event.content_block
-        if (block.type === 'text') {
-          contentBlocks.push({ type: 'text', text: '' })
-        } else if (block.type === 'tool_use') {
-          contentBlocks.push({ type: 'tool_use', id: block.id, name: block.name, input: '' })
-          onEvent({ type: 'tool_start', name: block.name })
-        } else if (block.type === 'thinking') {
-          contentBlocks.push({ type: 'thinking', thinking: '', signature: '' })
-        }
-      } else if (event.type === 'content_block_delta') {
-        const current = contentBlocks[contentBlocks.length - 1]
-        if (!current) continue
-        if (event.delta.type === 'text_delta') {
-          current.text += event.delta.text
-          onEvent({ type: 'text_delta', text: event.delta.text })
-        } else if (event.delta.type === 'input_json_delta') {
-          current.input += event.delta.partial_json
-        } else if (event.delta.type === 'thinking_delta') {
-          current.thinking += event.delta.thinking
-          onEvent({ type: 'thinking_delta', text: event.delta.thinking })
-        } else if (event.delta.type === 'signature_delta') {
-          current.signature += event.delta.signature
-        }
-      } else if (event.type === 'message_delta') {
-        stopReason = event.delta?.stop_reason
-        if (event.usage) {
-          totalUsage.input_tokens += event.usage.input_tokens || 0
-          totalUsage.output_tokens += event.usage.output_tokens || 0
-        }
-      } else if (event.type === 'message_start' && event.message?.usage) {
-        totalUsage.input_tokens += event.message.usage.input_tokens || 0
-        totalUsage.output_tokens += event.message.usage.output_tokens || 0
+    // Stream the response — fall back to sonnet if opus is unavailable
+    let result
+    try {
+      result = await streamOnce(client, params, onEvent)
+    } catch (err) {
+      if (isOpusModel(activeModel) && isUnavailableError(err)) {
+        console.warn(`[agent] ${activeModel} unavailable (${err.status}), falling back to ${SONNET_FALLBACK}`)
+        onEvent({ type: 'model_fallback', from: activeModel, to: SONNET_FALLBACK })
+        activeModel = SONNET_FALLBACK
+        params.model = SONNET_FALLBACK
+        delete params.thinking // thinking is not supported on sonnet
+        result = await streamOnce(client, params, onEvent)
+      } else {
+        throw err
       }
     }
+
+    const { contentBlocks, stopReason, usage } = result
+    totalUsage.input_tokens += usage.input_tokens
+    totalUsage.output_tokens += usage.output_tokens
 
     // Finalize content blocks — parse tool input JSON
     const assistantContent = contentBlocks.map(block => {
