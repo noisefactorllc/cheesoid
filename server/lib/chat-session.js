@@ -6,8 +6,8 @@ import { loadTools } from './tools.js'
 import { runAgent } from './agent.js'
 import { RoomClient } from './room-client.js'
 
-const IDLE_THOUGHT_INTERVAL = 15 * 60 * 1000 // 15 minutes, doubles each time
-const MAX_IDLE_INTERVAL = 24 * 60 * 60 * 1000 // 24 hours cap
+const IDLE_THOUGHT_INTERVAL = 30 * 60 * 1000 // 30 minutes, doubles each time
+const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
 const MAX_HISTORY = 50
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
