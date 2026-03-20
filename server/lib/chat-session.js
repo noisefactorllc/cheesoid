@@ -521,6 +521,10 @@ export class Room {
     this._destroyed = true
     this._clearIdleTimer()
     this._stopHeartbeat()
+    for (const stream of this._visitorStreams.values()) {
+      if (stream.timer) clearTimeout(stream.timer)
+    }
+    this._visitorStreams.clear()
     for (const client of this.roomClients.values()) {
       client.destroy()
     }
