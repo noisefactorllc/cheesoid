@@ -21,7 +21,10 @@ router.post('/webhook', async (req, res) => {
   // Respond immediately — processing happens via the room
   res.json({ status: 'received' })
 
-  const webhookMessage = `[webhook from ${source}] Process this autonomously — decide what to do based on your memory, state, and persona.
+  const ownerName = room.persona.config.display_name || room.persona.config.name
+  const webhookMessage = `[webhook from ${source}] This webhook is for ${ownerName} only — other agents in this room should ignore it.
+
+${ownerName}: process this autonomously based on your memory, state, and persona.
 
 Payload:
 \`\`\`json
