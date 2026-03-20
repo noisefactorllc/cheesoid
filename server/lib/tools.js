@@ -75,7 +75,9 @@ function buildRoomTools(room, config) {
         const displayName = config.display_name || config.name
         room.broadcast({ type: 'assistant_message', text: input.text })
         room.recordHistory({ type: 'assistant_message', text: input.text })
-        room.messages.push({ role: 'assistant', content: input.text })
+        // Do NOT push to room.messages here — the agent loop manages its own
+        // message array. Pushing an assistant message mid-tool-execution corrupts
+        // the tool_use/tool_result sequence and causes API 400 errors.
         return { output: 'Message sent to chat room.' }
       }
       case 'search_history': {

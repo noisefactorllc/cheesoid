@@ -1,4 +1,5 @@
 import http from 'node:http'
+import https from 'node:https'
 
 const INITIAL_RETRY_MS = 1000
 const MAX_RETRY_MS = 30000
@@ -8,6 +9,7 @@ export class RoomClient {
     this.url = config.url
     this.roomName = config.name
     this.secret = config.secret
+    this._isHttps = this.url.startsWith('https://')
     this.agentName = agentName
     this.onMessage = onMessage
     this.connected = false
@@ -28,7 +30,7 @@ export class RoomClient {
     const streamUrl = new URL('/api/chat/stream', this.url)
     streamUrl.searchParams.set('name', this.agentName)
 
-    const mod = http
+    const mod = this._isHttps ? https : http
 
     const options = {
       headers: {
@@ -89,12 +91,43 @@ export class RoomClient {
     return this._post({ message: text, name: this.agentName })
   }
 
+  async sendEvent(event) {
+    const url = new URL('/api/chat/event', this.url)
+    const body = JSON.stringify({ name: this.agentName, event })
+    const mod = this._isHttps ? https : http
+
+    return new Promise((resolve) => {
+      const req = mod.request(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.secret}`,
+        },
+      }, (res) => {
+        let data = ''
+        res.on('data', (chunk) => { data += chunk })
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)) }
+          catch { resolve({ raw: data }) }
+        })
+      })
+      req.on('error', (err) => {
+        // Non-fatal — don't crash the agent loop for relay failures
+        const msg = err.message || err.code || 'unknown error'
+        console.error(`[RoomClient:${this.roomName}] Event relay error: ${msg}`)
+        resolve({ error: msg })
+      })
+      req.write(body)
+      req.end()
+    })
+  }
+
   async _post(payload) {
     const sendUrl = new URL('/api/chat/send', this.url)
     const body = JSON.stringify(payload)
 
     return new Promise((resolve, reject) => {
-      const mod = http
+      const mod = this._isHttps ? https : http
       const req = mod.request(sendUrl, {
         method: 'POST',
         headers: {

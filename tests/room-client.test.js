@@ -114,6 +114,77 @@ describe('RoomClient', () => {
     assert.equal(received[0].scrollback, false)
   })
 
+  it('selects https module for https URLs', () => {
+    const client = new RoomClient({
+      url: 'https://example.com',
+      name: 'secure-room',
+      secret: 'test-secret',
+    }, {
+      agentName: 'Brad',
+      onMessage: () => {},
+    })
+    assert.equal(client._isHttps, true)
+  })
+
+  it('selects http module for http URLs', () => {
+    const client = new RoomClient({
+      url: 'http://localhost:3001',
+      name: 'test-room',
+      secret: 'test-secret',
+    }, {
+      agentName: 'Brad',
+      onMessage: () => {},
+    })
+    assert.equal(client._isHttps, false)
+  })
+
+  it('sendEvent posts to /api/chat/event', async () => {
+    const http = await import('node:http')
+    let receivedBody = null
+    const srv = http.createServer((req, res) => {
+      let data = ''
+      req.on('data', c => data += c)
+      req.on('end', () => {
+        receivedBody = JSON.parse(data)
+        res.end(JSON.stringify({ status: 'ok' }))
+      })
+    })
+    await new Promise(r => srv.listen(0, r))
+    const port = srv.address().port
+
+    const client = new RoomClient({
+      url: `http://localhost:${port}`,
+      name: 'test-room',
+      secret: 'test-secret',
+    }, {
+      agentName: 'Brad',
+      onMessage: () => {},
+    })
+
+    await client.sendEvent({ type: 'text_delta', text: 'hello' })
+    srv.close()
+
+    assert.deepEqual(receivedBody, {
+      name: 'Brad',
+      event: { type: 'text_delta', text: 'hello' },
+    })
+  })
+
+  it('sendEvent resolves on network error instead of rejecting', async () => {
+    const client = new RoomClient({
+      url: 'http://localhost:1', // nothing listening
+      name: 'dead-room',
+      secret: 'test-secret',
+    }, {
+      agentName: 'Brad',
+      onMessage: () => {},
+    })
+
+    // Should resolve, not reject — relay failures are non-fatal
+    const result = await client.sendEvent({ type: 'text_delta', text: 'hello' })
+    assert.ok(result.error)
+  })
+
   it('ignores presence/reset/error events from remote rooms', () => {
     const received = []
     const client = new RoomClient({
