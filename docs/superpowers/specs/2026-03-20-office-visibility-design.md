@@ -33,10 +33,14 @@ Body: { name: "brad", event: { type: "text_delta"|"tool_start"|"tool_result"|"do
 **RoomClient changes:**
 
 - New `sendEvent(event)` method — POSTs to `/api/chat/event` on the host.
+- RoomClient currently hardcodes `http`. Add protocol detection: parse the configured URL and use `https` module when the URL scheme is `https://`. This fixes a pre-existing limitation and is required since `office_url` values will be HTTPS in production.
 
 **Room._processMessage changes:**
 
 - When `_pendingRoom` is a remote office, the `onEvent` callback forwards `text_delta`, `tool_start`, `tool_result`, and `done` events to the remote RoomClient via `sendEvent()`, in addition to existing home-office broadcasting.
+- `thinking_delta` events are NOT relayed — thinking is internal to the agent.
+- `relayAgentEvent` does NOT interact with the agent loop, `this.messages`, or the `busy` flag. It only broadcasts and accumulates tool state. This means visitor events flow freely even while the host agent is processing.
+- Every relayed event MUST include the `name` field — the frontend uses it to demux concurrent visitor streams.
 
 ### 2. Frontend: Multi-Agent Streaming
 
@@ -83,12 +87,16 @@ office_url: https://ehsre.noisefactor.io
 
 **UI changes:**
 
-- Page title/header says "Office" instead of "Room"
-- Startup system message: "Welcome to [Agent]'s office."
+- Page title/header says "Office" instead of "Room" (set dynamically by JS, no HTML changes needed)
+- Startup system message in `chat-session.js`: "Welcome to [Agent]'s office." (replaces current `${config.display_name} has started.`)
 
 ### 4. Visiting Agent History
 
-`relayAgentEvent` accumulates tool use per visitor in a transient map. On `done`, a single history entry is recorded with both text and tool summary. Scrollback replay renders tool summary if present.
+`relayAgentEvent` accumulates tool use per visitor in a transient map. On `done`, a single history entry is recorded with both text and tool summary.
+
+**Scrollback replay:** `assistant_message` entries with a `name` field and `tools` array render with the same color-coded treatment as live streaming. Tool names appear as a compact summary line above the message text (e.g., "used: read_memory, search_history").
+
+**Stale stream cleanup:** If no event arrives for a visitor within 60 seconds of their last event, flush and discard the partial accumulator state. This handles visitor crashes or disconnects mid-stream.
 
 The host agent's in-memory context (`this.messages`) continues to receive visiting agent text via `addAgentMessage` — the host agent doesn't need visitor tool details in its own conversation context.
 
@@ -100,7 +108,7 @@ The host agent's in-memory context (`this.messages`) continues to receive visiti
 |-----------|--------|
 | `server/routes/chat.js` | New `POST /api/chat/event` endpoint |
 | `server/lib/chat-session.js` | `relayAgentEvent()`, visitor tool accumulation, event forwarding in `_processMessage` |
-| `server/lib/room-client.js` | `sendEvent()` method |
+| `server/lib/room-client.js` | `sendEvent()` method, HTTP/HTTPS protocol detection |
 | `server/public/js/chat.js` | Per-agent stream tracking, color coding, "office" UI text |
 | `server/public/css/style.css` | Visiting agent color styles |
 | `server/lib/prompt-assembler.js` | "room" → "office" language, office URL injection |
