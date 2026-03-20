@@ -384,7 +384,8 @@ export class Room {
       }
 
       const prompt = this.systemPrompt.replace('{{CURRENT_TIMESTAMP}}', currentTimestamp())
-      await runAgent(prompt, idleMessages, this.tools, config, onEvent)
+      const result = await runAgent(prompt, idleMessages, this.tools, config, onEvent)
+      this.messages = result.messages
       if (idleText) {
         this.recordHistory({ type: 'idle_thought', text: idleText })
       }
@@ -399,6 +400,14 @@ export class Room {
       return false // failed
     } finally {
       this.busy = false
+
+      // Flush any context messages that arrived while the agent was busy
+      if (this._pendingContextMessages && this._pendingContextMessages.length > 0) {
+        for (const msg of this._pendingContextMessages) {
+          this.messages.push(msg)
+        }
+        this._pendingContextMessages = []
+      }
     }
   }
 
