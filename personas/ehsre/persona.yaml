@@ -14,6 +14,11 @@ chat:
 ## Give him the keys to your production infrastructure, if you dare.
 ## Configure SSH, monitoring APIs, and docker access via environment variables and tools.
 
+## Plugins — Claude Code plugins loaded into the system prompt at startup.
+## See: https://github.com/noisefactorllc/sre-discipline
+# plugins:
+#   - /app/plugins/sre-discipline
+
 memory:
   dir: memory/
   auto_read:
