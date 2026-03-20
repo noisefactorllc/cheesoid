@@ -16,14 +16,13 @@ const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through p
 
 const IDLE_THOUGHT_PROMPT = `You have been idle for a while. No one is talking to you right now.
 
-This is a moment of quiet. Use it to:
-- Reflect on your recent conversations
-- Notice anything worth remembering that you haven't saved yet
-- Think about open threads or unresolved questions
-- Update your state (mood, focus, energy)
+This is a moment of quiet. You are free to use tools, write in chat, or do nothing — entirely at your discretion. There is no obligation to act. Only do something if there's something genuinely on your mind — an unresolved question, something worth remembering, a thought worth sharing.
 
-If you have something worth noting, write it to memory. If not, that's fine too.
-Keep any response brief — this is internal reflection, not performance.`
+If you do act, be mindful: your recent conversation history includes your previous actions and tool use. Don't repeat work you've already done. Don't invoke tools just because you can.
+
+Everything you do here — tool calls, thoughts, messages — is part of your ongoing conversation history, so be intentional about it.
+
+If nothing is weighing on you, simply say so briefly and move on.`
 
 /**
  * A Room is a shared conversation space for one persona.
