@@ -9,6 +9,7 @@ import { RoomClient } from './room-client.js'
 const IDLE_THOUGHT_INTERVAL = 30 * 60 * 1000 // 30 minutes, doubles each time
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
 const MAX_HISTORY = 50
+const MAX_QUEUED_WEBHOOKS = 10
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
 // but never injected into agent context (this.messages) — the agent has
@@ -251,8 +252,16 @@ export class Room {
 
   async _processMessage(room, name, text) {
     if (this.busy) {
-      if (room === 'home') {
-        // Don't queue — user can resend with up-arrow after agent finishes
+      if (room === 'home' && name === 'webhook') {
+        // Queue webhooks — they can't retry and shouldn't be dropped
+        const webhookCount = this._messageQueue.filter(m => m.name === 'webhook').length
+        if (webhookCount >= MAX_QUEUED_WEBHOOKS) {
+          console.warn(`[${this.persona.config.name}] Webhook queue full (${MAX_QUEUED_WEBHOOKS}), dropping webhook`)
+          return
+        }
+        this._messageQueue.push({ room, name, text })
+      } else if (room === 'home') {
+        // Don't queue human messages — user can resend with up-arrow after agent finishes
         this.broadcast({ type: 'error', message: `${this.persona.config.display_name} is thinking, please wait...` })
       } else {
         // Queue remote room messages (agents can't up-arrow)
@@ -355,7 +364,29 @@ export class Room {
 
       this._startIdleTimer()
 
-      if (this._messageQueue.length > 0) {
+      // Drain queued webhooks as a batch — inject all at once so the agent
+      // can triage holistically instead of reacting to each one serially
+      const webhooks = []
+      const remaining = []
+      for (const msg of this._messageQueue) {
+        if (msg.name === 'webhook') {
+          webhooks.push(msg)
+        } else {
+          remaining.push(msg)
+        }
+      }
+      this._messageQueue = remaining
+
+      if (webhooks.length > 0) {
+        // Combine into a single message so the agent sees the full picture
+        const combined = webhooks.map((w, i) => {
+          const label = webhooks.length > 1 ? `--- webhook ${i + 1} of ${webhooks.length} ---\n` : ''
+          return label + w.text
+        }).join('\n\n')
+        this._processMessage('home', 'webhook', combined).catch(err => {
+          console.error(`[${this.persona.config.name}] Queued webhook processing error:`, err.message)
+        })
+      } else if (this._messageQueue.length > 0) {
         const next = this._messageQueue.shift()
         this._processMessage(next.room, next.name, next.text).catch(err => {
           console.error(`[${this.persona.config.name}] Queue processing error:`, err.message)
