@@ -26,138 +26,18 @@ jobs:
   deploy:
     needs: build
     runs-on: ubuntu-latest
-    concurrency:
-      group: cheesoid-deploy
-      cancel-in-progress: false
     steps:
-      - name: Deploy all cheesoid instances
-        env:
-          SSH_KEY: ${{ secrets.OPS_SSH_KEY }}
-          OPS_HOST: ${{ secrets.OPS_SERVER_IP }}
+      - name: Generate app token
+        id: app-token
+        uses: actions/create-github-app-token@v1
+        with:
+          app-id: 2959521
+          private-key: ${{ secrets.EHSRE_APP_PRIVATE_KEY }}
+          owner: noisefactorllc
+
+      - name: Trigger deploy in scaffold
         run: |
-          mkdir -p ~/.ssh
-          chmod 700 ~/.ssh
-          echo "$SSH_KEY" | base64 -d > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-          ssh-keyscan -H $OPS_HOST >> ~/.ssh/known_hosts 2>/dev/null
-
-          # All instances use --env-file from the server. NEVER hardcode
-          # secrets here. The .env files are the single source of truth.
-          ssh ops@$OPS_HOST 'bash -s' <<'REMOTE'
-            set -euo pipefail
-            IMAGE="registry.noisefactor.io/cheesoid:latest"
-
-            # Ops server has persistent registry credentials in ~/.docker/config.json
-            docker pull "$IMAGE"
-
-            # --- Brad ---
-            echo "Deploying Brad..."
-            docker stop brad 2>/dev/null || true
-            docker rm brad 2>/dev/null || true
-            docker run -d \
-              --name brad \
-              --network platform \
-              --entrypoint bash \
-              --env-file /home/ops/brad/.env \
-              -v /home/ops/brad/persona:/app/personas/brad \
-              -v /home/ops/brad/secrets:/secrets:ro \
-              -v cheesoid-shared:/shared \
-              --restart unless-stopped \
-              "$IMAGE" \
-              /app/personas/brad/entrypoint.sh
-            sleep 3
-            docker exec brad curl -sf http://localhost:3000/up || { echo "Brad FAIL"; docker logs brad --tail 10; exit 1; }
-            echo "Brad: OK"
-
-            # --- Ask ---
-            echo "Deploying Ask..."
-            docker stop ask-agent 2>/dev/null || true
-            docker rm ask-agent 2>/dev/null || true
-            docker run -d \
-              --name ask-agent \
-              --network platform \
-              --env-file /home/ops/ask-agent/.env \
-              -v /home/ops/ask-agent/persona:/app/personas/ask \
-              -v cheesoid-shared:/shared \
-              --restart unless-stopped \
-              "$IMAGE"
-            sleep 3
-            docker exec ask-agent curl -sf http://localhost:3002/up || { echo "Ask FAIL"; docker logs ask-agent --tail 10; exit 1; }
-            echo "Ask: OK"
-
-            # --- EHSRE ---
-            echo "Deploying EHSRE..."
-            docker stop ehsre 2>/dev/null || true
-            docker rm ehsre 2>/dev/null || true
-            docker run -d \
-              --name ehsre \
-              --network platform \
-              --entrypoint bash \
-              --env-file /home/ops/ehsre/.env \
-              -v /home/ops/ehsre/persona:/app/personas/ehsre \
-              -v /home/ops/secrets:/secrets:ro \
-              -v cheesoid-shared:/shared \
-              --restart unless-stopped \
-              "$IMAGE" \
-              /app/personas/ehsre/entrypoint.sh
-            for i in $(seq 1 18); do
-              sleep 5
-              docker exec ehsre curl -sf http://localhost:3001/up && break
-              [ "$i" -eq 18 ] && { echo "EHSRE FAIL"; docker logs ehsre --tail 10; exit 1; }
-              echo "EHSRE not ready yet..."
-            done
-            echo "EHSRE: OK"
-
-            # --- Yip Yip EHSRE ---
-            echo "Deploying Yip Yip EHSRE..."
-            docker stop yipyip-ehsre 2>/dev/null || true
-            docker rm yipyip-ehsre 2>/dev/null || true
-            docker run -d \
-              --name yipyip-ehsre \
-              --network platform \
-              --entrypoint bash \
-              --env-file /home/ops/yipyip-ehsre/.env \
-              -v /home/ops/yipyip-ehsre/persona:/app/personas/yipyip-ehsre \
-              -v /home/ops/secrets/.yipyip-ehsre:/secrets:ro \
-              -v cheesoid-shared:/shared \
-              --restart unless-stopped \
-              "$IMAGE" \
-              /app/personas/yipyip-ehsre/entrypoint.sh
-            for i in $(seq 1 18); do
-              sleep 5
-              docker exec yipyip-ehsre curl -sf http://localhost:3002/up && break
-              [ "$i" -eq 18 ] && { echo "Yipyip FAIL"; docker logs yipyip-ehsre --tail 10; exit 1; }
-              echo "Yipyip not ready yet..."
-            done
-            echo "Yipyip EHSRE: OK"
-
-            # --- Margo ---
-            echo "Deploying Margo..."
-            docker stop margo 2>/dev/null || true
-            docker rm margo 2>/dev/null || true
-            docker run -d \
-              --name margo \
-              --network platform \
-              --entrypoint bash \
-              --env-file /home/ops/margo/.env \
-              -v /home/ops/margo/persona:/app/personas/margo \
-              -v /home/ops/margo/secrets:/secrets:ro \
-              -v cheesoid-shared:/shared \
-              --restart unless-stopped \
-              "$IMAGE" \
-              /app/personas/margo/entrypoint.sh
-            sleep 3
-            docker exec margo curl -sf http://localhost:3003/up || { echo "Margo FAIL"; docker logs margo --tail 10; exit 1; }
-            echo "Margo: OK"
-
-            # --- Verify all connections ---
-            echo ""
-            echo "=== Final verification ==="
-            sleep 5
-            for c in brad ask-agent ehsre margo yipyip-ehsre; do
-              port=$(docker exec "$c" printenv PORT)
-              health=$(docker exec "$c" curl -sf "http://localhost:$port/up" && echo " OK" || echo " FAIL")
-              last=$(docker logs --tail 1 "$c" 2>&1)
-              echo "$c: $health | $last"
-            done
-          REMOTE
+          curl -sf -X POST https://api.github.com/repos/noisefactorllc/scaffold/dispatches \
+            -H "Authorization: token ${{ steps.app-token.outputs.token }}" \
+            -H "Accept: application/vnd.github.v3+json" \
+            -d '{"event_type":"cheesoid-image-pushed","client_payload":{"sha":"${{ github.sha }}"}}'
