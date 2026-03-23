@@ -1,6 +1,9 @@
 FROM node:22-slim
 
-RUN apt-get update && apt-get install -y git curl jq && rm -rf /var/lib/apt/lists/*
+RUN apt-get update && apt-get install -y git curl jq python3 python3-pip && rm -rf /var/lib/apt/lists/*
+
+# Install Python dependencies for plugins
+RUN pip3 install --break-system-packages 'textstat>=0.7.3,<1.0.0' 'beautifulsoup4>=4.12.0,<5.0.0'
 
 # Install GitHub CLI (not in default Debian repos)
 RUN curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
