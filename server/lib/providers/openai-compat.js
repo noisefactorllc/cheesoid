@@ -175,13 +175,30 @@ export function createOpenAICompatProvider(config) {
             },
             body: JSON.stringify(body),
           })
-          break
         } catch (err) {
           const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
           lastErr = new Error(`OpenAI-compat fetch failed${cause}`)
+          response = null
+        }
+
+        // Retry on network errors and 429/5xx
+        if (response && response.status !== 429 && response.status < 500) break
+
+        if (response && response.status === 429) {
+          const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
+          const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
+          lastErr = new Error(`OpenAI-compat rate limited (429), retrying in ${Math.round(delay / 1000)}s`)
           if (attempt < MAX_RETRIES - 1) {
-            await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)))
+            await new Promise(r => setTimeout(r, delay))
+            continue
           }
+        } else if (response && response.status >= 500) {
+          const text = await response.text().catch(() => '')
+          lastErr = new Error(`OpenAI-compat server error ${response.status}: ${text}`)
+        }
+
+        if (!response && attempt < MAX_RETRIES - 1) {
+          await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)))
         }
       }
 
