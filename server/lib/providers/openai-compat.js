@@ -143,7 +143,66 @@ export function createOpenAICompatProvider(config) {
   const apiKey = config.api_key
 
   return {
-    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget }, onEvent) {
+    supportsIntentRouting: true,
+
+    async classifyIntent({ model, system, messages, tools }) {
+      const toolNames = tools.map(t => t.name)
+      const lastMsg = messages.filter(m => m.role === 'user').pop()
+      const lastContent = typeof lastMsg?.content === 'string'
+        ? lastMsg.content
+        : Array.isArray(lastMsg?.content)
+          ? lastMsg.content.map(b => b.content || '').join(' ')
+          : ''
+
+      const classifyPrompt = [
+        'You are an intent classifier. Given a conversation and available tools, determine whether the next response should use a tool or be a plain text reply.',
+        '',
+        `Available tools: ${toolNames.join(', ')}`,
+        '',
+        'Respond with ONLY a JSON object, no other text:',
+        '{"action":"tool"} — if the response requires calling one or more tools',
+        '{"action":"text"} — if the response is conversational and needs no tools',
+      ].join('\n')
+
+      // Use the last few messages for context, not the full history
+      const recentMessages = messages.slice(-6)
+      const classifyMessages = translateMessages(classifyPrompt, recentMessages)
+
+      try {
+        const response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify({
+            model,
+            max_tokens: 32,
+            messages: classifyMessages,
+            temperature: 0,
+          }),
+        })
+
+        if (!response.ok) return 'auto' // fall back to auto on error
+
+        const data = await response.json()
+        const text = data.choices?.[0]?.message?.content?.trim() || ''
+        try {
+          const parsed = JSON.parse(text)
+          if (parsed.action === 'tool') return 'required'
+          if (parsed.action === 'text') return 'none'
+        } catch {
+          // Check for substring match as fallback
+          if (text.includes('"tool"')) return 'required'
+          if (text.includes('"text"')) return 'none'
+        }
+      } catch {
+        // network error — fall back to auto
+      }
+      return 'auto'
+    },
+
+    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }, onEvent) {
       const openaiMessages = translateMessages(system, messages)
       const openaiTools = translateToolDefs(tools)
 
@@ -157,7 +216,7 @@ export function createOpenAICompatProvider(config) {
 
       if (openaiTools.length > 0) {
         body.tools = openaiTools
-        body.tool_choice = 'auto'
+        body.tool_choice = toolChoice || 'auto'
       }
 
       const MAX_RETRIES = 3

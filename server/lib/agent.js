@@ -10,15 +10,29 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   const maxTurns = config.maxTurns || 20
 
   while (iterations < maxTurns) {
+    // Intent routing for providers that support it (open models).
+    // Classifies whether the next turn needs tools or is conversational,
+    // then forces the appropriate mode to prevent tool-use hallucination.
+    let toolChoice = undefined
+    if (provider.supportsIntentRouting && tools.definitions.length > 0) {
+      toolChoice = await provider.classifyIntent({
+        model: config.model,
+        system: systemPrompt,
+        messages,
+        tools: tools.definitions,
+      })
+    }
+
     const result = await provider.streamMessage(
       {
         model: config.model,
         maxTokens: 16384,
         system: systemPrompt,
         messages,
-        tools: tools.definitions,
+        tools: toolChoice === 'none' ? [] : tools.definitions,
         serverTools: config.serverTools || [],
         thinkingBudget: config.thinkingBudget || null,
+        toolChoice: toolChoice === 'none' ? undefined : toolChoice,
       },
       onEvent,
     )
