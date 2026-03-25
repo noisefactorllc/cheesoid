@@ -5,6 +5,10 @@ max_budget_usd: 6
 
 tools: tools/tools.js
 
+server_tools:
+  - type: web_search_20250305
+    name: web_search
+
 chat:
   prompt: prompts/system.md
   thinking_budget: 16000

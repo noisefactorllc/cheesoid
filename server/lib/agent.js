@@ -27,6 +27,11 @@ async function streamOnce(client, params, onEvent) {
       } else if (block.type === 'tool_use') {
         contentBlocks.push({ type: 'tool_use', id: block.id, name: block.name, input: '' })
         onEvent({ type: 'tool_start', name: block.name })
+      } else if (block.type === 'server_tool_use') {
+        contentBlocks.push({ type: 'server_tool_use', id: block.id, name: block.name, input: '' })
+        onEvent({ type: 'tool_start', name: block.name, server: true })
+      } else if (block.type === 'web_search_tool_result') {
+        contentBlocks.push(block)
       } else if (block.type === 'thinking') {
         contentBlocks.push({ type: 'thinking', thinking: '', signature: '' })
       }
@@ -82,7 +87,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       max_tokens: 16384,
       system: systemPrompt,
       messages,
-      tools: tools.definitions,
+      tools: [...tools.definitions, ...(config.serverTools || [])],
       stream: true,
     }
 
@@ -113,7 +118,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
 
     // Finalize content blocks — parse tool input JSON
     const assistantContent = contentBlocks.map(block => {
-      if (block.type === 'tool_use') {
+      if (block.type === 'tool_use' || block.type === 'server_tool_use') {
         try {
           return { ...block, input: JSON.parse(block.input || '{}') }
         } catch {

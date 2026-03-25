@@ -299,6 +299,7 @@ export class Room {
         model: this.persona.config.model,
         maxTurns: this.persona.config.chat?.max_turns || 20,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
+        serverTools: this.persona.config.server_tools || [],
       }
 
       let assistantText = ''
@@ -415,6 +416,7 @@ export class Room {
         model: this.persona.config.model,
         maxTurns: 5,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
+        serverTools: this.persona.config.server_tools || [],
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not
