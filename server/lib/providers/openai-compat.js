@@ -159,20 +159,32 @@ export function createOpenAICompatProvider(config) {
         body.tools = openaiTools
       }
 
+      const MAX_RETRIES = 3
+      const RETRY_DELAY_MS = 2000
       let response
-      try {
-        response = await fetch(`${baseUrl}/chat/completions`, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': `Bearer ${apiKey}`,
-          },
-          body: JSON.stringify(body),
-        })
-      } catch (err) {
-        const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
-        throw new Error(`OpenAI-compat fetch failed${cause}`)
+      let lastErr
+
+      for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        try {
+          response = await fetch(`${baseUrl}/chat/completions`, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'Authorization': `Bearer ${apiKey}`,
+            },
+            body: JSON.stringify(body),
+          })
+          break
+        } catch (err) {
+          const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
+          lastErr = new Error(`OpenAI-compat fetch failed${cause}`)
+          if (attempt < MAX_RETRIES - 1) {
+            await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)))
+          }
+        }
       }
+
+      if (!response) throw lastErr
 
       if (!response.ok) {
         const text = await response.text().catch(() => '')
