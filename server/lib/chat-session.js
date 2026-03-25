@@ -4,6 +4,7 @@ import { State } from './state.js'
 import { ChatLog } from './chat-log.js'
 import { loadTools } from './tools.js'
 import { runAgent } from './agent.js'
+import { getProvider } from './providers/index.js'
 import { RoomClient } from './room-client.js'
 
 const IDLE_THOUGHT_INTERVAL = 30 * 60 * 1000 // 30 minutes, doubles each time
@@ -63,6 +64,7 @@ export class Room {
     await this.state.load()
     this.systemPrompt = await assemblePrompt(dir, config, plugins)
     this.tools = await loadTools(dir, config, this.memory, this.state, this)
+    this.provider = getProvider(config)
 
     // Replay recent history into agent context
     const recent = await this.chatLog.recent(MAX_HISTORY)
@@ -300,6 +302,7 @@ export class Room {
         maxTurns: this.persona.config.chat?.max_turns || 20,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
+        provider: this.provider,
       }
 
       let assistantText = ''
@@ -417,6 +420,7 @@ export class Room {
         maxTurns: 5,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
+        provider: this.provider,
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not

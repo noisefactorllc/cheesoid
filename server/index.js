@@ -27,16 +27,17 @@ app.get('/', async (req, res) => {
 
 app.use(express.static(join(__dirname, 'public'), { index: false }))
 
-if (!process.env.ANTHROPIC_API_KEY) {
-  console.error('Error: ANTHROPIC_API_KEY not set')
-  process.exit(1)
-}
-
 // Load persona
 const personaName = process.env.PERSONA || 'example'
 const personaDir = join(__dirname, '..', 'personas', personaName)
 const persona = await loadPersona(personaDir)
 console.log(`Loaded persona: ${persona.config.display_name} (${persona.config.name})`)
+
+const providerType = persona.config.provider || 'anthropic'
+if (providerType === 'anthropic' && !process.env.ANTHROPIC_API_KEY) {
+  console.error('Error: ANTHROPIC_API_KEY not set')
+  process.exit(1)
+}
 
 // Single room per persona
 app.locals.persona = persona
