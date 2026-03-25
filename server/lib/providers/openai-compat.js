@@ -159,14 +159,20 @@ export function createOpenAICompatProvider(config) {
         body.tools = openaiTools
       }
 
-      const response = await fetch(`${baseUrl}/chat/completions`, {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${apiKey}`,
-        },
-        body: JSON.stringify(body),
-      })
+      let response
+      try {
+        response = await fetch(`${baseUrl}/chat/completions`, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': `Bearer ${apiKey}`,
+          },
+          body: JSON.stringify(body),
+        })
+      } catch (err) {
+        const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
+        throw new Error(`OpenAI-compat fetch failed${cause}`)
+      }
 
       if (!response.ok) {
         const text = await response.text().catch(() => '')
