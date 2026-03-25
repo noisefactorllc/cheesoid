@@ -18,6 +18,14 @@ chat:
   max_turns: 20
   idle_timeout_minutes: 30
 
+## Uncomment to use an OpenAI-compatible provider instead of Anthropic:
+# provider: openai-compat
+# base_url: ${OPENAI_COMPAT_BASE_URL}
+# api_key: ${OPENAI_COMPAT_API_KEY}
+# model: your-model-name
+## Note: server_tools (web_search) are Anthropic-only and will be skipped.
+## Set OPENAI_COMPAT_BASE_URL and OPENAI_COMPAT_API_KEY in your environment.
+
 ## Uncomment if running behind an auth proxy (e.g. groundsquirrel):
 # auth_proxy: true
 
