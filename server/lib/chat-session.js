@@ -3,7 +3,7 @@ import { Memory } from './memory.js'
 import { State } from './state.js'
 import { ChatLog } from './chat-log.js'
 import { loadTools } from './tools.js'
-import { runAgent } from './agent.js'
+import { runAgent, runHybridAgent } from './agent.js'
 import { getProvider } from './providers/index.js'
 import { RoomClient } from './room-client.js'
 
@@ -64,6 +64,7 @@ export class Room {
     this._heartbeatTimer = null
     this._destroyed = false
     this._sessionStartHandled = false
+    this.orchestratorProvider = null
 
   }
 
@@ -78,6 +79,9 @@ export class Room {
     this.systemPrompt = await assemblePrompt(dir, config, plugins)
     this.tools = await loadTools(dir, config, this.memory, this.state, this)
     this.provider = getProvider(config)
+    this.orchestratorProvider = config.orchestrator
+      ? getProvider(config.orchestrator)
+      : null
 
     // Replay recent history into agent context
     const recent = await this.chatLog.recent(MAX_HISTORY)
@@ -311,11 +315,13 @@ export class Room {
       }
 
       const config = {
-        model: this.persona.config.model,
+        model: this.orchestratorProvider
+          ? this.persona.config.orchestrator.model
+          : this.persona.config.model,
         maxTurns: this.persona.config.chat?.max_turns || 20,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
-        provider: this.provider,
+        provider: this.orchestratorProvider || this.provider,
       }
 
       let assistantText = ''
@@ -345,7 +351,8 @@ export class Room {
       }
 
       const prompt = replaceTimestamp(this.systemPrompt)
-      const result = await runAgent(prompt, this.messages, this.tools, config, onEvent)
+      const agentFn = this.orchestratorProvider ? runHybridAgent : runAgent
+      const result = await agentFn(prompt, this.messages, this.tools, config, onEvent)
       this.messages = result.messages
 
       // Parse backchannel and thought tags from response
@@ -438,11 +445,13 @@ export class Room {
       ]
 
       const config = {
-        model: this.persona.config.model,
+        model: this.orchestratorProvider
+          ? this.persona.config.orchestrator.model
+          : this.persona.config.model,
         maxTurns: 5,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
-        provider: this.provider,
+        provider: this.orchestratorProvider || this.provider,
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not
@@ -464,7 +473,8 @@ export class Room {
       }
 
       const prompt = replaceTimestamp(this.systemPrompt)
-      const result = await runAgent(prompt, idleMessages, this.tools, config, onEvent)
+      const agentFn = this.orchestratorProvider ? runHybridAgent : runAgent
+      const result = await agentFn(prompt, idleMessages, this.tools, config, onEvent)
       this.messages = result.messages
       if (idleText) {
         this.recordHistory({ type: 'idle_thought', text: idleText })
@@ -550,6 +560,7 @@ export class Room {
     this._pendingRoom = null
     this.systemPrompt = null
     this._sessionStartHandled = false
+    this.orchestratorProvider = null
     this.broadcast({ type: 'reset' })
   }
 
