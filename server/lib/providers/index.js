@@ -1,6 +1,13 @@
 import { createAnthropicProvider } from './anthropic.js'
 import { createOpenAICompatProvider } from './openai-compat.js'
 
+export { ProviderRegistry } from './registry.js'
+export { resolveModel } from './resolve.js'
+
+/**
+ * Legacy provider factory — still works for direct provider creation.
+ * New code should use ProviderRegistry instead.
+ */
 export function getProvider(personaConfig) {
   const providerType = personaConfig.provider || 'anthropic'
 
