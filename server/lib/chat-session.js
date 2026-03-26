@@ -454,7 +454,7 @@ export class Room {
   }
 
   async _idleThought() {
-    if (this.busy || this.messages.length === 0) {
+    if (this.busy) {
       return false // skipped — timer wrapper handles restart
     }
 
