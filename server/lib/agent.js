@@ -85,6 +85,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
           tools: tools.definitions,
         })
       }
+      console.log(`[intent-router] toolChoice=${toolChoice} postToolResult=${isPostToolResult}`)
     }
 
     const result = await provider.streamMessage(
@@ -116,6 +117,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
           contentBlocks = contentBlocks.filter(b => b !== textBlock)
           contentBlocks.push(rescued)
           stopReason = 'tool_use'
+          onEvent({ type: 'tool_start', name: rescued.name })
         }
       }
     }
