@@ -1,6 +1,23 @@
 name: example
 display_name: "Example Agent"
-model: claude-sonnet-4-6
+
+## Provider registry — define named providers for use in model strings
+providers:
+  blueocean:
+    type: openai-compat
+    base_url: ${OPENAI_COMPAT_BASE_URL}
+    api_key: ${OPENAI_COMPAT_API_KEY}
+
+## Model strings use "model:provider" syntax. Claude models auto-detect.
+model: AltFast/Llama-4-Maverick-17B-128E-Instruct:blueocean
+
+## Orchestrator: can be a model string (new) or object (legacy)
+orchestrator: claude-sonnet-4-6
+
+fallback_models:
+  - AltFast/Meta-Llama-3.3-70B-Instruct:blueocean
+  - AltFast/Qwen3-32B:blueocean
+  - claude-haiku-4-5
 max_budget_usd: 6
 
 theme: gray
@@ -18,22 +35,15 @@ chat:
   max_turns: 20
   idle_timeout_minutes: 30
 
-## Uncomment to use an OpenAI-compatible provider instead of Anthropic:
+## Legacy style also works (no providers block needed):
 # provider: openai-compat
 # base_url: ${OPENAI_COMPAT_BASE_URL}
 # api_key: ${OPENAI_COMPAT_API_KEY}
-# model: AltFast/DeepSeek-V3.1
-## Note: server_tools (web_search) are Anthropic-only and will be skipped on openai-compat.
-## Set OPENAI_COMPAT_BASE_URL and OPENAI_COMPAT_API_KEY in your environment.
-
-## Uncomment to use hybrid mode (smart orchestrator + cheap executor):
+# model: AltFast/Maverick-17B-128E-Instruct
+#
 # orchestrator:
 #   provider: anthropic
 #   model: claude-sonnet-4-6
-## When orchestrator is set, the main provider/model becomes the executor.
-## The orchestrator handles reasoning and persona; tools execute directly.
-## Both orchestrator and executor are swappable — either can be anthropic
-## or openai-compat.
 
 ## Uncomment if running behind an auth proxy (e.g. groundsquirrel):
 # auth_proxy: true
