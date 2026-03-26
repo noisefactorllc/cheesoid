@@ -196,4 +196,62 @@ describe('runHybridAgent', () => {
     // classifyIntent should NOT have been called
     assert.equal(provider.classifyIntent.mock.callCount(), 0)
   })
+
+  it('executor fallback uses registry when available', async () => {
+    const orchestrator = makeProvider({
+      responses: [
+        {
+          contentBlocks: [{ type: 'tool_use', id: 'toolu_1', name: 'bash', input: { command: 'ls' } }],
+          stopReason: 'tool_use',
+          usage: { input_tokens: 100, output_tokens: 20 },
+        },
+        {
+          contentBlocks: [{ type: 'text', text: 'Done.' }],
+          stopReason: 'end_turn',
+          usage: { input_tokens: 100, output_tokens: 10 },
+        },
+      ],
+    })
+
+    // Executor that fails on first call
+    const failingExecutor = {
+      streamMessage: mock.fn(async () => {
+        throw new Error('rate limited')
+      }),
+    }
+    const workingExecutor = {
+      streamMessage: mock.fn(async (params, onEvent) => ({
+        contentBlocks: [{ type: 'text', text: 'done' }],
+        stopReason: 'end_turn',
+        usage: { input_tokens: 10, output_tokens: 5 },
+      })),
+    }
+
+    // Mock registry that returns different providers
+    const mockRegistry = {
+      resolve(modelString) {
+        if (modelString === 'failing-model') return { modelId: 'failing-model', provider: failingExecutor }
+        if (modelString === 'claude-haiku-4-5') return { modelId: 'claude-haiku-4-5', provider: workingExecutor }
+        return { modelId: modelString, provider: orchestrator }
+      },
+    }
+
+    const tools = makeTools([{ name: 'bash', description: 'Run a command' }])
+    const config = {
+      provider: orchestrator,
+      model: 'claude-sonnet-4-6',
+      executorProvider: failingExecutor,
+      executorModel: 'failing-model',
+      executorFallbackModels: ['claude-haiku-4-5'],
+      registry: mockRegistry,
+    }
+    const { events, onEvent } = collectEvents()
+
+    const result = await runHybridAgent('system', [{ role: 'user', content: 'list files' }], tools, config, onEvent)
+
+    // Failing executor was called, then working one succeeded
+    assert.equal(failingExecutor.streamMessage.mock.callCount(), 1)
+    assert.equal(workingExecutor.streamMessage.mock.callCount(), 1)
+    assert.ok(events.find(e => e.type === 'done'))
+  })
 })

@@ -293,40 +293,46 @@ const EXECUTOR_SYSTEM = `You are a tool executor. You receive tool results and m
 - Maximum 2 follow-up tool calls, then you MUST respond "done".`
 
 /**
- * Call executor streamMessage with fallback chain. Tries executorProvider
- * with each model in the chain until one succeeds. Falls back to
- * config.fallbackProviders if the primary provider fails entirely.
+ * Call executor streamMessage with fallback chain. Tries each model
+ * in order, resolving provider via registry. Falls back through the
+ * list until one succeeds.
  */
 async function callExecutorWithFallback(config, params, onEvent) {
   const models = [config.executorModel, ...(config.executorFallbackModels || [])]
-  const providers = [
-    { provider: config.executorProvider, models: models.filter(m => !m.includes(':')) },
-  ]
-
-  // Models with provider prefix (e.g. "claude-haiku-4-5:anthropic") use a different provider
-  for (const m of models) {
-    if (m.includes(':')) {
-      const [model, providerName] = m.split(':')
-      const fallbackProvider = (config.fallbackProviders || {})[providerName]
-      if (fallbackProvider) {
-        providers.push({ provider: fallbackProvider, models: [model] })
-      }
-    }
-  }
-
+  const registry = config.registry
   let lastErr
-  for (const { provider, models: providerModels } of providers) {
-    for (const model of providerModels) {
-      try {
-        const result = await provider.streamMessage({ ...params, model }, onEvent)
-        return { result, model }
-      } catch (err) {
-        lastErr = err
-        console.log(`[hybrid] executor ${model} failed: ${err.message}, trying next`)
+
+  for (const modelString of models) {
+    let provider, modelId
+    if (registry) {
+      const resolved = registry.resolve(modelString)
+      provider = resolved.provider
+      modelId = resolved.modelId
+    } else {
+      // Legacy/test path — no registry, use executorProvider directly
+      const { resolveModel } = await import('./providers/resolve.js')
+      const parsed = resolveModel(modelString)
+      modelId = parsed.modelId
+
+      if (parsed.providerName === 'anthropic') {
+        provider = (config.fallbackProviders || {}).anthropic || config.executorProvider
+      } else if (parsed.providerName && parsed.providerName !== 'anthropic') {
+        // Can't resolve named providers without registry — skip
+        continue
+      } else {
+        provider = config.executorProvider
       }
     }
+
+    try {
+      const result = await provider.streamMessage({ ...params, model: modelId }, onEvent)
+      return { result, model: modelId }
+    } catch (err) {
+      lastErr = err
+      console.log(`[hybrid] executor ${modelId} failed: ${err.message}, trying next`)
+    }
   }
-  throw lastErr
+  throw lastErr || new Error('All executor models failed')
 }
 
 /**
