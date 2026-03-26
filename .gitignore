@@ -4,3 +4,5 @@ node_modules/
 .DS_Store
 personas/*/memory/
 personas/*/history/
+docs/superpowers/specs/
+docs/superpowers/plans/

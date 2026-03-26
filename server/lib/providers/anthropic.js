@@ -76,10 +76,15 @@ export function createAnthropicProvider(_config) {
     async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget }, onEvent) {
       let activeModel = model
 
+      // Flatten hierarchical prompt arrays to a single string for Anthropic API
+      const systemPrompt = Array.isArray(system)
+        ? system.map(s => s.content || s).join('\n\n---\n\n')
+        : system
+
       const params = {
         model: activeModel,
         max_tokens: maxTokens,
-        system,
+        system: systemPrompt,
         messages,
         tools: [...tools, ...(serverTools || [])],
         stream: true,
