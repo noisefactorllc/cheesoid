@@ -14,6 +14,7 @@ export async function loadPersona(personaDir) {
 
   const config = yaml.load(raw)
   resolveEnvVars(config)
+  validateProviders(config)
 
   // Validate and degrade gracefully for openai-compat
   if (config.provider === 'openai-compat') {
@@ -32,7 +33,28 @@ export async function loadPersona(personaDir) {
  * Validate persona config for openai-compat provider.
  * Warns about unsupported features and sets approximation flags.
  */
+function validateProviders(config) {
+  if (!config.providers) return
+
+  const name = config.name || 'unknown'
+  for (const [providerName, providerConfig] of Object.entries(config.providers)) {
+    const type = providerConfig.type || 'openai-compat'
+    if (type === 'openai-compat') {
+      if (!providerConfig.base_url) {
+        throw new Error(`[${name}] provider "${providerName}" requires base_url`)
+      }
+      if (!providerConfig.api_key) {
+        throw new Error(`[${name}] provider "${providerName}" requires api_key`)
+      }
+    }
+    console.log(`[${name}] Registered provider: ${providerName} (${type})`)
+  }
+}
+
 function validateOpenAICompat(config) {
+  // Skip legacy validation if using new providers block
+  if (config.providers) return
+
   const name = config.name || 'unknown'
   config._degradationNotices = []
 
@@ -55,6 +77,12 @@ function validateOpenAICompat(config) {
 function validateOrchestrator(config) {
   const name = config.name || 'unknown'
   const orch = config.orchestrator
+
+  // New style: orchestrator is a model string like "claude-sonnet-4-6:anthropic"
+  if (typeof orch === 'string') {
+    console.log(`[${name}] Hybrid mode: orchestrator=${orch}, executor=${config.model}`)
+    return
+  }
 
   if (!orch.provider) {
     orch.provider = 'anthropic'
