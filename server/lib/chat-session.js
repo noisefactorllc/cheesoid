@@ -82,6 +82,7 @@ export class Room {
     // Replay recent history into agent context
     const recent = await this.chatLog.recent(MAX_HISTORY)
     if (recent.length > 0) {
+      this.messages.push({ role: 'user', content: '--- PREVIOUS SESSION TRANSCRIPT (for continuity — not a live conversation) ---' })
       for (const entry of recent) {
         const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '??:??'
         if (entry.type === 'assistant_message' || entry.type === 'idle_thought') {
@@ -94,7 +95,7 @@ export class Room {
         }
       }
       this.history = recent // also restore scrollback
-      this.messages.push({ role: 'user', content: '--- END OF PREVIOUS SESSION HISTORY ---' })
+      this.messages.push({ role: 'user', content: '--- END OF TRANSCRIPT — SESSION IS NOW LIVE ---' })
       console.log(`[${config.name}] Replayed ${recent.length} history entries`)
     }
 
