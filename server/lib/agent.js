@@ -243,11 +243,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   return { messages, usage: totalUsage }
 }
 
-const EXECUTOR_SYSTEM = `You are a tool executor. You receive tool results and decide what to do next.
-- If the task needs more tool calls, make them.
-- If you have enough data to report back, respond with a summary of all results.
-- Do NOT generate creative text, opinions, or persona. Just execute tools and summarize data.
-- Be concise. Return structured results.`
+const EXECUTOR_SYSTEM = `Summarize the tool results concisely. Report data, errors, and notable findings. Do not editorialize. Do not call tools.`
 
 /**
  * Call executor streamMessage with fallback chain. Tries executorProvider
@@ -427,83 +423,48 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     consecutiveToolCalls++
     totalToolTurns++
 
-    // --- EXECUTOR LOOP ---
-    // Instead of returning to the expensive orchestrator, let the cheap
-    // executor handle follow-up tool calls. The executor sees only tool
-    // results and tool definitions — no persona, no history.
+    // --- EXECUTOR SUMMARIZE ---
+    // The cheap executor summarizes tool results so the orchestrator doesn't
+    // have to parse raw output. One call, no tools, no looping.
+    // The summary replaces the raw tool result content, saving orchestrator
+    // input tokens on the next turn.
     if (executor && executorModel) {
-      const resultSummary = toolResults.map((r, i) => `Result ${i + 1}:\n${r.content}`).join('\n\n')
-      const executorMessages = [
-        { role: 'user', content: `The orchestrator called tools and got these results:\n\n${resultSummary}\n\nBased on these results, do you need to call any additional tools to complete the task? If yes, call them. If no, respond with a brief summary of the results.` },
-      ]
+      const rawResults = toolResults.map(r => r.content).join('\n\n')
 
-      let executorIterations = 0
-      const MAX_EXECUTOR_TURNS = 6
-
-      while (executorIterations < MAX_EXECUTOR_TURNS) {
-        const execParams = {
-          maxTokens: 4096,
-          system: EXECUTOR_SYSTEM,
-          messages: executorMessages,
-          tools: tools.definitions,
-          serverTools: [],
-          thinkingBudget: null,
-        }
-        const execOnEvent = (event) => {
-          if (event.type === 'tool_start' || event.type === 'tool_result') {
-            onEvent(event)
-          }
-        }
-
+      try {
         const { result: execResult, model: usedModel } = await callExecutorWithFallback(
-          config, execParams, execOnEvent,
+          config,
+          {
+            maxTokens: 1024,
+            system: EXECUTOR_SYSTEM,
+            messages: [{ role: 'user', content: rawResults }],
+            tools: [],
+            serverTools: [],
+            thinkingBudget: null,
+          },
+          () => {}, // no events to broadcast
         )
 
         executorUsage.input_tokens += execResult.usage.input_tokens
         executorUsage.output_tokens += execResult.usage.output_tokens
 
-        const execContent = execResult.contentBlocks.map(block => {
-          if (block.type === 'tool_use' && typeof block.input === 'string') {
-            try { return { ...block, input: JSON.parse(block.input || '{}') } }
-            catch { return { ...block, input: {} } }
-          }
-          return block
-        })
+        const summary = execResult.contentBlocks
+          .filter(b => b.type === 'text')
+          .map(b => b.text)
+          .join('')
 
-        const execToolCalls = execContent.filter(b => b.type === 'tool_use')
-        const execText = execContent.filter(b => b.type === 'text').map(b => b.text).join('')
+        console.log(`[hybrid] executor summarize (${usedModel}): ${execResult.usage.input_tokens} in / ${execResult.usage.output_tokens} out`)
 
-        console.log(`[hybrid] executor turn ${executorIterations + 1} (${usedModel}): ${execResult.usage.input_tokens} in / ${execResult.usage.output_tokens} out | tools=${execToolCalls.length} stop=${execResult.stopReason}`)
-
-        // Executor done — no more tool calls
-        if (execResult.stopReason !== 'tool_use' || execToolCalls.length === 0) {
-          break
+        // Replace raw results with summary in the last tool_result
+        if (summary && toolResults.length > 0) {
+          const lastResult = toolResults[toolResults.length - 1]
+          lastResult.content += `\n\n[executor summary: ${summary}]`
         }
-
-        // Executor wants more tools — execute them
-        executorMessages.push({ role: 'assistant', content: execContent })
-        const moreResults = []
-        for (const block of execToolCalls) {
-          let toolResult
-          try {
-            toolResult = await tools.execute(block.name, block.input)
-          } catch (err) {
-            toolResult = { output: `Tool error: ${err.message}`, is_error: true }
-          }
-          onEvent({ type: 'tool_result', name: block.name, input: block.input, result: toolResult })
-          moreResults.push({
-            type: 'tool_result',
-            tool_use_id: block.id,
-            content: JSON.stringify(toolResult),
-          })
-        }
-        executorMessages.push({ role: 'user', content: moreResults })
-        totalToolTurns++
-        executorIterations++
+      } catch (err) {
+        console.log(`[hybrid] executor summarize failed: ${err.message} — using raw results`)
       }
     }
 
-    // Feed all tool results (from orchestrator's tools + executor's tools) back to orchestrator
     messages.push({ role: 'user', content: toolResults })
     iterations++
   }

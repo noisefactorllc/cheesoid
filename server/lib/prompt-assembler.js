@@ -65,7 +65,10 @@ For older conversations beyond your context window, use the \`search_history\` t
 - Someone references a past conversation and you don't see it in context
 - You want to recall what was discussed on a particular topic
 - You're reflecting during idle time and want to review recent threads
-- You need to verify something that was said previously`
+- You need to verify something that was said previously
+
+## What Is Already In Your System Prompt
+Your SOUL.md (identity, voice, boundaries) is already loaded into this system prompt — do not try to read it with read_memory or read_file. Your memory files listed in auto_read are also already loaded above.`
 
 export function currentTimestamp() {
   const now = new Date()
