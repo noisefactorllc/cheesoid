@@ -323,10 +323,8 @@ export class Room {
         orchestratorModel = orchResolved.modelId
         orchestratorProvider = orchResolved.provider
 
-        // Executor is the main model
-        const execResolved = this.registry.resolve(this.persona.config.model)
-        executorModel = execResolved.modelId
-        executorProvider = execResolved.provider
+        // Executor — pass raw model string so callExecutorWithFallback can resolve via registry
+        executorModel = this.persona.config.model
       } else {
         const mainResolved = this.registry.resolve(this.persona.config.model)
         orchestratorModel = mainResolved.modelId
@@ -339,8 +337,8 @@ export class Room {
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
         provider: orchestratorProvider,
-        // Hybrid mode fields
-        executorProvider: hasOrchestrator ? executorProvider : null,
+        // Hybrid mode fields — executor resolved via registry in callExecutorWithFallback
+        executorProvider: null,
         executorModel: hasOrchestrator ? executorModel : null,
         executorFallbackModels: hasOrchestrator ? (this.persona.config.fallback_models || []) : [],
         registry: this.registry,
@@ -478,9 +476,7 @@ export class Room {
         orchestratorModel = orchResolved.modelId
         orchestratorProvider = orchResolved.provider
 
-        const execResolved = this.registry.resolve(this.persona.config.model)
-        executorModel = execResolved.modelId
-        executorProvider = execResolved.provider
+        executorModel = this.persona.config.model
       } else {
         const mainResolved = this.registry.resolve(this.persona.config.model)
         orchestratorModel = mainResolved.modelId
@@ -493,7 +489,7 @@ export class Room {
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
         provider: orchestratorProvider,
-        executorProvider: hasOrchestrator ? executorProvider : null,
+        executorProvider: null,
         executorModel: hasOrchestrator ? executorModel : null,
         executorFallbackModels: hasOrchestrator ? (this.persona.config.fallback_models || []) : [],
         registry: this.registry,

@@ -142,7 +142,6 @@ export function createOpenAICompatProvider(config) {
   const baseUrl = config.base_url.replace(/\/$/, '')
   const apiKey = config.api_key
   const useMaxCompletionTokens = config.max_completion_tokens === true
-
   return {
     supportsIntentRouting: true,
 
@@ -220,6 +219,7 @@ export function createOpenAICompatProvider(config) {
         stream: true,
         stream_options: { include_usage: true },
       }
+
 
       if (openaiTools.length > 0) {
         body.tools = openaiTools

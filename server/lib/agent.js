@@ -350,8 +350,12 @@ async function callExecutorWithFallback(config, params, onEvent) {
  */
 export async function runHybridAgent(systemPrompt, messages, tools, config, onEvent) {
   const orchestrator = config.provider
-  const executor = config.executorProvider
-  const executorModel = config.executorModel
+  // Resolve executor from registry if available, fall back to config.executorProvider
+  const executorResolved = config.registry && config.executorModel
+    ? config.registry.resolve(config.executorModel)
+    : null
+  const executor = executorResolved?.provider || config.executorProvider
+  const executorModel = executorResolved?.modelId || config.executorModel
   let totalUsage = { input_tokens: 0, output_tokens: 0 }
   let executorUsage = { input_tokens: 0, output_tokens: 0 }
   let iterations = 0
