@@ -147,6 +147,8 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       }
     }
 
+    repairToolUseGaps(messages)
+
     const result = await provider.streamMessage(
       {
         model: config.model,
@@ -241,6 +243,47 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
 
   onEvent({ type: 'done', usage: totalUsage })
   return { messages, usage: totalUsage }
+}
+
+/**
+ * Repair orphaned tool_use blocks in message history. If an assistant message
+ * contains tool_use blocks but the next message doesn't have matching
+ * tool_results, insert synthetic results to prevent API 400 errors.
+ */
+function repairToolUseGaps(messages) {
+  for (let i = 0; i < messages.length - 1; i++) {
+    const msg = messages[i]
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
+
+    const toolUseIds = msg.content
+      .filter(b => b.type === 'tool_use')
+      .map(b => b.id)
+    if (toolUseIds.length === 0) continue
+
+    const next = messages[i + 1]
+    const existingResultIds = new Set()
+    if (next && next.role === 'user' && Array.isArray(next.content)) {
+      for (const b of next.content) {
+        if (b.type === 'tool_result') existingResultIds.add(b.tool_use_id)
+      }
+    }
+
+    const missing = toolUseIds.filter(id => !existingResultIds.has(id))
+    if (missing.length === 0) continue
+
+    console.log(`[hybrid] repairing ${missing.length} orphaned tool_use blocks at message ${i}`)
+    const syntheticResults = missing.map(id => ({
+      type: 'tool_result',
+      tool_use_id: id,
+      content: '{"output":"[tool result unavailable — previous session interrupted]","is_error":true}',
+    }))
+
+    if (next && next.role === 'user' && Array.isArray(next.content)) {
+      next.content.push(...syntheticResults)
+    } else {
+      messages.splice(i + 1, 0, { role: 'user', content: syntheticResults })
+    }
+  }
 }
 
 const EXECUTOR_SYSTEM = `You are a tool executor. You receive tool results and may need to call follow-up tools.
@@ -345,6 +388,10 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
         }
       }
     }
+
+    // Safety: ensure no orphaned tool_use blocks without matching tool_results
+    // (can happen if a previous turn crashed mid-execution)
+    repairToolUseGaps(messages)
 
     // Orchestrator call — full context
     const result = await orchestrator.streamMessage(
