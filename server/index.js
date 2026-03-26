@@ -33,8 +33,10 @@ const personaDir = join(__dirname, '..', 'personas', personaName)
 const persona = await loadPersona(personaDir)
 console.log(`Loaded persona: ${persona.config.display_name} (${persona.config.name})`)
 
-const providerType = persona.config.provider || 'anthropic'
-if (providerType === 'anthropic' && !process.env.ANTHROPIC_API_KEY) {
+// Only require ANTHROPIC_API_KEY if anthropic is actually needed
+// (no providers block and no non-anthropic provider set)
+const needsAnthropic = !persona.config.providers && (persona.config.provider || 'anthropic') === 'anthropic'
+if (needsAnthropic && !process.env.ANTHROPIC_API_KEY) {
   console.error('Error: ANTHROPIC_API_KEY not set')
   process.exit(1)
 }

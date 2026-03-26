@@ -3,20 +3,20 @@ display_name: "Example Agent"
 
 ## Provider registry — define named providers for use in model strings
 providers:
-  blueocean:
+  openai:
     type: openai-compat
-    base_url: ${OPENAI_COMPAT_BASE_URL}
-    api_key: ${OPENAI_COMPAT_API_KEY}
+    base_url: ${OPENAI_BASE_URL}
+    api_key: ${OPENAI_API_KEY}
+    max_completion_tokens: true
 
 ## Model strings use "model:provider" syntax. Claude models auto-detect.
-model: AltFast/Llama-4-Maverick-17B-128E-Instruct:blueocean
+model: gpt-5.4-mini:openai
 
-## Orchestrator: can be a model string (new) or object (legacy)
-orchestrator: claude-sonnet-4-6
+## Orchestrator (gpt-5.4 — latest)
+orchestrator: gpt-5.4:openai
 
 fallback_models:
-  - AltFast/Meta-Llama-3.3-70B-Instruct:blueocean
-  - AltFast/Qwen3-32B:blueocean
+  - gpt-5.4-nano:openai
   - claude-haiku-4-5
 max_budget_usd: 6
 

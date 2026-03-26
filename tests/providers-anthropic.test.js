@@ -3,11 +3,17 @@ import assert from 'node:assert/strict'
 import { createAnthropicProvider } from '../server/lib/providers/anthropic.js'
 
 describe('createAnthropicProvider', () => {
-  it('throws when ANTHROPIC_API_KEY is not set', () => {
+  it('throws when ANTHROPIC_API_KEY is not set on first streamMessage call', async () => {
     const original = process.env.ANTHROPIC_API_KEY
     delete process.env.ANTHROPIC_API_KEY
     try {
-      assert.throws(() => createAnthropicProvider({}), /ANTHROPIC_API_KEY/)
+      const provider = createAnthropicProvider({})
+      // Creation succeeds (lazy) — but streaming throws
+      assert.equal(typeof provider.streamMessage, 'function')
+      await assert.rejects(
+        () => provider.streamMessage({ model: 'test', maxTokens: 1, system: '', messages: [], tools: [] }, () => {}),
+        /ANTHROPIC_API_KEY/,
+      )
     } finally {
       if (original) process.env.ANTHROPIC_API_KEY = original
     }

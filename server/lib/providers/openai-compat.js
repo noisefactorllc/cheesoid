@@ -141,6 +141,7 @@ export function createOpenAICompatProvider(config) {
 
   const baseUrl = config.base_url.replace(/\/$/, '')
   const apiKey = config.api_key
+  const useMaxCompletionTokens = config.max_completion_tokens === true
 
   return {
     supportsIntentRouting: true,
@@ -182,7 +183,7 @@ export function createOpenAICompatProvider(config) {
           },
           body: JSON.stringify({
             model,
-            max_tokens: 32,
+            [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: 32,
             messages: classifyMessages,
             temperature: 0,
           }),
@@ -214,7 +215,7 @@ export function createOpenAICompatProvider(config) {
 
       const body = {
         model,
-        max_tokens: maxTokens,
+        [useMaxCompletionTokens ? 'max_completion_tokens' : 'max_tokens']: maxTokens,
         messages: openaiMessages,
         stream: true,
         stream_options: { include_usage: true },

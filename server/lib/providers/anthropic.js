@@ -70,10 +70,9 @@ async function streamOnce(client, params, onEvent) {
 }
 
 export function createAnthropicProvider(_config) {
-  const client = getClient()
-
   return {
     async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget }, onEvent) {
+      const client = getClient()
       let activeModel = model
 
       // Flatten hierarchical prompt arrays to a single string for Anthropic API

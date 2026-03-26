@@ -4,7 +4,7 @@ import { State } from './state.js'
 import { ChatLog } from './chat-log.js'
 import { loadTools } from './tools.js'
 import { runAgent, runHybridAgent } from './agent.js'
-import { getProvider } from './providers/index.js'
+import { ProviderRegistry } from './providers/index.js'
 import { RoomClient } from './room-client.js'
 
 function replaceTimestamp(prompt) {
@@ -64,7 +64,6 @@ export class Room {
     this._heartbeatTimer = null
     this._destroyed = false
     this._sessionStartHandled = false
-    this.orchestratorProvider = null
 
   }
 
@@ -78,14 +77,7 @@ export class Room {
     await this.state.load()
     this.systemPrompt = await assemblePrompt(dir, config, plugins)
     this.tools = await loadTools(dir, config, this.memory, this.state, this)
-    this.provider = getProvider(config)
-    this.orchestratorProvider = config.orchestrator
-      ? getProvider(config.orchestrator)
-      : null
-    // Anthropic fallback provider for hybrid executor chain
-    this.anthropicFallbackProvider = this.orchestratorProvider
-      ? getProvider({ provider: 'anthropic' })
-      : null
+    this.registry = new ProviderRegistry(config)
 
     // Replay recent history into agent context
     const recent = await this.chatLog.recent(MAX_HISTORY)
@@ -318,19 +310,40 @@ export class Room {
         this.recordHistory({ type: 'user_message', name, text })
       }
 
-      const config = {
-        model: this.orchestratorProvider
-          ? this.persona.config.orchestrator.model
-          : this.persona.config.model,
+      // Determine orchestrator vs direct mode
+      const hasOrchestrator = this.persona.config.orchestrator != null
+      let orchestratorModel, orchestratorProvider, executorModel, executorProvider
+
+      if (hasOrchestrator) {
+        // Orchestrator model: string (new) or object with .model (legacy)
+        const orchModelStr = typeof this.persona.config.orchestrator === 'string'
+          ? this.persona.config.orchestrator
+          : this.persona.config.orchestrator.model
+        const orchResolved = this.registry.resolve(orchModelStr)
+        orchestratorModel = orchResolved.modelId
+        orchestratorProvider = orchResolved.provider
+
+        // Executor is the main model
+        const execResolved = this.registry.resolve(this.persona.config.model)
+        executorModel = execResolved.modelId
+        executorProvider = execResolved.provider
+      } else {
+        const mainResolved = this.registry.resolve(this.persona.config.model)
+        orchestratorModel = mainResolved.modelId
+        orchestratorProvider = mainResolved.provider
+      }
+
+      const agentConfig = {
+        model: orchestratorModel,
         maxTurns: this.persona.config.chat?.max_turns || 20,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
-        provider: this.orchestratorProvider || this.provider,
-        // Hybrid mode: executor provider for tool-result processing
-        executorProvider: this.orchestratorProvider ? this.provider : null,
-        executorModel: this.orchestratorProvider ? this.persona.config.model : null,
-        executorFallbackModels: this.orchestratorProvider ? (this.persona.config.fallback_models || []) : [],
-        fallbackProviders: this.anthropicFallbackProvider ? { anthropic: this.anthropicFallbackProvider } : {},
+        provider: orchestratorProvider,
+        // Hybrid mode fields
+        executorProvider: hasOrchestrator ? executorProvider : null,
+        executorModel: hasOrchestrator ? executorModel : null,
+        executorFallbackModels: hasOrchestrator ? (this.persona.config.fallback_models || []) : [],
+        registry: this.registry,
       }
 
       let assistantText = ''
@@ -351,7 +364,7 @@ export class Room {
       }
 
       // Session start: force open models to read memory/state before first response
-      if (!this._sessionStartHandled && this.persona.config.provider === 'openai-compat') {
+      if (!this._sessionStartHandled && orchestratorProvider.supportsIntentRouting) {
         this._sessionStartHandled = true
         this.messages.push({
           role: 'user',
@@ -360,8 +373,8 @@ export class Room {
       }
 
       const prompt = replaceTimestamp(this.systemPrompt)
-      const agentFn = this.orchestratorProvider ? runHybridAgent : runAgent
-      const result = await agentFn(prompt, this.messages, this.tools, config, onEvent)
+      const agentFn = hasOrchestrator ? runHybridAgent : runAgent
+      const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
 
       // Parse backchannel and thought tags from response
@@ -453,18 +466,37 @@ export class Room {
         { role: 'user', content: IDLE_THOUGHT_PROMPT },
       ]
 
-      const config = {
-        model: this.orchestratorProvider
-          ? this.persona.config.orchestrator.model
-          : this.persona.config.model,
+      // Determine orchestrator vs direct mode
+      const hasOrchestrator = this.persona.config.orchestrator != null
+      let orchestratorModel, orchestratorProvider, executorModel, executorProvider
+
+      if (hasOrchestrator) {
+        const orchModelStr = typeof this.persona.config.orchestrator === 'string'
+          ? this.persona.config.orchestrator
+          : this.persona.config.orchestrator.model
+        const orchResolved = this.registry.resolve(orchModelStr)
+        orchestratorModel = orchResolved.modelId
+        orchestratorProvider = orchResolved.provider
+
+        const execResolved = this.registry.resolve(this.persona.config.model)
+        executorModel = execResolved.modelId
+        executorProvider = execResolved.provider
+      } else {
+        const mainResolved = this.registry.resolve(this.persona.config.model)
+        orchestratorModel = mainResolved.modelId
+        orchestratorProvider = mainResolved.provider
+      }
+
+      const agentConfig = {
+        model: orchestratorModel,
         maxTurns: 5,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
-        provider: this.orchestratorProvider || this.provider,
-        executorProvider: this.orchestratorProvider ? this.provider : null,
-        executorModel: this.orchestratorProvider ? this.persona.config.model : null,
-        executorFallbackModels: this.orchestratorProvider ? (this.persona.config.fallback_models || []) : [],
-        fallbackProviders: this.anthropicFallbackProvider ? { anthropic: this.anthropicFallbackProvider } : {},
+        provider: orchestratorProvider,
+        executorProvider: hasOrchestrator ? executorProvider : null,
+        executorModel: hasOrchestrator ? executorModel : null,
+        executorFallbackModels: hasOrchestrator ? (this.persona.config.fallback_models || []) : [],
+        registry: this.registry,
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not
@@ -486,8 +518,8 @@ export class Room {
       }
 
       const prompt = replaceTimestamp(this.systemPrompt)
-      const agentFn = this.orchestratorProvider ? runHybridAgent : runAgent
-      const result = await agentFn(prompt, idleMessages, this.tools, config, onEvent)
+      const agentFn = hasOrchestrator ? runHybridAgent : runAgent
+      const result = await agentFn(prompt, idleMessages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
       if (idleText) {
         this.recordHistory({ type: 'idle_thought', text: idleText })
@@ -573,7 +605,6 @@ export class Room {
     this._pendingRoom = null
     this.systemPrompt = null
     this._sessionStartHandled = false
-    this.orchestratorProvider = null
     this.broadcast({ type: 'reset' })
   }
 
