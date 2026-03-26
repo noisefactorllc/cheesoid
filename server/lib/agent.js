@@ -107,7 +107,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   let consecutiveToolCalls = 0
   let rescueCount = 0
   let totalToolTurns = 0
-  let rescueFailed = false // true once rescue rate is too high
+  let rescueFailed = false
 
   while (iterations < maxTurns) {
     // Intent routing for providers that support it (open models).
@@ -118,7 +118,6 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
         lastMsg.content.some(b => b.type === 'tool_result')
 
       if (rescueFailed) {
-        // Model can't do structured tool calling — text only for rest of run
         toolChoice = 'none'
       } else if (consecutiveToolCalls >= MAX_CONSECUTIVE_TOOLS) {
         toolChoice = 'none'
@@ -126,7 +125,6 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       } else if (isPostToolResult) {
         toolChoice = 'auto'
       } else {
-        // Tier 1: Heuristic fast-path
         const lastUserText = getLastUserText(messages)
         const heuristic = classifyIntentHeuristic(lastUserText)
 
@@ -134,7 +132,6 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
           toolChoice = heuristic
           console.log(`[intent-router] toolChoice=${toolChoice} (heuristic) text="${(lastUserText || '').slice(0, 40)}"`)
         } else {
-          // Tier 2: LLM classifier
           toolChoice = await provider.classifyIntent({
             model: config.model,
             system: systemPrompt,
@@ -181,7 +178,6 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
           rescueCount++
           console.log(`[intent-router] rescued narrated tool call: ${rescued.name} (rescue #${rescueCount})`)
 
-          // Check rescue rate — if too high, model can't do tool calling
           if (totalToolTurns >= 4 && rescueCount / totalToolTurns > 0.5) {
             console.log(`[intent-router] rescue rate ${rescueCount}/${totalToolTurns} > 50% — disabling tools for rest of run`)
             rescueFailed = true
@@ -229,7 +225,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       })
     }
 
-    // Inject correction feedback after rescue — append to tool results to avoid consecutive user messages
+    // Correction feedback after rescue
     const wasRescued = contentBlocks.some(b => b.type === 'tool_use' && b.id?.startsWith('toolu_rescued_'))
     if (wasRescued && provider.supportsIntentRouting) {
       toolResults.push({
@@ -240,7 +236,6 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     }
 
     messages.push({ role: 'user', content: toolResults })
-
     iterations++
   }
 
@@ -248,15 +243,31 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   return { messages, usage: totalUsage }
 }
 
+const EXECUTOR_SYSTEM = `You are a tool executor. You receive tool results and decide what to do next.
+- If the task needs more tool calls, make them.
+- If you have enough data to report back, respond with a summary of all results.
+- Do NOT generate creative text, opinions, or persona. Just execute tools and summarize data.
+- Be concise. Return structured results.`
+
 /**
- * Run the hybrid agent loop. Same structure as runAgent, but intended for
- * configurations where the orchestrator (smart model) handles both reasoning
- * and tool dispatch — tools execute directly via tools.execute() with no
- * separate executor LLM call.
+ * Hybrid agent loop. The orchestrator (smart, expensive model) handles
+ * reasoning, persona, and planning. The executor (cheap model) handles
+ * the tool-result loop — processing results and deciding if more tools
+ * are needed. Tools execute directly via tools.execute().
+ *
+ * Flow:
+ * 1. Orchestrator: sees full context, emits tool calls + text
+ * 2. Tools: execute directly
+ * 3. Executor: sees tool results + tool definitions (NO persona/history),
+ *    decides if more tools needed, loops until done
+ * 4. Orchestrator: sees all accumulated results, generates final response
  */
 export async function runHybridAgent(systemPrompt, messages, tools, config, onEvent) {
-  const { provider } = config
+  const orchestrator = config.provider
+  const executor = config.executorProvider
+  const executorModel = config.executorModel
   let totalUsage = { input_tokens: 0, output_tokens: 0 }
+  let executorUsage = { input_tokens: 0, output_tokens: 0 }
   let iterations = 0
   const maxTurns = config.maxTurns || 20
 
@@ -267,9 +278,9 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let rescueFailed = false
 
   while (iterations < maxTurns) {
-    // Intent routing for providers that support it (open models).
+    // Intent routing — applies when orchestrator is openai-compat
     let toolChoice = undefined
-    if (provider.supportsIntentRouting && tools.definitions.length > 0) {
+    if (orchestrator.supportsIntentRouting && tools.definitions.length > 0) {
       const lastMsg = messages[messages.length - 1]
       const isPostToolResult = Array.isArray(lastMsg?.content) &&
         lastMsg.content.some(b => b.type === 'tool_result')
@@ -287,24 +298,19 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
         if (heuristic !== 'uncertain') {
           toolChoice = heuristic
-          console.log(`[hybrid] toolChoice=${toolChoice} (heuristic) text="${(lastUserText || '').slice(0, 40)}"`)
         } else {
-          toolChoice = await provider.classifyIntent({
+          toolChoice = await orchestrator.classifyIntent({
             model: config.model,
             system: systemPrompt,
             messages,
             tools: tools.definitions,
           })
-          console.log(`[hybrid] toolChoice=${toolChoice} (llm-classifier)`)
         }
-      }
-
-      if (!rescueFailed && toolChoice !== undefined) {
-        console.log(`[hybrid] final=${toolChoice} postToolResult=${isPostToolResult} consecutiveTools=${consecutiveToolCalls}`)
       }
     }
 
-    const result = await provider.streamMessage(
+    // Orchestrator call — full context
+    const result = await orchestrator.streamMessage(
       {
         model: config.model,
         maxTokens: 16384,
@@ -322,8 +328,12 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     totalUsage.input_tokens += usage.input_tokens
     totalUsage.output_tokens += usage.output_tokens
 
-    // Rescue narrated tool calls
-    if (stopReason !== 'tool_use' && provider.supportsIntentRouting && toolChoice !== 'none' && !rescueFailed) {
+    const toolUseCount = contentBlocks.filter(b => b.type === 'tool_use').length
+    const hasText = contentBlocks.some(b => b.type === 'text' && b.text)
+    console.log(`[hybrid] orchestrator turn ${iterations + 1}: ${usage.input_tokens} in / ${usage.output_tokens} out | tools=${toolUseCount} text=${hasText} stop=${stopReason}`)
+
+    // Rescue narrated tool calls (openai-compat orchestrator only)
+    if (stopReason !== 'tool_use' && orchestrator.supportsIntentRouting && toolChoice !== 'none' && !rescueFailed) {
       const textBlock = contentBlocks.find(b => b.type === 'text')
       if (textBlock) {
         const rescued = _rescueNarratedToolCall(textBlock.text, tools.definitions)
@@ -333,10 +343,8 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
           stopReason = 'tool_use'
           onEvent({ type: 'tool_start', name: rescued.name })
           rescueCount++
-          console.log(`[hybrid] rescued narrated tool call: ${rescued.name} (rescue #${rescueCount})`)
 
           if (totalToolTurns >= 4 && rescueCount / totalToolTurns > 0.5) {
-            console.log(`[hybrid] rescue rate ${rescueCount}/${totalToolTurns} > 50% — disabling tools for rest of run`)
             rescueFailed = true
           }
         }
@@ -357,46 +365,113 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
     messages.push({ role: 'assistant', content: assistantContent })
 
+    // No tool use — orchestrator is done
     if (stopReason !== 'tool_use') {
       consecutiveToolCalls = 0
       break
     }
-    consecutiveToolCalls++
-    totalToolTurns++
 
-    // Execute tools directly (no executor LLM)
-    const toolResults = []
+    // Execute tools directly
+    let toolResults = []
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
-      let result
+      let toolResult
       try {
-        result = await tools.execute(block.name, block.input)
+        toolResult = await tools.execute(block.name, block.input)
       } catch (err) {
-        result = { output: `Tool error: ${err.message}`, is_error: true }
+        toolResult = { output: `Tool error: ${err.message}`, is_error: true }
       }
-      onEvent({ type: 'tool_result', name: block.name, input: block.input, result })
+      onEvent({ type: 'tool_result', name: block.name, input: block.input, result: toolResult })
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: JSON.stringify(result),
+        content: JSON.stringify(toolResult),
       })
     }
+    consecutiveToolCalls++
+    totalToolTurns++
 
-    // Correction feedback after rescue
-    const wasRescued = contentBlocks.some(b => b.type === 'tool_use' && b.id?.startsWith('toolu_rescued_'))
-    if (wasRescued && provider.supportsIntentRouting) {
-      toolResults.push({
-        type: 'tool_result',
-        tool_use_id: 'system_correction',
-        content: '[system: You narrated a tool call instead of using function calling. The call was executed, but you must use the function calling API directly.]',
-      })
+    // --- EXECUTOR LOOP ---
+    // Instead of returning to the expensive orchestrator, let the cheap
+    // executor handle follow-up tool calls. The executor sees only tool
+    // results and tool definitions — no persona, no history.
+    if (executor && executorModel) {
+      const resultSummary = toolResults.map((r, i) => `Result ${i + 1}:\n${r.content}`).join('\n\n')
+      const executorMessages = [
+        { role: 'user', content: `The orchestrator called tools and got these results:\n\n${resultSummary}\n\nBased on these results, do you need to call any additional tools to complete the task? If yes, call them. If no, respond with a brief summary of the results.` },
+      ]
+
+      let executorIterations = 0
+      const MAX_EXECUTOR_TURNS = 6
+
+      while (executorIterations < MAX_EXECUTOR_TURNS) {
+        const execResult = await executor.streamMessage(
+          {
+            model: executorModel,
+            maxTokens: 4096,
+            system: EXECUTOR_SYSTEM,
+            messages: executorMessages,
+            tools: tools.definitions,
+            serverTools: [],
+            thinkingBudget: null,
+          },
+          // Don't broadcast executor thinking — only tool events
+          (event) => {
+            if (event.type === 'tool_start' || event.type === 'tool_result') {
+              onEvent(event)
+            }
+          },
+        )
+
+        executorUsage.input_tokens += execResult.usage.input_tokens
+        executorUsage.output_tokens += execResult.usage.output_tokens
+
+        const execContent = execResult.contentBlocks.map(block => {
+          if (block.type === 'tool_use' && typeof block.input === 'string') {
+            try { return { ...block, input: JSON.parse(block.input || '{}') } }
+            catch { return { ...block, input: {} } }
+          }
+          return block
+        })
+
+        const execToolCalls = execContent.filter(b => b.type === 'tool_use')
+        const execText = execContent.filter(b => b.type === 'text').map(b => b.text).join('')
+
+        console.log(`[hybrid] executor turn ${executorIterations + 1}: ${execResult.usage.input_tokens} in / ${execResult.usage.output_tokens} out | tools=${execToolCalls.length} stop=${execResult.stopReason}`)
+
+        // Executor done — no more tool calls
+        if (execResult.stopReason !== 'tool_use' || execToolCalls.length === 0) {
+          break
+        }
+
+        // Executor wants more tools — execute them
+        executorMessages.push({ role: 'assistant', content: execContent })
+        const moreResults = []
+        for (const block of execToolCalls) {
+          let toolResult
+          try {
+            toolResult = await tools.execute(block.name, block.input)
+          } catch (err) {
+            toolResult = { output: `Tool error: ${err.message}`, is_error: true }
+          }
+          onEvent({ type: 'tool_result', name: block.name, input: block.input, result: toolResult })
+          moreResults.push({
+            type: 'tool_result',
+            tool_use_id: block.id,
+            content: JSON.stringify(toolResult),
+          })
+        }
+        executorMessages.push({ role: 'user', content: moreResults })
+        totalToolTurns++
+        executorIterations++
+      }
     }
 
+    // Feed all tool results (from orchestrator's tools + executor's tools) back to orchestrator
     messages.push({ role: 'user', content: toolResults })
-
     iterations++
   }
 
-  console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | tools executed: ${totalToolTurns} (direct)`)
-  onEvent({ type: 'done', usage: totalUsage })
+  console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | executor: ${executorUsage.input_tokens} in / ${executorUsage.output_tokens} out | tools: ${totalToolTurns}`)
+  onEvent({ type: 'done', usage: { input_tokens: totalUsage.input_tokens + executorUsage.input_tokens, output_tokens: totalUsage.output_tokens + executorUsage.output_tokens } })
   return { messages, usage: totalUsage }
 }

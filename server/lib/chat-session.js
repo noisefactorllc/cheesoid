@@ -322,6 +322,9 @@ export class Room {
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
         provider: this.orchestratorProvider || this.provider,
+        // Hybrid mode: executor provider for tool-result processing
+        executorProvider: this.orchestratorProvider ? this.provider : null,
+        executorModel: this.orchestratorProvider ? this.persona.config.model : null,
       }
 
       let assistantText = ''
@@ -452,6 +455,8 @@ export class Room {
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
         provider: this.orchestratorProvider || this.provider,
+        executorProvider: this.orchestratorProvider ? this.provider : null,
+        executorModel: this.orchestratorProvider ? this.persona.config.model : null,
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not
