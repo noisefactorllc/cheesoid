@@ -1,4 +1,58 @@
 /**
+ * Attempt to extract a tool call from text that was narrated instead of
+ * being emitted as a structured tool_calls response. Returns a tool_use
+ * block if found, null otherwise.
+ */
+export function _rescueNarratedToolCall(text, toolDefs) {
+  const trimmed = text.trim()
+  const validNames = new Set(toolDefs.map(t => t.name))
+
+  // Strategy 1: try to parse the whole text as JSON
+  try {
+    const obj = JSON.parse(trimmed)
+    if (obj.name && validNames.has(obj.name) && typeof obj.arguments === 'object') {
+      return {
+        type: 'tool_use',
+        id: `toolu_rescued_${Date.now()}`,
+        name: obj.name,
+        input: obj.arguments,
+      }
+    }
+  } catch {
+    // not clean JSON, try extraction
+  }
+
+  // Strategy 2: find first JSON object in text using balanced brace matching
+  const startIdx = trimmed.indexOf('{')
+  if (startIdx === -1) return null
+
+  let depth = 0
+  let endIdx = -1
+  for (let i = startIdx; i < trimmed.length; i++) {
+    if (trimmed[i] === '{') depth++
+    else if (trimmed[i] === '}') depth--
+    if (depth === 0) { endIdx = i; break }
+  }
+  if (endIdx === -1) return null
+
+  try {
+    const obj = JSON.parse(trimmed.slice(startIdx, endIdx + 1))
+    if (obj.name && validNames.has(obj.name) && typeof obj.arguments === 'object') {
+      return {
+        type: 'tool_use',
+        id: `toolu_rescued_${Date.now()}`,
+        name: obj.name,
+        input: obj.arguments,
+      }
+    }
+  } catch {
+    // couldn't parse
+  }
+
+  return null
+}
+
+/**
  * Run the agent loop. Calls onEvent with SSE events as it goes.
  * Delegates streaming to the provider (Anthropic, OpenAI-compat, etc.).
  * Handles tool execution and message assembly.
@@ -15,12 +69,22 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     // then forces the appropriate mode to prevent tool-use hallucination.
     let toolChoice = undefined
     if (provider.supportsIntentRouting && tools.definitions.length > 0) {
-      toolChoice = await provider.classifyIntent({
-        model: config.model,
-        system: systemPrompt,
-        messages,
-        tools: tools.definitions,
-      })
+      // Fast path: after tool results, let the model decide freely (auto).
+      // It needs to either call more tools or summarize — both are valid.
+      const lastMsg = messages[messages.length - 1]
+      const isPostToolResult = Array.isArray(lastMsg?.content) &&
+        lastMsg.content.some(b => b.type === 'tool_result')
+
+      if (isPostToolResult) {
+        toolChoice = 'auto'
+      } else {
+        toolChoice = await provider.classifyIntent({
+          model: config.model,
+          system: systemPrompt,
+          messages,
+          tools: tools.definitions,
+        })
+      }
     }
 
     const result = await provider.streamMessage(
@@ -37,9 +101,24 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       onEvent,
     )
 
-    const { contentBlocks, stopReason, usage } = result
+    let { contentBlocks, stopReason, usage } = result
     totalUsage.input_tokens += usage.input_tokens
     totalUsage.output_tokens += usage.output_tokens
+
+    // Rescue narrated tool calls: if the model wrote a tool call as text
+    // (e.g. {"name":"bash","arguments":{...}}) instead of using the structured
+    // tool_calls API, extract it and convert to a real tool_use block.
+    if (stopReason !== 'tool_use' && provider.supportsIntentRouting) {
+      const textBlock = contentBlocks.find(b => b.type === 'text')
+      if (textBlock) {
+        const rescued = _rescueNarratedToolCall(textBlock.text, tools.definitions)
+        if (rescued) {
+          contentBlocks = contentBlocks.filter(b => b !== textBlock)
+          contentBlocks.push(rescued)
+          stopReason = 'tool_use'
+        }
+      }
+    }
 
     // Finalize content blocks — parse tool input JSON (for providers that return raw strings)
     const assistantContent = contentBlocks.map(block => {

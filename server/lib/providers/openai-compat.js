@@ -252,17 +252,18 @@ export function createOpenAICompatProvider(config) {
           const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
           const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
           lastErr = new Error(`OpenAI-compat rate limited (429), retrying in ${Math.round(delay / 1000)}s`)
-          if (attempt < MAX_RETRIES - 1) {
-            await new Promise(r => setTimeout(r, delay))
-            continue
-          }
         } else if (response && response.status >= 500) {
           const text = await response.text().catch(() => '')
           lastErr = new Error(`OpenAI-compat server error ${response.status}: ${text}`)
         }
 
-        if (!response && attempt < MAX_RETRIES - 1) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)))
+        // Delay before retry (network errors, 429, 5xx all get backoff)
+        if (attempt < MAX_RETRIES - 1) {
+          const retryAfter = response?.status === 429
+            ? parseInt(response.headers.get('retry-after') || '0', 10)
+            : 0
+          const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
+          await new Promise(r => setTimeout(r, delay))
         }
       }
 
