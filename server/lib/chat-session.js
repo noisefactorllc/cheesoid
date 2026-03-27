@@ -245,6 +245,20 @@ export class Room {
     }
   }
 
+  _autoNudgeMentionedAgents(publicText, backchannelText) {
+    if (!publicText) return
+
+    const knownAgents = (this.persona.config.agents || []).map(a => a.name)
+    if (knownAgents.length === 0) return
+
+    for (const agentName of knownAgents) {
+      const mentionPattern = new RegExp(`\\b${agentName}\\b`, 'i')
+      if (!mentionPattern.test(publicText)) continue
+      if (backchannelText && mentionPattern.test(backchannelText)) continue
+      this.addBackchannelMessage('system', `Hey ${agentName}, you were just addressed in chat.`)
+    }
+  }
+
   relayAgentEvent(name, event) {
     // Relay visiting agent tool events to SSE clients.
     // Does NOT interact with the agent loop, this.messages, or the busy flag.
@@ -439,6 +453,8 @@ export class Room {
           // Broadcast backchannel to SSE — visiting agents' RoomClients pick it up, UI ignores it
           this.broadcast({ type: 'backchannel', name: this.persona.config.display_name, text: backchannelText })
         }
+        // Auto-nudge agents mentioned in public text
+        this._autoNudgeMentionedAgents(publicText, backchannelText)
       } else {
         const client = this.roomClients.get(this._pendingRoom)
         if (client) {

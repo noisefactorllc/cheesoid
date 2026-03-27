@@ -205,4 +205,46 @@ describe('Multi-agent room', () => {
     assert.ok(!processMessageCalled, 'non-trigger backchannel should not call _processMessage')
     assert.ok(host.room.messages.length > msgCountBefore, 'message should be appended to context')
   })
+
+  it('auto-nudges mentioned agent via backchannel', async () => {
+    const hostDir = await createTestPersona('nudge-host', 'NudgeHost', {
+      agents: [{ name: 'Brad', secret: 'brad-secret' }],
+    })
+    const host = await startCheesoid(hostDir, 4011)
+    servers.push(host)
+
+    const backchannelSends = []
+    host.room.addBackchannelMessage = (name, text, opts) => {
+      backchannelSends.push({ name, text, ...opts })
+    }
+
+    host.room._pendingRoom = 'home'
+    host.room._autoNudgeMentionedAgents('Hey Brad, what do you think about this?', '')
+    assert.equal(backchannelSends.length, 1)
+    assert.ok(backchannelSends[0].text.includes('Brad'))
+  })
+
+  it('skips auto-nudge when agent already mentioned in backchannel', async () => {
+    const host = servers[servers.length - 1]
+    const backchannelSends = []
+    host.room.addBackchannelMessage = (name, text, opts) => {
+      backchannelSends.push({ name, text, ...opts })
+    }
+
+    host.room._pendingRoom = 'home'
+    host.room._autoNudgeMentionedAgents('Hey Brad, check this out', 'Brad, this is yours to handle')
+    assert.equal(backchannelSends.length, 0, 'should skip — Brad already addressed in backchannel')
+  })
+
+  it('does not nudge names that are not known agents', async () => {
+    const host = servers[servers.length - 1]
+    const backchannelSends = []
+    host.room.addBackchannelMessage = (name, text, opts) => {
+      backchannelSends.push({ name, text, ...opts })
+    }
+
+    host.room._pendingRoom = 'home'
+    host.room._autoNudgeMentionedAgents('Hey random person, what do you think?', '')
+    assert.equal(backchannelSends.length, 0, 'should not nudge unknown names')
+  })
 })
