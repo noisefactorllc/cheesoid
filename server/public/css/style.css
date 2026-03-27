@@ -359,7 +359,6 @@ main {
   width: min(80%, 160px);
   height: auto;
   color: var(--hf-accent);
-  filter: drop-shadow(0 0 20px var(--hf-accent));
 }
 
 .about-details {
