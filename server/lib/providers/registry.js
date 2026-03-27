@@ -92,7 +92,8 @@ export class ProviderRegistry {
    * Uses resolveModel() for parsing, then looks up the provider.
    */
   resolve(modelString) {
-    const { modelId, providerName } = resolveModel(modelString)
+    const knownProviders = new Set([...this._configs.keys(), 'anthropic'])
+    const { modelId, providerName } = resolveModel(modelString, knownProviders)
     const name = providerName || this._defaultName
     return { modelId, provider: this.get(name) }
   }
