@@ -246,73 +246,42 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
 }
 
 /**
- * Repair orphaned tool_use/tool_result blocks in message history.
- *
- * 1. If an assistant message has tool_use blocks but the next message lacks
- *    matching tool_results, insert synthetic results.
- * 2. If a user message has tool_result blocks referencing tool_use_ids not
- *    present in the preceding assistant message, strip them.
+ * Repair orphaned tool_use blocks in message history. If an assistant message
+ * contains tool_use blocks but the next message doesn't have matching
+ * tool_results, insert synthetic results to prevent API 400 errors.
  */
 function repairToolUseGaps(messages) {
-  for (let i = 0; i < messages.length; i++) {
+  for (let i = 0; i < messages.length - 1; i++) {
     const msg = messages[i]
+    if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
 
-    // Direction 1: orphaned tool_use → add synthetic tool_results
-    if (msg.role === 'assistant' && Array.isArray(msg.content) && i < messages.length - 1) {
-      const toolUseIds = msg.content
-        .filter(b => b.type === 'tool_use')
-        .map(b => b.id)
-      if (toolUseIds.length === 0) continue
+    const toolUseIds = msg.content
+      .filter(b => b.type === 'tool_use')
+      .map(b => b.id)
+    if (toolUseIds.length === 0) continue
 
-      const next = messages[i + 1]
-      const existingResultIds = new Set()
-      if (next && next.role === 'user' && Array.isArray(next.content)) {
-        for (const b of next.content) {
-          if (b.type === 'tool_result') existingResultIds.add(b.tool_use_id)
-        }
-      }
-
-      const missing = toolUseIds.filter(id => !existingResultIds.has(id))
-      if (missing.length > 0) {
-        console.log(`[repair] adding ${missing.length} synthetic tool_results at message ${i}`)
-        const syntheticResults = missing.map(id => ({
-          type: 'tool_result',
-          tool_use_id: id,
-          content: '{"output":"[tool result unavailable — previous session interrupted]","is_error":true}',
-        }))
-
-        if (next && next.role === 'user' && Array.isArray(next.content)) {
-          next.content.push(...syntheticResults)
-        } else {
-          messages.splice(i + 1, 0, { role: 'user', content: syntheticResults })
-        }
+    const next = messages[i + 1]
+    const existingResultIds = new Set()
+    if (next && next.role === 'user' && Array.isArray(next.content)) {
+      for (const b of next.content) {
+        if (b.type === 'tool_result') existingResultIds.add(b.tool_use_id)
       }
     }
 
-    // Direction 2: orphaned tool_results → strip results with no matching tool_use
-    if (msg.role === 'user' && Array.isArray(msg.content)) {
-      const prev = i > 0 ? messages[i - 1] : null
-      const prevToolUseIds = new Set()
-      if (prev && prev.role === 'assistant' && Array.isArray(prev.content)) {
-        for (const b of prev.content) {
-          if (b.type === 'tool_use') prevToolUseIds.add(b.id)
-        }
-      }
+    const missing = toolUseIds.filter(id => !existingResultIds.has(id))
+    if (missing.length === 0) continue
 
-      const orphanedResults = msg.content.filter(
-        b => b.type === 'tool_result' && !prevToolUseIds.has(b.tool_use_id)
-      )
-      if (orphanedResults.length > 0) {
-        console.log(`[repair] stripping ${orphanedResults.length} orphaned tool_results at message ${i}`)
-        msg.content = msg.content.filter(
-          b => b.type !== 'tool_result' || prevToolUseIds.has(b.tool_use_id)
-        )
-        // If the message is now empty, remove it entirely
-        if (msg.content.length === 0) {
-          messages.splice(i, 1)
-          i--
-        }
-      }
+    console.log(`[hybrid] repairing ${missing.length} orphaned tool_use blocks at message ${i}`)
+    const syntheticResults = missing.map(id => ({
+      type: 'tool_result',
+      tool_use_id: id,
+      content: '{"output":"[tool result unavailable — previous session interrupted]","is_error":true}',
+    }))
+
+    if (next && next.role === 'user' && Array.isArray(next.content)) {
+      next.content.push(...syntheticResults)
+    } else {
+      messages.splice(i + 1, 0, { role: 'user', content: syntheticResults })
     }
   }
 }
