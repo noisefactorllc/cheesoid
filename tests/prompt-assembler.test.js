@@ -169,6 +169,22 @@ describe('assemblePrompt', () => {
     assert.ok(result.includes('invite them'))
   })
 
+  it('office-invite guard warns against inviting users already in home', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'I am the soul.',
+      'prompts/system.md': 'System context.',
+    })
+
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test Agent',
+      chat: { prompt: 'prompts/system.md' },
+      office_url: 'https://test.example.com',
+    })
+
+    assert.ok(result.includes('[home/...]'))
+    assert.ok(result.includes('do not invite'))
+  })
+
   it('works when plugins is undefined or empty', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Soul.',

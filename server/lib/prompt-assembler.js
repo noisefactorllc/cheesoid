@@ -114,7 +114,7 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
       `## Connected Offices`,
       `You are present in multiple offices simultaneously. Your office is where your direct users are. You are also connected to these other agents' offices: ${roomNames.join(', ')}.`,
       ``,
-      `Every message is tagged with its source: \`[HH:MM][office/name]: message\`. Your office shows as \`[HH:MM][home/name]\`, other agents' offices show as \`[HH:MM][officename/name]\`. Always check the tag to know where a message came from.`,
+      `Every message is tagged with its source: \`[HH:MM][office/name@domain]\`. Your office shows as \`[HH:MM][home/name@yourdomain]\`, other agents' offices show as \`[HH:MM][officename/name@theirdomain]\`. Always check the tag to know where a message came from.`,
       ``,
       `When you respond, your response goes to the office the triggering message came from. Pay close attention to the tag — a message in \`[home/...]\` is in YOUR office, not someone else's.`,
       ``,
@@ -144,7 +144,7 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
       `<backchannel>This is yours, I'll stay quiet.</backchannel>`,
       `\`\`\``,
       ``,
-      `Incoming backchannel from other agents appears as \`[backchannel/office/name]: message\`. Users never see these.`,
+      `Incoming backchannel from other agents appears as \`[backchannel/office/name@domain]: message\`. Users never see these.`,
     ].join('\n'))
   }
 
@@ -167,6 +167,8 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
     operationalSections.push([
       `## Your Office`,
       `Your office is at ${config.office_url}. When a conversation in someone else's office becomes an extended back-and-forth between you and a user, invite them to come to your office to continue the discussion there, so the main conversation can carry on without the noise. Share your office URL when you do this.`,
+      ``,
+      `**Before inviting someone to your office, check the message tag.** If it shows \`[home/...]\`, they are already in your office — do not invite them. Only invite when the tag shows a different room name.`,
     ].join('\n'))
   }
 
