@@ -4,6 +4,34 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>Cheesoid — Persistent AI Personas</title>
+  <link rel="preload" href="https://fonts.noisefactor.io/fonts/nunito/Nunito-Blank.woff2" as="font" type="font/woff2" crossorigin>
+  <link rel="preload" href="https://fonts.noisefactor.io/fonts/noto-sans-mono/NotoSansMono-Blank.woff2" as="font" type="font/woff2" crossorigin>
+  <style>
+    @font-face {
+      font-family: 'Nunito Blank';
+      src: url('https://fonts.noisefactor.io/fonts/nunito/Nunito-Blank.woff2') format('woff2');
+      font-weight: 100 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: 'Noto Sans Mono Blank';
+      src: url('https://fonts.noisefactor.io/fonts/noto-sans-mono/NotoSansMono-Blank.woff2') format('woff2');
+      font-weight: 100 900;
+      font-display: block;
+    }
+    @font-face {
+      font-family: Nunito;
+      src: url('https://fonts.noisefactor.io/fonts/nunito/Nunito[wght].woff2') format('woff2');
+      font-weight: 100 900;
+      font-display: swap;
+    }
+    @font-face {
+      font-family: 'Noto Sans Mono';
+      src: url('https://fonts.noisefactor.io/fonts/noto-sans-mono/NotoSansMono[wdth,wght].woff2') format('woff2');
+      font-weight: 100 900;
+      font-display: swap;
+    }
+  </style>
   <link rel="stylesheet" href="https://handfish.noisefactor.io/0.9.0/styles/index.css">
   <link rel="stylesheet" href="https://handfish.noisefactor.io/0.9.0/styles/themes/neutral.css">
   <style>
@@ -144,11 +172,12 @@
       background: var(--hf-accent);
     }
 
-    .loop-node:nth-of-type(2) .loop-dot::before { background: oklch(65% 0.22 285); }
-    .loop-node:nth-of-type(3) .loop-dot::before { background: oklch(68% 0.18 250); }
-    .loop-node:nth-of-type(4) .loop-dot::before { background: oklch(72% 0.18 155); }
-    .loop-node:nth-of-type(5) .loop-dot::before { background: oklch(80% 0.16 90); }
-    .loop-node:nth-of-type(6) .loop-dot::before { background: oklch(75% 0.18 55); }
+    .loop-node:nth-of-type(2) .loop-dot::before { background: oklch(65% 0.20 330); }
+    .loop-node:nth-of-type(3) .loop-dot::before { background: oklch(65% 0.22 285); }
+    .loop-node:nth-of-type(4) .loop-dot::before { background: oklch(68% 0.18 250); }
+    .loop-node:nth-of-type(5) .loop-dot::before { background: oklch(72% 0.18 155); }
+    .loop-node:nth-of-type(6) .loop-dot::before { background: oklch(80% 0.16 90); }
+    .loop-node:nth-of-type(7) .loop-dot::before { background: oklch(75% 0.18 55); }
 
     .loop-content h3 {
       font-family: var(--hf-font-family-mono);
@@ -158,11 +187,12 @@
       margin: 0 0 var(--hf-space-1) 0;
     }
 
-    .loop-node:nth-of-type(2) .loop-content h3 { color: oklch(65% 0.22 285); }
-    .loop-node:nth-of-type(3) .loop-content h3 { color: oklch(68% 0.18 250); }
-    .loop-node:nth-of-type(4) .loop-content h3 { color: oklch(72% 0.18 155); }
-    .loop-node:nth-of-type(5) .loop-content h3 { color: oklch(80% 0.16 90); }
-    .loop-node:nth-of-type(6) .loop-content h3 { color: oklch(75% 0.18 55); }
+    .loop-node:nth-of-type(2) .loop-content h3 { color: oklch(65% 0.20 330); }
+    .loop-node:nth-of-type(3) .loop-content h3 { color: oklch(65% 0.22 285); }
+    .loop-node:nth-of-type(4) .loop-content h3 { color: oklch(68% 0.18 250); }
+    .loop-node:nth-of-type(5) .loop-content h3 { color: oklch(72% 0.18 155); }
+    .loop-node:nth-of-type(6) .loop-content h3 { color: oklch(80% 0.16 90); }
+    .loop-node:nth-of-type(7) .loop-content h3 { color: oklch(75% 0.18 55); }
 
     .loop-content p {
       font-size: var(--hf-size-lg);
@@ -303,6 +333,13 @@
       <div class="loop-node">
         <div class="loop-dot"></div>
         <div class="loop-content">
+          <h3>Backchatter</h3>
+          <p>Cheesoids coordinate privately to resolve duties and social cues.</p>
+        </div>
+      </div>
+      <div class="loop-node">
+        <div class="loop-dot"></div>
+        <div class="loop-content">
           <h3>Memory</h3>
           <p>Multiple levels of memory. Context carries naturally and seamlessly.</p>
         </div>
@@ -325,7 +362,7 @@
         <div class="loop-dot"></div>
         <div class="loop-content">
           <h3>Action</h3>
-          <p>Webhooks, custom tools. Doesn't need a conversation to take action.</p>
+          <p>Webhooks, idle thoughts, and wakeup cycle for taking independent action.</p>
         </div>
       </div>
       <div class="loop-node">
