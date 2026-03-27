@@ -267,4 +267,33 @@ describe('Multi-agent room', () => {
     assert.equal(bcSends.length, 1)
     assert.ok(bcSends[0].text.includes('brad'))
   })
+
+  it('full coordination flow: mention → auto-nudge → backchannel delivered', async () => {
+    const hostDir = await createTestPersona('coord-host', 'CoordHost', {
+      agents: [{ name: 'Helper', secret: 'helper-secret' }],
+    })
+    const host = await startCheesoid(hostDir, 4013)
+    servers.push(host)
+
+    // Track all backchannel messages added
+    const bcMessages = []
+    const origAddBc = host.room.addBackchannelMessage.bind(host.room)
+    host.room.addBackchannelMessage = (name, text, opts) => {
+      bcMessages.push({ name, text, ...opts })
+      origAddBc(name, text, opts)
+    }
+
+    // Simulate the post-response auto-nudge flow
+    host.room._pendingRoom = 'home'
+    host.room._autoNudgeMentionedAgents('Helper, can you look into this?', '')
+
+    assert.equal(bcMessages.length, 1)
+    assert.equal(bcMessages[0].name, 'system')
+    assert.ok(bcMessages[0].text.includes('Helper'))
+
+    // Verify it was appended to agent context
+    const lastMsg = host.room.messages[host.room.messages.length - 1]
+    assert.ok(lastMsg.content.includes('backchannel'))
+    assert.ok(lastMsg.content.includes('Helper'))
+  })
 })
