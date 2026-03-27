@@ -185,6 +185,38 @@ describe('assemblePrompt', () => {
     assert.ok(result.includes('do not invite'))
   })
 
+  it('includes moderation instructions when agents are configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+
+    const prompt = await assemblePrompt(dir, {
+      name: 'host',
+      display_name: 'Host',
+      chat: { prompt: 'prompts/system.md' },
+      agents: [{ name: 'Brad', secret: 's' }],
+    }, [])
+    assert.ok(prompt.includes('consider whether to handle it yourself'))
+    assert.ok(prompt.includes('delegate'))
+  })
+
+  it('includes social cue backchannel instructions when rooms are configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+
+    const prompt = await assemblePrompt(dir, {
+      name: 'visitor',
+      display_name: 'Visitor',
+      chat: { prompt: 'prompts/system.md' },
+      rooms: [{ name: 'brad', url: 'http://localhost:9999', secret: 's' }],
+    }, [])
+    assert.ok(prompt.includes('address another agent in your public response'))
+    assert.ok(prompt.includes('backchannel'))
+  })
+
   it('works when plugins is undefined or empty', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Soul.',
