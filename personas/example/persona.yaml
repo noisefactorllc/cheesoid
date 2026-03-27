@@ -3,23 +3,22 @@ display_name: "Example Agent"
 
 ## Provider registry — define named providers for use in model strings
 providers:
-  blueocean:
+  my-provider:
     type: openai-compat
-    base_url: ${OPENAI_COMPAT_BASE_URL}
-    api_key: ${OPENAI_COMPAT_API_KEY}
+    base_url: https://api.example.com/v1
+    api_key: ${MY_PROVIDER_API_KEY}
   openai:
     type: openai-responses
     base_url: ${OPENAI_BASE_URL}
     api_key: ${OPENAI_API_KEY}
     reasoning_effort: high
 
-model: AltFast/Llama-4-Maverick-17B-128E-Instruct:blueocean
+model: some-fast-model:my-provider
 
 orchestrator: gpt-5.4:openai
 
 fallback_models:
-  - AltFast/Meta-Llama-3.3-70B-Instruct:blueocean
-  - AltFast/Qwen3-32B:blueocean
+  - some-other-model:my-provider
   - gpt-5.4-mini:openai
   - claude-haiku-4-5
 max_budget_usd: 6
@@ -41,9 +40,9 @@ chat:
 
 ## Legacy style also works (no providers block needed):
 # provider: openai-compat
-# base_url: ${OPENAI_COMPAT_BASE_URL}
-# api_key: ${OPENAI_COMPAT_API_KEY}
-# model: AltFast/Maverick-17B-128E-Instruct
+# base_url: https://api.example.com/v1
+# api_key: ${MY_PROVIDER_API_KEY}
+# model: some-fast-model
 #
 # orchestrator:
 #   provider: anthropic
