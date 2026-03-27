@@ -185,6 +185,34 @@ describe('RoomClient', () => {
     assert.ok(result.error)
   })
 
+  it('sendBackchannel passes trigger flag in payload', async () => {
+    const http = await import('node:http')
+    let postedBody = null
+    const server = http.createServer((req, res) => {
+      let data = ''
+      req.on('data', chunk => { data += chunk })
+      req.on('end', () => {
+        postedBody = JSON.parse(data)
+        res.writeHead(200, { 'Content-Type': 'application/json' })
+        res.end('{"status":"sent"}')
+      })
+    })
+    await new Promise(r => server.listen(0, r))
+    const port = server.address().port
+
+    const client = new RoomClient(
+      { name: 'test', url: `http://localhost:${port}`, secret: 's' },
+      { agentName: 'Agent', onMessage: () => {} },
+    )
+
+    await client.sendBackchannel('delegate this', { trigger: true })
+    server.close()
+
+    assert.equal(postedBody.backchannel, true)
+    assert.equal(postedBody.trigger, true)
+    assert.equal(postedBody.message, 'delegate this')
+  })
+
   it('ignores presence/reset/error events from remote rooms', () => {
     const received = []
     const client = new RoomClient({

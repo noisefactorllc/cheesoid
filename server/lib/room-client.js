@@ -83,8 +83,8 @@ export class RoomClient {
     })
   }
 
-  async sendBackchannel(text) {
-    return this._post({ message: text, name: this.agentName, backchannel: true })
+  async sendBackchannel(text, options = {}) {
+    return this._post({ message: text, name: this.agentName, backchannel: true, ...options })
   }
 
   async sendMessage(text) {
