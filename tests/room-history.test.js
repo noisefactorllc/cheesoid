@@ -49,15 +49,6 @@ describe('Room history', () => {
     assert.equal(room.history[49].text, 'msg 59')
   })
 
-  it('clears history on reset', async () => {
-    const { Room } = await import('../server/lib/chat-session.js')
-    const room = new Room(mockPersona())
-
-    room.recordHistory({ type: 'user_message', name: 'alice', text: 'hello' })
-    room.reset()
-    assert.equal(room.history.length, 0)
-  })
-
   it('getScrollback returns history array', async () => {
     const { Room } = await import('../server/lib/chat-session.js')
     const room = new Room(mockPersona())

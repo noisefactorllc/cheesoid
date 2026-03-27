@@ -24,8 +24,8 @@ fallback_models:
   - claude-haiku-4-5
 max_budget_usd: 6
 
-theme: gray
-data_theme: gray-dark
+theme: synthwave
+data_theme: synthwave
 
 tools: tools/tools.js
 

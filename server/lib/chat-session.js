@@ -622,17 +622,6 @@ export class Room {
     }
   }
 
-  reset() {
-    this._clearIdleTimer()
-    this.messages = []
-    this.history = []
-    this._messageQueue = []
-    this._pendingRoom = null
-    this.systemPrompt = null
-    this._sessionStartHandled = false
-    this.broadcast({ type: 'reset' })
-  }
-
   destroy() {
     this._destroyed = true
     this._clearIdleTimer()

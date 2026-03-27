@@ -15,6 +15,24 @@ body {
 }
 
 /* Sidebar */
+#sidebar-header {
+  display: flex;
+  align-items: center;
+  gap: var(--hf-space-3);
+}
+
+#sidebar-header h1 {
+  margin: 0;
+}
+
+#sidebar-logo {
+  width: 56px;
+  height: 56px;
+  flex-shrink: 0;
+  color: var(--hf-accent);
+  margin: -4px;
+}
+
 #sidebar {
   width: 240px;
   background: var(--hf-bg-surface);
@@ -77,11 +95,6 @@ body {
   display: flex;
   flex-direction: column;
   min-width: 0;
-}
-
-header {
-  padding: var(--hf-space-2) var(--hf-space-4);
-  background: var(--hf-bg-surface);
 }
 
 main {
@@ -386,10 +399,6 @@ main {
   }
 
   #send-btn {
-    padding: var(--hf-space-2) var(--hf-space-3);
-  }
-
-  header {
     padding: var(--hf-space-2) var(--hf-space-3);
   }
 

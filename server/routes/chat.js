@@ -59,10 +59,4 @@ router.post('/api/chat/event', (req, res) => {
   res.json({ status: 'relayed' })
 })
 
-router.post('/api/chat/reset', (req, res) => {
-  const { room } = req.app.locals
-  room.reset()
-  res.json({ status: 'reset' })
-})
-
 export default router

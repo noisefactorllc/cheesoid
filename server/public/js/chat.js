@@ -5,7 +5,6 @@ const chat = document.getElementById('chat')
 const messages = document.getElementById('messages')
 const input = document.getElementById('input')
 const sendBtn = document.getElementById('send-btn')
-const resetBtn = document.getElementById('reset-btn')
 const personaName = document.getElementById('persona-name')
 const presenceStatus = document.getElementById('presence-status')
 const participantsEl = document.getElementById('participants')
@@ -349,15 +348,6 @@ function handleEvent(e) {
       updateParticipants(event.participants)
       break
 
-    case 'reset':
-      messages.innerHTML = ''
-      assistantEl = null
-      assistantBuffer = ''
-      thinkingEl = null
-      lastSender = null
-      visitorStreams.clear()
-      break
-
     case 'system': {
       const el = document.createElement('div')
       el.className = 'system-message'
@@ -442,7 +432,6 @@ input.addEventListener('keydown', (e) => {
 })
 
 sendBtn.addEventListener('click', send)
-resetBtn.addEventListener('click', reset)
 
 async function send() {
   const text = input.value.trim()
@@ -471,14 +460,6 @@ async function send() {
   sending = false
   sendBtn.disabled = false
   input.focus()
-}
-
-async function reset() {
-  await fetch('/api/chat/reset', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({}),
-  })
 }
 
 function formatTime(timestamp) {
