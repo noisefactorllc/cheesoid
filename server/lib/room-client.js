@@ -169,6 +169,11 @@ export class RoomClient {
       return
     }
 
+    // Webhooks are for the host agent only — don't relay to connected agents
+    if (event.type === 'user_message' && event.name === 'webhook') {
+      return
+    }
+
     if (['presence', 'reset', 'error'].includes(event.type)) {
       return
     }
