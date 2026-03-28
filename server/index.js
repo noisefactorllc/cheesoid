@@ -5,7 +5,7 @@ import { readFile } from 'node:fs/promises'
 import { loadPersona } from './lib/persona.js'
 import { createAuthMiddleware } from './lib/auth.js'
 import { runStartupChecks } from './lib/startup-checks.js'
-import { Room } from './lib/chat-session.js'
+import { RoomManager } from './lib/room-manager.js'
 import chatRouter from './routes/chat.js'
 import healthRouter from './routes/health.js'
 import webhookRouter from './routes/webhook.js'
@@ -41,10 +41,13 @@ if (needsAnthropic && !process.env.ANTHROPIC_API_KEY) {
   process.exit(1)
 }
 
-// Single room per persona
 app.locals.persona = persona
-app.locals.room = new Room(persona)
-await app.locals.room.initialize()
+app.locals.rooms = new RoomManager(persona)
+await app.locals.rooms.initialize()
+// Backward compat: legacy code accessing app.locals.room gets the default/first room
+Object.defineProperty(app.locals, 'room', {
+  get() { return app.locals.rooms.resolve() },
+})
 app.locals.authMiddleware = createAuthMiddleware(persona.config.agents || null)
 
 const requiredPaths = persona.config.startup_checks?.required_paths || []
