@@ -268,6 +268,86 @@ describe('runHybridAgent', () => {
     assert.equal(doneEvent.usage.output_tokens, 260)
   })
 
+  it('full reasoning flow: orchestrator calls deep_think, gets result, responds', async () => {
+    const orchestrator = makeProvider({
+      responses: [
+        {
+          // Orchestrator decides to think deeply
+          contentBlocks: [{ type: 'tool_use', id: 'toolu_1', name: 'deep_think', input: { prompt: 'Is P=NP?' } }],
+          stopReason: 'tool_use',
+          usage: { input_tokens: 200, output_tokens: 50 },
+        },
+        {
+          // Orchestrator uses reasoning result to respond
+          contentBlocks: [{ type: 'text', text: 'After careful analysis, probably not.' }],
+          stopReason: 'end_turn',
+          usage: { input_tokens: 400, output_tokens: 80 },
+        },
+      ],
+    })
+
+    // Mock reasoning provider
+    const reasoningProvider = {
+      streamMessage: mock.fn(async (params, onEvent) => {
+        onEvent({ type: 'thinking_delta', text: 'Let me consider the implications...' })
+        onEvent({ type: 'text_delta', text: 'Analysis suggests P≠NP based on...' })
+        return {
+          contentBlocks: [{ type: 'text', text: 'Analysis suggests P≠NP based on...' }],
+          stopReason: 'end_turn',
+          usage: { input_tokens: 300, output_tokens: 150 },
+        }
+      }),
+    }
+
+    const mockRegistry = {
+      resolve(modelString) {
+        if (modelString === 'o3:openai') return { modelId: 'o3', provider: reasoningProvider }
+        return { modelId: modelString, provider: orchestrator }
+      },
+    }
+
+    // Build tools with deep_think mock that simulates what buildReasonerTools does
+    const deepThinkExecute = async (name, input, options) => {
+      const onEvent = options?.onEvent || (() => {})
+      const { modelId, provider } = mockRegistry.resolve('o3:openai')
+      const result = await provider.streamMessage(
+        { model: modelId, maxTokens: 16384, system: 'You are a reasoning assistant.', messages: [{ role: 'user', content: input.prompt }], tools: [], serverTools: [], thinkingBudget: null },
+        onEvent,
+      )
+      const text = result.contentBlocks.filter(b => b.type === 'text').map(b => b.text).join('\n')
+      return { output: text, _usage: result.usage, _model: modelId }
+    }
+
+    const tools = {
+      definitions: [{ name: 'deep_think', description: 'Reason deeply', input_schema: { type: 'object', properties: { prompt: { type: 'string' } }, required: ['prompt'] } }],
+      execute: mock.fn(async (name, input, options) => {
+        if (name === 'deep_think') return deepThinkExecute(name, input, options)
+        return { output: `result of ${name}` }
+      }),
+    }
+
+    const config = { provider: orchestrator, model: 'claude-opus-4-6', registry: mockRegistry }
+    const { events, onEvent } = collectEvents()
+
+    const result = await runHybridAgent('system', [{ role: 'user', content: 'Is P=NP?' }], tools, config, onEvent)
+
+    // Reasoning provider was called
+    assert.equal(reasoningProvider.streamMessage.mock.callCount(), 1)
+
+    // Thinking deltas were forwarded
+    assert.ok(events.some(e => e.type === 'thinking_delta'))
+
+    // Final response came from orchestrator
+    const lastAssistant = result.messages[result.messages.length - 1]
+    assert.equal(lastAssistant.role, 'assistant')
+    assert.ok(lastAssistant.content.some(b => b.type === 'text' && b.text.includes('probably not')))
+
+    // Done event includes all usage (orchestrator + reasoner)
+    const doneEvent = events.find(e => e.type === 'done')
+    assert.equal(doneEvent.usage.input_tokens, 200 + 400 + 300)
+    assert.equal(doneEvent.usage.output_tokens, 50 + 80 + 150)
+  })
+
   it('executor fallback uses registry when available', async () => {
     const orchestrator = makeProvider({
       responses: [
