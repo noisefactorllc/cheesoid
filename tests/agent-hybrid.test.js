@@ -236,6 +236,38 @@ describe('runHybridAgent', () => {
     assert.ok(events.find(e => e.type === 'done'))
   })
 
+  it('tracks reasoner usage separately when deep_think is called', async () => {
+    const provider = makeProvider({
+      responses: [
+        {
+          contentBlocks: [{ type: 'tool_use', id: 'toolu_1', name: 'deep_think', input: JSON.stringify({ prompt: 'analyze this' }) }],
+          stopReason: 'tool_use',
+          usage: { input_tokens: 100, output_tokens: 20 },
+        },
+        {
+          contentBlocks: [{ type: 'text', text: 'Based on my analysis...' }],
+          stopReason: 'end_turn',
+          usage: { input_tokens: 200, output_tokens: 40 },
+        },
+      ],
+    })
+
+    const deepThinkResult = { output: 'Deep reasoning result.', _usage: { input_tokens: 500, output_tokens: 200 }, _model: 'o3' }
+    const tools = makeTools([{ name: 'deep_think', description: 'Reason deeply' }])
+    tools.execute = mock.fn(async (name, input, options) => deepThinkResult)
+
+    const config = { provider, model: 'claude-sonnet-4-6' }
+    const { events, onEvent } = collectEvents()
+
+    await runHybridAgent('system', [{ role: 'user', content: 'think hard' }], tools, config, onEvent)
+
+    const doneEvent = events.find(e => e.type === 'done')
+    assert.ok(doneEvent)
+    // Total should include reasoner usage: 100+200+500=800 in, 20+40+200=260 out
+    assert.equal(doneEvent.usage.input_tokens, 800)
+    assert.equal(doneEvent.usage.output_tokens, 260)
+  })
+
   it('executor fallback uses registry when available', async () => {
     const orchestrator = makeProvider({
       responses: [

@@ -100,6 +100,7 @@ function getLastUserText(messages) {
 export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   const { provider } = config
   let totalUsage = { input_tokens: 0, output_tokens: 0 }
+  let reasonerUsage = { input_tokens: 0, output_tokens: 0 }
   let iterations = 0
   const maxTurns = config.maxTurns || 20
 
@@ -215,15 +216,19 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
       let result
       try {
-        result = await tools.execute(block.name, block.input)
+        result = await tools.execute(block.name, block.input, { onEvent })
       } catch (err) {
         result = { output: `Tool error: ${err.message}`, is_error: true }
+      }
+      if (result._usage) {
+        reasonerUsage.input_tokens += result._usage.input_tokens
+        reasonerUsage.output_tokens += result._usage.output_tokens
       }
       onEvent({ type: 'tool_result', name: block.name, input: block.input, result })
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: JSON.stringify(result),
+        content: typeof result.output === 'string' ? result.output : JSON.stringify(result),
       })
     }
 
@@ -245,7 +250,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   // with tools disabled so it summarizes in its own voice.
   await _nudgeIfEmpty(messages, provider, config, systemPrompt, totalUsage, onEvent)
 
-  onEvent({ type: 'done', usage: totalUsage })
+  onEvent({ type: 'done', usage: { input_tokens: totalUsage.input_tokens + reasonerUsage.input_tokens, output_tokens: totalUsage.output_tokens + reasonerUsage.output_tokens } })
   return { messages, usage: totalUsage }
 }
 
@@ -434,6 +439,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   const executorModel = executorResolved?.modelId || config.executorModel
   let totalUsage = { input_tokens: 0, output_tokens: 0 }
   let executorUsage = { input_tokens: 0, output_tokens: 0 }
+  let reasonerUsage = { input_tokens: 0, output_tokens: 0 }
   let iterations = 0
   const maxTurns = config.maxTurns || 20
 
@@ -547,15 +553,19 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
       let toolResult
       try {
-        toolResult = await tools.execute(block.name, block.input)
+        toolResult = await tools.execute(block.name, block.input, { onEvent })
       } catch (err) {
         toolResult = { output: `Tool error: ${err.message}`, is_error: true }
+      }
+      if (toolResult._usage) {
+        reasonerUsage.input_tokens += toolResult._usage.input_tokens
+        reasonerUsage.output_tokens += toolResult._usage.output_tokens
       }
       onEvent({ type: 'tool_result', name: block.name, input: block.input, result: toolResult })
       toolResults.push({
         type: 'tool_result',
         tool_use_id: block.id,
-        content: JSON.stringify(toolResult),
+        content: typeof toolResult.output === 'string' ? toolResult.output : JSON.stringify(toolResult),
       })
     }
     consecutiveToolCalls++
@@ -654,7 +664,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   // with tools disabled so it summarizes in its own voice.
   await _nudgeIfEmpty(messages, orchestrator, config, systemPrompt, totalUsage, onEvent)
 
-  console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | executor: ${executorUsage.input_tokens} in / ${executorUsage.output_tokens} out | tools: ${totalToolTurns}`)
-  onEvent({ type: 'done', usage: { input_tokens: totalUsage.input_tokens + executorUsage.input_tokens, output_tokens: totalUsage.output_tokens + executorUsage.output_tokens } })
+  console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | executor: ${executorUsage.input_tokens} in / ${executorUsage.output_tokens} out | reasoner: ${reasonerUsage.input_tokens} in / ${reasonerUsage.output_tokens} out | tools: ${totalToolTurns}`)
+  onEvent({ type: 'done', usage: { input_tokens: totalUsage.input_tokens + executorUsage.input_tokens + reasonerUsage.input_tokens, output_tokens: totalUsage.output_tokens + executorUsage.output_tokens + reasonerUsage.output_tokens } })
   return { messages, usage: totalUsage }
 }
