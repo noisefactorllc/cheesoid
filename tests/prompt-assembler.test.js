@@ -232,4 +232,53 @@ describe('assemblePrompt', () => {
     assert.ok(result.includes('Soul.'))
     assert.ok(result.includes('System.'))
   })
+
+  it('includes deep_think guidance when reasoner is configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Test soul.',
+      'prompts/system.md': 'System prompt.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+      reasoner: 'o3:openai',
+      memory: { dir: 'memory/', auto_read: [] },
+    })
+
+    assert.ok(result.includes('deep_think'))
+    assert.ok(result.includes('reasoning'))
+  })
+
+  it('excludes deep_think guidance when no reasoner configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Test soul.',
+      'prompts/system.md': 'System prompt.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+      memory: { dir: 'memory/', auto_read: [] },
+    })
+
+    assert.ok(!result.includes('deep_think'))
+  })
+
+  it('includes deep_think guidance in openai-compat mode when reasoner configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Test soul.',
+      'prompts/system.md': 'System prompt.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      provider: 'openai-compat',
+      chat: { prompt: 'prompts/system.md' },
+      reasoner: 'o3:openai',
+      memory: { dir: 'memory/', auto_read: [] },
+    })
+
+    // OpenAI returns array of system messages
+    assert.ok(Array.isArray(result))
+    const allContent = result.map(s => s.content).join('\n')
+    assert.ok(allContent.includes('deep_think'))
+  })
 })

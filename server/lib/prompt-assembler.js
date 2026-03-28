@@ -51,6 +51,9 @@ You have tools available via function calling. You MUST use them correctly:
 
 const TAIL_REINFORCEMENT = `REMINDERS: Use tools via function calling — never narrate tool use in text. Do not fabricate data — verify through tools. Do not take destructive actions without confirmation. Stay in character.`
 
+const REASONER_GUIDANCE = `## Deep Reasoning
+You have access to \`deep_think\` for problems requiring careful multi-step reasoning or complex analysis. Use it when a question would benefit from extended deliberation — don't use it for simple lookups or straightforward responses. Pass a self-contained prompt with all necessary context.`
+
 const SOURCE_TRUST_HIERARCHY = `## Source Trust Hierarchy
 When sources conflict, trust in this order:
 1. Live data (API responses, database queries, health checks)
@@ -212,6 +215,9 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
     if (config._approximateThinking) {
       layer1Parts.push(`## Reasoning\nThink step by step before responding. Lay out your reasoning internally before acting. Consider edge cases and potential issues before executing.`)
     }
+    if (config.reasoner || config.reasoner_fallback_models?.length) {
+      layer1Parts.push(REASONER_GUIDANCE)
+    }
 
     // Layer 2: Identity — name + soul
     const layer2Parts = [...identityParts]
@@ -249,6 +255,9 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
   // In hybrid mode, inject batching discipline even for Anthropic orchestrator
   if (isHybrid) {
     sections.push(TOOL_DISCIPLINE_HYBRID)
+  }
+  if (config.reasoner || config.reasoner_fallback_models?.length) {
+    sections.push(REASONER_GUIDANCE)
   }
   sections.push(SOURCE_TRUST_HIERARCHY)
   sections.push(CHAT_HISTORY)
