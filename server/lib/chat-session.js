@@ -245,7 +245,7 @@ export class Room {
     }
   }
 
-  _autoNudgeMentionedAgents(publicText, backchannelText) {
+  _autoNudgeMentionedAgents(publicText) {
     if (!publicText) return
 
     // Home room: nudge visiting agents (config.agents)
@@ -254,7 +254,6 @@ export class Room {
       for (const agentName of knownAgents) {
         const mentionPattern = new RegExp(`\\b${agentName}\\b`, 'i')
         if (!mentionPattern.test(publicText)) continue
-        if (backchannelText && mentionPattern.test(backchannelText)) continue
         this.addBackchannelMessage('system', `Hey ${agentName}, you were just addressed in chat.`)
       }
     }
@@ -267,7 +266,6 @@ export class Room {
 
       const mentionPattern = new RegExp(`\\b${roomName}\\b`, 'i')
       if (!mentionPattern.test(publicText)) return
-      if (backchannelText && mentionPattern.test(backchannelText)) return
       client.sendBackchannel(`Hey ${roomName}, you were just addressed in chat.`)
     }
   }
@@ -279,28 +277,9 @@ export class Room {
     // on tool_start/tool_result events).
     //
     // Only tool_start/tool_result are relayed — text_delta/done are NOT forwarded
-    // because the raw stream includes <thought> content that should stay private.
-    // The final public text arrives separately via addAgentMessage after tag parsing.
+    // to avoid duplicate messages. The final public text arrives separately via
+    // addAgentMessage after the agent loop completes.
     this.broadcast({ ...event, agentName: name, visiting: true })
-  }
-
-  _parseResponseTags(text) {
-    if (!text) return { publicText: '', backchannelText: '', thoughtText: '' }
-    const bcParts = []
-    const thoughtParts = []
-    let result = text.replace(/<backchannel>([\s\S]*?)<\/backchannel>/g, (_, content) => {
-      bcParts.push(content.trim())
-      return ''
-    })
-    result = result.replace(/<thought>([\s\S]*?)<\/thought>/g, (_, content) => {
-      thoughtParts.push(content.trim())
-      return ''
-    })
-    return {
-      publicText: result.trim(),
-      backchannelText: bcParts.join('\n'),
-      thoughtText: thoughtParts.join('\n'),
-    }
   }
 
   _handleRemoteEvent(event) {
@@ -435,8 +414,7 @@ export class Room {
         } else if (event.type === 'tool_start' || event.type === 'tool_result') {
           // Forward tool events to remote office so visitors can see what we're doing.
           // text_delta/done are NOT forwarded — the final public text arrives via
-          // sendMessage() after thought/backchannel tags are stripped. Forwarding
-          // raw text_delta would leak <thought> content and cause duplicate messages.
+          // sendMessage() after the agent loop completes.
           const client = this.roomClients.get(this._pendingRoom)
           if (client) client.sendEvent(event)
         }
@@ -456,33 +434,18 @@ export class Room {
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
 
-      // Parse backchannel and thought tags from response
-      const { publicText, backchannelText, thoughtText } = this._parseResponseTags(assistantText)
-
+      // Route response — freeform text is always public
       if (this._pendingRoom === 'home') {
-        if (publicText) {
-          this.recordHistory({ type: 'assistant_message', text: publicText })
+        if (assistantText.trim()) {
+          this.recordHistory({ type: 'assistant_message', text: assistantText.trim() })
         }
-        if (backchannelText) {
-          // Broadcast backchannel to SSE — visiting agents' RoomClients pick it up, UI ignores it
-          this.broadcast({ type: 'backchannel', name: this.persona.config.display_name, text: backchannelText })
-        }
-        // Auto-nudge agents mentioned in public text
-        this._autoNudgeMentionedAgents(publicText, backchannelText)
+        this._autoNudgeMentionedAgents(assistantText)
       } else {
         const client = this.roomClients.get(this._pendingRoom)
-        if (client) {
-          if (backchannelText) await client.sendBackchannel(backchannelText)
-          if (publicText) await client.sendMessage(publicText)
+        if (client && assistantText.trim()) {
+          await client.sendMessage(assistantText.trim())
         }
-        // Surface thoughts in home room
-        if (thoughtText) {
-          this.broadcast({ type: 'idle_text_delta', text: thoughtText })
-          this.broadcast({ type: 'idle_done' })
-          this.recordHistory({ type: 'idle_thought', text: thoughtText })
-        }
-        // Auto-nudge agents mentioned in public text
-        this._autoNudgeMentionedAgents(publicText, backchannelText)
+        this._autoNudgeMentionedAgents(assistantText)
       }
     } catch (err) {
       if (this._pendingRoom === 'home') {

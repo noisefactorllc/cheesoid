@@ -219,12 +219,12 @@ describe('Multi-agent room', () => {
     }
 
     host.room._pendingRoom = 'home'
-    host.room._autoNudgeMentionedAgents('Hey Brad, what do you think about this?', '')
+    host.room._autoNudgeMentionedAgents('Hey Brad, what do you think about this?')
     assert.equal(backchannelSends.length, 1)
     assert.ok(backchannelSends[0].text.includes('Brad'))
   })
 
-  it('skips auto-nudge when agent already mentioned in backchannel', async () => {
+  it('auto-nudges mentioned agent in public text', async () => {
     const host = servers[servers.length - 1]
     const backchannelSends = []
     host.room.addBackchannelMessage = (name, text, opts) => {
@@ -232,8 +232,8 @@ describe('Multi-agent room', () => {
     }
 
     host.room._pendingRoom = 'home'
-    host.room._autoNudgeMentionedAgents('Hey Brad, check this out', 'Brad, this is yours to handle')
-    assert.equal(backchannelSends.length, 0, 'should skip — Brad already addressed in backchannel')
+    host.room._autoNudgeMentionedAgents('Hey Brad, check this out')
+    assert.equal(backchannelSends.length, 1, 'should nudge Brad')
   })
 
   it('does not nudge names that are not known agents', async () => {
@@ -244,7 +244,7 @@ describe('Multi-agent room', () => {
     }
 
     host.room._pendingRoom = 'home'
-    host.room._autoNudgeMentionedAgents('Hey random person, what do you think?', '')
+    host.room._autoNudgeMentionedAgents('Hey random person, what do you think?')
     assert.equal(backchannelSends.length, 0, 'should not nudge unknown names')
   })
 
@@ -263,7 +263,7 @@ describe('Multi-agent room', () => {
     })
 
     visitor.room._pendingRoom = 'brad'
-    visitor.room._autoNudgeMentionedAgents('Hey brad, what do you think?', '')
+    visitor.room._autoNudgeMentionedAgents('Hey brad, what do you think?')
     assert.equal(bcSends.length, 1)
     assert.ok(bcSends[0].text.includes('brad'))
   })
@@ -285,7 +285,7 @@ describe('Multi-agent room', () => {
 
     // Simulate the post-response auto-nudge flow
     host.room._pendingRoom = 'home'
-    host.room._autoNudgeMentionedAgents('Helper, can you look into this?', '')
+    host.room._autoNudgeMentionedAgents('Helper, can you look into this?')
 
     assert.equal(bcMessages.length, 1)
     assert.equal(bcMessages[0].name, 'system')
