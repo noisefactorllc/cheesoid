@@ -49,7 +49,7 @@ You have tools available via function calling. You MUST use them correctly:
 - **BATCH independent tool calls.** When you need multiple pieces of data that don't depend on each other, emit ALL the tool calls in a single response. For example, if you need to check notifications AND check the timeline AND check disk usage, emit all three tool calls at once — do not call them one at a time. This is critical for efficiency.
 - **Only sequence tool calls when one depends on another's result.** If you need the output of tool A to construct the input for tool B, call A first, then call B after seeing the result. But if A and B are independent, call them together.`
 
-const TAIL_REINFORCEMENT = `REMINDERS: Use tools via function calling — never narrate tool use in text. Do not fabricate data — verify through tools. Do not take destructive actions without confirmation. Stay in character.`
+const TAIL_REINFORCEMENT = `REMINDERS: Use tools via function calling — never narrate tool use in text. Do not fabricate data — verify through tools. Do not take destructive actions without confirmation. Use the \`internal\` tool for private thoughts and backchannel — do not write them as plain text. Stay in character.`
 
 const REASONER_GUIDANCE = `## Deep Reasoning
 You have access to \`deep_think\` for problems requiring careful multi-step reasoning or complex analysis. Use it when a question would benefit from extended deliberation — don't use it for simple lookups or straightforward responses. Pass a self-contained prompt with all necessary context.`
@@ -115,39 +115,21 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
     const roomNames = config.rooms.map(r => r.name)
     operationalSections.push([
       `## Connected Offices`,
-      `You are present in multiple offices simultaneously. Your office is where your direct users are. You are also connected to these other agents' offices: ${roomNames.join(', ')}.`,
+      `You are present in multiple offices simultaneously. Direct users are in your office. You are also connected to these other agents' offices: ${roomNames.join(', ')}.`,
       ``,
       `Every message is tagged with its source: \`[HH:MM][office/name@domain]\`. Your office shows as \`[HH:MM][home/name@yourdomain]\`, other agents' offices show as \`[HH:MM][officename/name@theirdomain]\`. Always check the tag to know where a message came from.`,
       ``,
       `When you respond, your response goes to the office the triggering message came from. Pay close attention to the tag — a message in \`[home/...]\` is in YOUR office, not someone else's.`,
       ``,
       `### Being a Visitor (IMPORTANT)`,
-      `In other agents' offices, you are a GUEST. Everyone in that office sees everything you say. Only speak publicly when you have something genuinely useful to contribute. If a message isn't addressed to you or doesn't need your input, don't say anything publicly.`,
+      `In other agents' offices, you are a GUEST. Everyone in that office sees everything you say. Only speak publicly when you have something genuinely useful to contribute. If a message isn't addressed to you or doesn't need your input, don't say anything publicly — use the \`internal\` tool instead.`,
       ``,
-      `When you observe something in another agent's office but have nothing to say publicly, wrap your observation in \`<thought>\` tags. Thoughts are surfaced in your own office — your users can see them, but the other office cannot:`,
-      `\`\`\``,
-      `<thought>Someone just shared a URL in the other office. Noting that for later.</thought>`,
-      `\`\`\``,
+      `You have the \`internal\` tool for private reactions. When you observe something in another agent's office but have nothing to say publicly, call \`internal({ thought: "..." })\`. To coordinate with the other agent privately, call \`internal({ backchannel: "..." })\`. You can combine both in one call. Anything you say without using this tool goes to that office publicly.`,
       ``,
-      `You can combine thought + public response + backchannel in a single reply. Only the public part goes to the other office. Thoughts go to your office. Backchannel goes privately to the other agent.`,
-      ``,
-      `### Backchannel (IMPORTANT)`,
+      `### Backchannel`,
       `You can talk to other agents in public chat — that's fine and natural ("Hey Brad, what do you think about this?"). But social cue coordination — who should respond, turn-taking, domain handoffs — MUST go through backchannel, not public chat. Users should not see logistics like "this one's for you" or "I'll handle this" or "go ahead."`,
       ``,
-      `When you address another agent in your public response, also send a \`<backchannel>\` letting them know you're talking to them. This helps agents stay aware of when they're being engaged.`,
-      ``,
-      `Wrap coordination in \`<backchannel>\` tags. The tagged content is delivered privately to the other agent. Everything outside the tags is posted publicly to users.`,
-      ``,
-      `Example — coordination + public response:`,
-      `\`\`\``,
-      `<backchannel>Taking this one — it's billing, my domain.</backchannel>`,
-      `Let me pull up those billing records.`,
-      `\`\`\``,
-      ``,
-      `Example — coordination only (nothing to say publicly):`,
-      `\`\`\``,
-      `<backchannel>This is yours, I'll stay quiet.</backchannel>`,
-      `\`\`\``,
+      `Use \`internal({ backchannel: "..." })\` to send private coordination messages. The backchannel is delivered privately to the other agent and triggers their attention.`,
       ``,
       `Incoming backchannel from other agents appears as \`[backchannel/office/name@domain]: message\`. Users never see these.`,
     ].join('\n'))
@@ -160,16 +142,12 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
       `Other agents may visit your office: ${agentNames.join(', ')}. They appear as participants and their messages show in chat. You do not need to respond to every agent message.`,
       ``,
       `### Coordinating Responses`,
-      `When a user sends a message and visiting agents are present, consider whether to handle it yourself, delegate to a visiting agent, or collaborate. Use \`<backchannel>\` to coordinate before responding publicly. You don't need to coordinate for every message — only when delegation or collaboration is warranted. For example, if a user asks about billing and Brad handles billing, delegate via backchannel.`,
+      `When a user sends a message and visiting agents are present, consider whether to handle it yourself, delegate to a visiting agent, or collaborate. Use \`internal({ backchannel: "..." })\` to coordinate before responding publicly. You don't need to coordinate for every message — only when delegation or collaboration is warranted.`,
       ``,
-      `### Backchannel (IMPORTANT)`,
-      `You can address visiting agents in public chat — that's natural ("Brad, can you check on this?"). But social cue coordination — turn-taking, domain handoffs, "I'll handle this" — MUST go through backchannel. Users should not see logistics.`,
-      ``,
-      `When you address another agent in your public response, also send a \`<backchannel>\` letting them know you're talking to them. This helps agents stay aware of when they're being engaged.`,
+      `### Private Channels`,
+      `Use \`internal({ backchannel: "..." })\` to coordinate privately with visiting agents — turn-taking, domain handoffs, delegation. Users never see backchannel. Use \`internal({ thought: "..." })\` for private observations.`,
       ``,
       `Visiting agents send you private messages via backchannel — these appear as \`[backchannel/agentname]: message\`. Users cannot see these.`,
-      ``,
-      `To reply privately, wrap coordination in \`<backchannel>\` tags. The tagged content goes to agents only; everything else is posted publicly. If you have nothing to say publicly, your entire response can be backchannel.`,
     ].join('\n'))
   }
 
@@ -262,6 +240,7 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
   sections.push(SOURCE_TRUST_HIERARCHY)
   sections.push(CHAT_HISTORY)
   sections.push(...contextSections)
+  sections.push(TAIL_REINFORCEMENT)
 
   return sections.join('\n\n---\n\n')
 }

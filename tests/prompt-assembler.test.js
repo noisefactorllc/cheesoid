@@ -213,7 +213,7 @@ describe('assemblePrompt', () => {
       chat: { prompt: 'prompts/system.md' },
       rooms: [{ name: 'brad', url: 'http://localhost:9999', secret: 's' }],
     }, [])
-    assert.ok(prompt.includes('address another agent in your public response'))
+    assert.ok(prompt.includes('internal'))
     assert.ok(prompt.includes('backchannel'))
   })
 
@@ -231,6 +231,50 @@ describe('assemblePrompt', () => {
 
     assert.ok(result.includes('Soul.'))
     assert.ok(result.includes('System.'))
+  })
+
+  it('rooms section references internal tool instead of thought/backchannel tags', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+      rooms: [{ name: 'brad', url: 'http://localhost:3001', secret: 's' }],
+    })
+
+    assert.ok(result.includes('internal'), 'should reference internal tool')
+    assert.ok(!result.includes('<thought>'), 'should not contain <thought> tag examples')
+    assert.ok(!result.includes('<backchannel>'), 'should not contain <backchannel> tag examples')
+  })
+
+  it('agents section references internal tool instead of backchannel tags', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Host',
+      chat: { prompt: 'prompts/system.md' },
+      agents: [{ name: 'Brad', secret: 's' }],
+    })
+
+    assert.ok(result.includes('internal'), 'should reference internal tool')
+    assert.ok(!result.includes('<backchannel>'), 'should not contain <backchannel> tag examples')
+  })
+
+  it('tail reinforcement mentions internal tool', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+    })
+
+    assert.ok(result.includes('internal'))
   })
 
   it('includes deep_think guidance when reasoner is configured', async () => {
