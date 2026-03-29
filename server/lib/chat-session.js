@@ -5,6 +5,7 @@ import { ChatLog } from './chat-log.js'
 import { loadTools } from './tools.js'
 import { runAgent, runHybridAgent } from './agent.js'
 import { ProviderRegistry } from './providers/index.js'
+import { Modality } from './modality.js'
 import { RoomClient } from './room-client.js'
 import { WakeupScheduler } from './wakeup.js'
 
@@ -67,6 +68,7 @@ export class Room {
     this._heartbeatTimer = null
     this._destroyed = false
     this._sessionStartHandled = false
+    this.modality = null // initialized in initialize() if modal config present
 
     // Venue awareness: derive domain from office_url and room configs
     const officeUrl = persona.config.office_url
@@ -100,6 +102,15 @@ export class Room {
     await this.state.load()
     this.systemPrompt = await assemblePrompt(dir, config, plugins)
     this.registry = new ProviderRegistry(config)
+
+    // Modal mode: attention/cognition gear shifting
+    if (config.cognition && config.attention) {
+      this.modality = new Modality({
+        attention: config.attention,
+        cognition: config.cognition,
+      })
+    }
+
     this.tools = await loadTools(dir, config, this.memory, this.state, this, this.registry)
 
     // Replay recent history into agent context
@@ -377,11 +388,19 @@ export class Room {
         this.recordHistory({ type: 'user_message', name, text })
       }
 
-      // Determine orchestrator vs direct mode
-      const hasOrchestrator = this.persona.config.orchestrator != null
-      let orchestratorModel, orchestratorProvider, executorModel, executorProvider
+      // Determine mode: modal (attention/cognition), hybrid (orchestrator), or direct
+      const hasModality = this.modality?.isModal
+      const hasOrchestrator = !hasModality && this.persona.config.orchestrator != null
+      let orchestratorModel, orchestratorProvider, executorModel
 
-      if (hasOrchestrator) {
+      if (hasModality) {
+        // Modal mode — resolve model from current modality state
+        const modalModel = this.modality.model
+        const resolved = this.registry.resolve(modalModel)
+        orchestratorModel = resolved.modelId
+        orchestratorProvider = resolved.provider
+        executorModel = this.persona.config.model
+      } else if (hasOrchestrator) {
         // Orchestrator model: string (new) or object with .model (legacy)
         const orchModelStr = typeof this.persona.config.orchestrator === 'string'
           ? this.persona.config.orchestrator
@@ -389,8 +408,6 @@ export class Room {
         const orchResolved = this.registry.resolve(orchModelStr)
         orchestratorModel = orchResolved.modelId
         orchestratorProvider = orchResolved.provider
-
-        // Executor — pass raw model string so callExecutorWithFallback can resolve via registry
         executorModel = this.persona.config.model
       } else {
         const mainResolved = this.registry.resolve(this.persona.config.model)
@@ -404,12 +421,14 @@ export class Room {
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
         provider: orchestratorProvider,
-        // Hybrid mode fields — executor resolved via registry in callExecutorWithFallback
         executorProvider: null,
-        executorModel: hasOrchestrator ? executorModel : null,
-        executorFallbackModels: hasOrchestrator ? (this.persona.config.fallback_models || []) : [],
-        orchestratorFallbackModels: hasOrchestrator ? (this.persona.config.orchestrator_fallback_models || []) : [],
+        executorModel: (hasOrchestrator || hasModality) ? executorModel : null,
+        executorFallbackModels: (hasOrchestrator || hasModality) ? (this.persona.config.fallback_models || []) : [],
+        orchestratorFallbackModels: (hasOrchestrator || hasModality)
+          ? (this.persona.config.orchestrator_fallback_models || this.persona.config.cognition_fallback_models || [])
+          : [],
         registry: this.registry,
+        modality: hasModality ? this.modality : null,
       }
 
       let assistantText = ''
@@ -438,7 +457,7 @@ export class Room {
       }
 
       const prompt = replaceTimestamp(this.systemPrompt)
-      const agentFn = hasOrchestrator ? runHybridAgent : runAgent
+      const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
 
@@ -520,18 +539,24 @@ export class Room {
         { role: 'user', content: IDLE_THOUGHT_PROMPT },
       ]
 
-      // Determine orchestrator vs direct mode
-      const hasOrchestrator = this.persona.config.orchestrator != null
-      let orchestratorModel, orchestratorProvider, executorModel, executorProvider
+      const hasModality = this.modality?.isModal
+      const hasOrchestrator = !hasModality && this.persona.config.orchestrator != null
+      let orchestratorModel, orchestratorProvider, executorModel
 
-      if (hasOrchestrator) {
+      if (hasModality) {
+        // Idle thoughts always run in attention mode — don't step up for idle
+        const modalModel = this.modality._attention
+        const resolved = this.registry.resolve(modalModel)
+        orchestratorModel = resolved.modelId
+        orchestratorProvider = resolved.provider
+        executorModel = this.persona.config.model
+      } else if (hasOrchestrator) {
         const orchModelStr = typeof this.persona.config.orchestrator === 'string'
           ? this.persona.config.orchestrator
           : this.persona.config.orchestrator.model
         const orchResolved = this.registry.resolve(orchModelStr)
         orchestratorModel = orchResolved.modelId
         orchestratorProvider = orchResolved.provider
-
         executorModel = this.persona.config.model
       } else {
         const mainResolved = this.registry.resolve(this.persona.config.model)
@@ -546,10 +571,13 @@ export class Room {
         serverTools: this.persona.config.server_tools || [],
         provider: orchestratorProvider,
         executorProvider: null,
-        executorModel: hasOrchestrator ? executorModel : null,
-        executorFallbackModels: hasOrchestrator ? (this.persona.config.fallback_models || []) : [],
-        orchestratorFallbackModels: hasOrchestrator ? (this.persona.config.orchestrator_fallback_models || []) : [],
+        executorModel: (hasOrchestrator || hasModality) ? executorModel : null,
+        executorFallbackModels: (hasOrchestrator || hasModality) ? (this.persona.config.fallback_models || []) : [],
+        orchestratorFallbackModels: (hasOrchestrator || hasModality)
+          ? (this.persona.config.orchestrator_fallback_models || this.persona.config.cognition_fallback_models || [])
+          : [],
         registry: this.registry,
+        modality: null, // idle thoughts don't get gear-shifting
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not
@@ -575,7 +603,7 @@ export class Room {
       }
 
       const prompt = replaceTimestamp(this.systemPrompt)
-      const agentFn = hasOrchestrator ? runHybridAgent : runAgent
+      const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, idleMessages, this.tools, agentConfig, onEvent)
 
       // Degenerate detection: discard if output is trivial with no real work
