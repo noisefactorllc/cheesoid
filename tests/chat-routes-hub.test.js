@@ -49,15 +49,18 @@ function setupApp(persona, rooms) {
 
 describe('Chat routes — hub mode', () => {
   const servers = []
+  const managers = []
 
   after(() => {
     for (const s of servers) s.close()
+    for (const m of managers) m.destroy()
   })
 
   it('POST /api/chat/send with room field routes to correct room', async () => {
     const dir = await createHubPersona()
     const persona = await loadPersona(dir)
     const rooms = new RoomManager(persona)
+    managers.push(rooms)
     const app = setupApp(persona, rooms)
     const server = app.listen(0)
     servers.push(server)
@@ -77,6 +80,7 @@ describe('Chat routes — hub mode', () => {
     const dir = await createHubPersona()
     const persona = await loadPersona(dir)
     const rooms = new RoomManager(persona)
+    managers.push(rooms)
     const app = setupApp(persona, rooms)
     const server = app.listen(0)
     servers.push(server)
@@ -94,6 +98,7 @@ describe('Chat routes — hub mode', () => {
     const dir = await createHubPersona()
     const persona = await loadPersona(dir)
     const rooms = new RoomManager(persona)
+    managers.push(rooms)
     const app = setupApp(persona, rooms)
     const server = app.listen(0)
     servers.push(server)
