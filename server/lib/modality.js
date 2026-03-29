@@ -21,9 +21,15 @@ export class Modality {
     return this._mode
   }
 
+  /** Returns the model string for the current mode */
   get model() {
     if (!this._isModal) return null
     return this._mode === 'attention' ? this._attention : this._cognition
+  }
+
+  /** Returns the attention model string (for idle thoughts that always run cheap) */
+  get attentionModel() {
+    return this._attention
   }
 
   stepUp(reason) {

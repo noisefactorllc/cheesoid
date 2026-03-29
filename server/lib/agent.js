@@ -454,6 +454,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let rescueCount = 0
   let totalToolTurns = 0
   let rescueFailed = false
+  let stepUpUsed = false // one step_up re-run per agent call
 
   while (iterations < maxTurns) {
     // Intent routing — applies when orchestrator is openai-compat
@@ -578,30 +579,31 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     totalToolTurns++
 
     // --- MODALITY: step_up re-run ---
-    // If a modality step_up tool was called, discard the attention response
-    // and re-run this turn with the cognition model.
-    if (config.modality) {
+    // If a modality step_up tool was called AND the mode actually changed,
+    // discard the attention response and re-run this turn with the cognition model.
+    // Only one re-run per turn to prevent infinite loops (e.g. if cognition
+    // model also calls step_up, it's a no-op and we proceed normally).
+    if (config.modality && !stepUpUsed) {
       const stepUpBlock = assistantContent.find(b => b.type === 'tool_use' && b.name === 'step_up')
-      if (stepUpBlock) {
-        // Check if the tool result indicates an actual mode change
-        const stepUpResult = toolResults.find(r => r.tool_use_id === stepUpBlock.id)
-        if (stepUpResult) {
-          // Remove the attention model's assistant message and tool results
-          messages.pop() // remove assistant message with step_up call
+      if (stepUpBlock && config.modality.mode === 'cognition') {
+        // Remove the attention model's assistant message — tool results
+        // are intentionally NOT pushed, so the cognition model sees the
+        // original conversation without the aborted attention turn.
+        messages.pop()
 
-          // Re-resolve model from modality (now cognition)
-          const newModel = config.modality.model
-          const resolved = config.registry.resolve(newModel)
-          config.model = resolved.modelId
-          config.provider = resolved.provider
+        // Re-resolve model from modality (now cognition)
+        const newModel = config.modality.model
+        const resolved = config.registry.resolve(newModel)
+        config.model = resolved.modelId
+        config.provider = resolved.provider
+        stepUpUsed = true // prevent re-run loops
 
-          console.log(`[hybrid] step_up: re-running turn with ${resolved.modelId}`)
+        console.log(`[hybrid] step_up: re-running turn with ${resolved.modelId}`)
 
-          // Don't count this as an iteration — we're re-running, not advancing
-          consecutiveToolCalls--
-          totalToolTurns--
-          continue // re-enters the while loop with the cognition model
-        }
+        // Don't count this as an iteration — we're re-running, not advancing
+        consecutiveToolCalls--
+        totalToolTurns--
+        continue // re-enters the while loop with the cognition model
       }
     }
 

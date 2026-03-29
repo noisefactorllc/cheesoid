@@ -545,7 +545,7 @@ export class Room {
 
       if (hasModality) {
         // Idle thoughts always run in attention mode — don't step up for idle
-        const modalModel = this.modality._attention
+        const modalModel = this.modality.attentionModel
         const resolved = this.registry.resolve(modalModel)
         orchestratorModel = resolved.modelId
         orchestratorProvider = resolved.provider

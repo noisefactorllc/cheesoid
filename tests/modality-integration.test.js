@@ -168,4 +168,64 @@ describe('modality integration — step_up re-run', () => {
     // Should work normally — 2 provider calls
     assert.equal(provider.streamMessage.mock.callCount(), 2)
   })
+
+  it('prevents infinite loop if cognition model also calls step_up', async () => {
+    const modality = new Modality({ attention: 'haiku:anthropic', cognition: 'sonnet:anthropic' })
+
+    // Attention provider: calls step_up
+    const attentionProvider = makeProvider([
+      {
+        contentBlocks: [{ type: 'tool_use', id: 'toolu_1', name: 'step_up', input: { reason: 'user asked' } }],
+        stopReason: 'tool_use',
+        usage: { input_tokens: 50, output_tokens: 10 },
+      },
+    ])
+
+    // Cognition provider: also calls step_up (no-op), then responds
+    const cognitionProvider = makeProvider([
+      {
+        contentBlocks: [{ type: 'tool_use', id: 'toolu_2', name: 'step_up', input: { reason: 'confused' } }],
+        stopReason: 'tool_use',
+        usage: { input_tokens: 100, output_tokens: 15 },
+      },
+      {
+        contentBlocks: [{ type: 'text', text: 'Here I am.' }],
+        stopReason: 'end_turn',
+        usage: { input_tokens: 200, output_tokens: 40 },
+      },
+    ])
+
+    const registry = {
+      resolve: (modelStr) => {
+        if (modelStr === 'haiku:anthropic') return { modelId: 'haiku', provider: attentionProvider }
+        if (modelStr === 'sonnet:anthropic') return { modelId: 'sonnet', provider: cognitionProvider }
+        return { modelId: modelStr, provider: attentionProvider }
+      },
+    }
+
+    const toolDefs = modality.toolDefinitions()
+    const executeFn = mock.fn(async (name, input) => {
+      const result = modality.executeTool(name, input)
+      if (result) return result
+      return { output: `result of ${name}` }
+    })
+    const tools = { definitions: toolDefs, execute: executeFn }
+
+    const config = {
+      model: 'haiku',
+      provider: attentionProvider,
+      maxTurns: 5,
+      registry,
+      modality,
+    }
+
+    const { events, onEvent } = collectEvents()
+    await runHybridAgent('system', [{ role: 'user', content: 'hi' }], tools, config, onEvent)
+
+    // Should complete without infinite loop
+    assert.equal(modality.mode, 'cognition')
+    // Attention called once (step_up), cognition called twice (no-op step_up + text)
+    assert.equal(attentionProvider.streamMessage.mock.callCount(), 1)
+    assert.equal(cognitionProvider.streamMessage.mock.callCount(), 2)
+  })
 })
