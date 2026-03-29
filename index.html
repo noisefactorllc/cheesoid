@@ -449,65 +449,34 @@
     const BUNDLE_PATH = `${BASE_PATH}/effects`;
 
     const DSL = `
-search filter, synth, classicNoisedeck
+search filter, synth
 
 gradient(
   type: fourCorners,
-  rotation: 136.067,
-  repeat: 2,
-  speed: 1,
-  seed: 56,
-  color1: #f61c16,
-  color2: #c45443,
+  color1: #00316a,
+  color2: #620027,
   color3: #000000,
   color4: #000000
 )
-  .palette(
-    index: cottonCandy,
-    rotation: fwd,
-    offset: 0,
-    repeat: 8,
-    alpha: 0.75
-  )
-  .lowPoly(
-    scale: 100,
-    seed: 78,
-    mode: distance2,
-    edgeStrength: 0.125,
-    speed: 1
-  )
-  .refract(
-    blendMode: difference,
-    mode: reflect,
-    amount: 100
-  )
-  .lighting(
-    normalStrength: 2.62,
-    smoothing: 2.5,
-    specularIntensity: 0.99,
-    shininess: 60,
-    reflection: 51.4,
-    refraction: 40.9,
-    aberration: 27.2
+  .spookyTicker(
+    rows: 3,
+    seed: 81,
+    alpha: 0.23,
+    speed: 5
   )
   .corrupt(
-    intensity: 22.284,
-    bandHeight: 96.649,
-    sort: 4.789,
-    shift: 51.135,
-    channelShift: 60.462,
-    melt: 2.439,
-    scatter: 24.325,
-    bits: 16.608,
-    seed: 73
+    intensity: 33,
+    bandHeight: 100,
+    sort: 99.054,
+    shift: 90.08,
+    channelShift: 28.64,
+    melt: 19.6,
+    scatter: 31.71,
+    bits: 30.01,
+    speed: 3,
+    seed: 14
   )
-  .subchain(name: "lens effects", id: "ym6e") {
-    .chromaticAberration(aberration: 25, passthru: 50)
-    .bloom(taps: 15)
-    .lens(displacement: -0.125)
-    .vignette(brightness: 0.07, alpha: 0.77)
-  }
-  .fxaa()
+  .pixelSort(wrap: repeat)
   .write(o0)
 
 render(o0)
@@ -551,7 +520,7 @@ render(o0)
         }
       }
 
-      renderer.setLoopDuration(15);
+      renderer.setLoopDuration(60);
       renderer.start();
 
       window.addEventListener('resize', () => {
