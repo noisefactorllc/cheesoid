@@ -25,12 +25,13 @@ router.get('/api/health', (req, res) => {
 })
 
 router.get('/api/presence', async (req, res) => {
-  const { persona, room } = req.app.locals
+  const { persona, rooms } = req.app.locals
+  // Backward compat: use rooms manager if available, else legacy room
+  const room = req.app.locals.room
   const authProxy = !!persona.config.auth_proxy
 
-  // Use the room's state if initialized, otherwise load fresh
   let stateData = {}
-  if (room.state) {
+  if (room && room.state) {
     stateData = room.state.data
   } else {
     const state = new State(persona.dir)
@@ -41,8 +42,13 @@ router.get('/api/presence', async (req, res) => {
   const result = {
     persona: persona.config.display_name,
     state: stateData,
-    participants: room.participantList,
+    participants: rooms ? rooms.allParticipants : room.participantList,
     auth_proxy: authProxy,
+  }
+
+  // Hub-specific fields
+  if (rooms && rooms.isHub) {
+    result.hosted_rooms = rooms.roomNames
   }
 
   if (authProxy) {
