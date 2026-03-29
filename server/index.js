@@ -15,18 +15,6 @@ const app = express()
 
 app.use(express.json())
 
-// Serve index.html with persona theme injected
-app.get('/', async (req, res) => {
-  const theme = app.locals.persona.config.theme || 'terminal'
-  const dataTheme = app.locals.persona.config.data_theme || theme
-  const html = await readFile(join(__dirname, 'public', 'index.html'), 'utf8')
-  res.type('html').send(
-    html.replace('{{THEME}}', theme).replace('{{DATA_THEME}}', dataTheme)
-  )
-})
-
-app.use(express.static(join(__dirname, 'public'), { index: false }))
-
 // Load persona
 const personaName = process.env.PERSONA || 'example'
 const personaDir = join(__dirname, '..', 'personas', personaName)
@@ -39,6 +27,19 @@ const needsAnthropic = !persona.config.providers && (persona.config.provider || 
 if (needsAnthropic && !process.env.ANTHROPIC_API_KEY) {
   console.error('Error: ANTHROPIC_API_KEY not set')
   process.exit(1)
+}
+
+// Serve UI unless headless
+if (!persona.config.headless) {
+  app.get('/', async (req, res) => {
+    const theme = persona.config.theme || 'terminal'
+    const dataTheme = persona.config.data_theme || theme
+    const html = await readFile(join(__dirname, 'public', 'index.html'), 'utf8')
+    res.type('html').send(
+      html.replace('{{THEME}}', theme).replace('{{DATA_THEME}}', dataTheme)
+    )
+  })
+  app.use(express.static(join(__dirname, 'public'), { index: false }))
 }
 
 app.locals.persona = persona
