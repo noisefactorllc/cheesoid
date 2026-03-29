@@ -50,10 +50,6 @@ body {
   border-right: none;
 }
 
-#sidebar-section-label {
-  padding: var(--hf-space-3) var(--hf-space-4) var(--hf-space-1);
-}
-
 #participants {
   list-style: none;
   margin: 0;
@@ -525,4 +521,50 @@ main {
   #input-area {
     gap: var(--hf-space-1);
   }
+}
+
+/* Room list */
+.room-item {
+  padding: 0.35rem 0.75rem;
+  cursor: pointer;
+  border-radius: var(--hf-radius-sm);
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: var(--hf-size-sm);
+  color: var(--hf-text-normal);
+}
+
+.room-item:hover,
+.participant-item:hover {
+  background: color-mix(in srgb, var(--hf-color-2) 50%, transparent 50%);
+}
+
+.room-item.active,
+.participant-item.active {
+  background: color-mix(in srgb, var(--hf-color-3) 50%, transparent 50%);
+  font-weight: var(--hf-weight-semibold);
+}
+
+/* Unread badge */
+.unread-badge {
+  background: var(--hf-accent);
+  color: var(--hf-text-bright);
+  font-size: 0.65rem;
+  font-weight: var(--hf-weight-bold);
+  padding: 0.1rem 0.4rem;
+  border-radius: var(--hf-radius-full);
+  min-width: 1.2rem;
+  text-align: center;
+}
+
+/* Sidebar sections */
+.sidebar-section-label {
+  padding: var(--hf-space-3) var(--hf-space-3) var(--hf-space-1);
+}
+
+#rooms-list {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--hf-space-2);
 }

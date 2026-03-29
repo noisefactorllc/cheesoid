@@ -73,8 +73,14 @@
             <span id="presence-status" class="hf-text-xs hf-text-dim"></span>
           </div>
         </div>
-        <div id="sidebar-section-label" class="hf-label">Present</div>
-        <ul id="participants" class="hf-scrollbar"></ul>
+        <div id="sidebar-rooms" class="hidden">
+          <div class="sidebar-section-label hf-label">Rooms</div>
+          <ul id="rooms-list" class="hf-scrollbar"></ul>
+        </div>
+        <div id="sidebar-present">
+          <div class="sidebar-section-label hf-label">Present</div>
+          <ul id="participants" class="hf-scrollbar"></ul>
+        </div>
         <button id="sidebar-toggle" class="hf-btn hf-btn-ghost" title="Collapse sidebar"><span class="hf-icon">chevron_left</span></button>
       </aside>
       <div id="chat-main">

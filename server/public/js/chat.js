@@ -25,6 +25,11 @@ let sending = false
 let reconnectTimer = null
 const visitorStreams = new Map() // agentName → { element, buffer }
 
+let hubMode = false
+let hostedRooms = []
+let currentView = null  // '#general', 'dm:username', or null (legacy)
+const roomBuffers = new Map()  // room/dm → { unread: 0 }
+
 // Configure marked for chat rendering
 if (typeof marked !== 'undefined') {
   marked.setOptions({ breaks: true, gfm: true })
@@ -126,7 +131,7 @@ async function enterRoom(presenceData) {
     personaLabel = data.persona || 'Cheesoid'
     personaName.textContent = personaLabel
     document.title = personaLabel
-    document.getElementById('channel-name').textContent = (data.persona || 'cheesoid') + "'s office"
+
     const s = data.state
     if (s.mood && s.mood !== 'neutral') {
       presenceStatus.textContent = s.mood
@@ -135,6 +140,19 @@ async function enterRoom(presenceData) {
       presenceStatus.textContent = 'present'
       presenceStatus.className = 'active'
     }
+
+    // Hub mode detection
+    if (data.hosted_rooms && data.hosted_rooms.length > 0) {
+      hubMode = true
+      hostedRooms = data.hosted_rooms
+      currentView = data.hosted_rooms[0] // default to first room (#general)
+      document.getElementById('sidebar-rooms').classList.remove('hidden')
+      renderRoomsList(data.hosted_rooms)
+      document.getElementById('channel-name').textContent = currentView
+    } else {
+      document.getElementById('channel-name').textContent = (data.persona || 'cheesoid') + "'s office"
+    }
+
     if (data.participants) updateParticipants(data.participants)
   } catch {}
 
@@ -161,6 +179,23 @@ function connectSSE() {
 
 function handleEvent(e) {
   const event = JSON.parse(e.data)
+
+  // In hub mode, route events to correct view
+  if (hubMode && event.type !== 'scrollback' && event.type !== 'presence') {
+    const eventView = event.to
+      ? (event.from === myName ? `dm:${event.to}` : `dm:${event.from}`)
+      : event.room
+
+    // Track unread for background views
+    if (eventView && eventView !== currentView && event.type === 'user_message') {
+      if (!roomBuffers.has(eventView)) roomBuffers.set(eventView, { unread: 0 })
+      roomBuffers.get(eventView).unread++
+      updateUnreadBadges()
+    }
+
+    // Only render events for current view (or unscoped events like presence)
+    if (eventView && eventView !== currentView) return
+  }
 
   switch (event.type) {
     case 'scrollback':
@@ -345,7 +380,12 @@ function handleEvent(e) {
     }
 
     case 'presence':
-      updateParticipants(event.participants)
+      if (hubMode && event.room) {
+        // Hub mode: presence arrives per-room, re-fetch aggregated
+        refreshPresence()
+      } else {
+        updateParticipants(event.participants)
+      }
       break
 
     case 'system': {
@@ -376,11 +416,100 @@ function updateParticipants(names) {
   participantsEl.innerHTML = ''
   for (const name of names) {
     const li = document.createElement('li')
+    li.className = hubMode ? 'participant-item' : ''
+    if (hubMode && currentView === `dm:${name}`) li.classList.add('active')
+    li.dataset.name = name
     const dot = document.createElement('span')
     dot.className = 'participant-dot'
     li.appendChild(dot)
     li.appendChild(document.createTextNode(name))
+    if (hubMode) {
+      li.style.cursor = 'pointer'
+      li.addEventListener('click', () => switchView(`dm:${name}`))
+    }
     participantsEl.appendChild(li)
+  }
+}
+
+function renderRoomsList(rooms) {
+  const roomsList = document.getElementById('rooms-list')
+  roomsList.innerHTML = ''
+  for (const room of rooms) {
+    const li = document.createElement('li')
+    li.className = 'room-item'
+    if (room === currentView) li.classList.add('active')
+    li.dataset.room = room
+    li.textContent = room
+    li.addEventListener('click', () => switchView(room))
+    roomsList.appendChild(li)
+  }
+}
+
+function switchView(view) {
+  if (view === currentView) return
+  currentView = view
+  messages.innerHTML = ''
+  lastSender = null
+  assistantEl = null
+  assistantBuffer = ''
+  thinkingEl = null
+
+  // Update active states in sidebar
+  for (const li of document.querySelectorAll('.room-item')) {
+    li.classList.toggle('active', li.dataset.room === view)
+  }
+  for (const li of document.querySelectorAll('.participant-item')) {
+    li.classList.toggle('active', 'dm:' + li.dataset.name === view)
+  }
+
+  // Update channel name
+  const channelName = document.getElementById('channel-name')
+  if (view.startsWith('dm:')) {
+    channelName.textContent = view.replace('dm:', '')
+  } else {
+    channelName.textContent = view
+  }
+
+  // Clear unread for this view
+  const buf = roomBuffers.get(view)
+  if (buf) {
+    buf.unread = 0
+    updateUnreadBadges()
+  }
+}
+
+function updateUnreadBadges() {
+  // Room badges
+  for (const li of document.querySelectorAll('.room-item')) {
+    const room = li.dataset.room
+    const buf = roomBuffers.get(room)
+    let badge = li.querySelector('.unread-badge')
+    if (buf && buf.unread > 0) {
+      if (!badge) {
+        badge = document.createElement('span')
+        badge.className = 'unread-badge'
+        li.appendChild(badge)
+      }
+      badge.textContent = buf.unread
+    } else if (badge) {
+      badge.remove()
+    }
+  }
+  // Participant DM badges
+  for (const li of document.querySelectorAll('.participant-item')) {
+    const dmView = `dm:${li.dataset.name}`
+    const buf = roomBuffers.get(dmView)
+    let badge = li.querySelector('.unread-badge')
+    if (buf && buf.unread > 0) {
+      if (!badge) {
+        badge = document.createElement('span')
+        badge.className = 'unread-badge'
+        li.appendChild(badge)
+      }
+      badge.textContent = buf.unread
+    } else if (badge) {
+      badge.remove()
+    }
   }
 }
 
@@ -445,10 +574,18 @@ async function send() {
   sendBtn.disabled = true
 
   try {
+    const body = { message: text, name: myName }
+    if (hubMode && currentView) {
+      if (currentView.startsWith('dm:')) {
+        body.to = currentView.replace('dm:', '')
+      } else {
+        body.room = currentView
+      }
+    }
     await fetch('/api/chat/send', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message: text, name: myName }),
+      body: JSON.stringify(body),
     })
   } catch (err) {
     const el = document.createElement('div')
