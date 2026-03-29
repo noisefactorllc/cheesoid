@@ -117,8 +117,8 @@ export function currentTimestamp() {
  * For openai-compat: returns an array of {role: 'system', content} objects
  * representing a 4-layer hierarchy for multi-system-message delivery.
  */
-export async function assemblePrompt(personaDir, config, plugins = []) {
-  const isOpenAICompat = config.provider === 'openai-compat'
+export async function assemblePrompt(personaDir, config, plugins = [], { isClaude = true } = {}) {
+  const isOpenAICompat = !isClaude || config.provider === 'openai-compat'
   const isHybrid = !!config.orchestrator
   const isModal = !!(config.cognition && config.attention)
 
@@ -144,52 +144,38 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
   // Room/office sections
   const operationalSections = []
 
+  const TURN_TAKING = [
+    `## Multi-Agent Turn-Taking — CRITICAL`,
+    ``,
+    `You share this room with other agents. Leadership rotates — each human message is assigned to one agent.`,
+    ``,
+    `### When you are NOT the leader`,
+    `When you see \`(system) AgentName has the floor for this message.\` — stay silent unless directly addressed by name.`,
+    ``,
+    `### When you ARE the leader`,
+    `You are the traffic controller. Your FIRST action before responding to any message must be to decide who needs to respond:`,
+    ``,
+    `1. **Only you?** Respond normally. No trigger needed.`,
+    `2. **Another agent?** Call \`internal({ backchannel: "Handing off to Green", trigger: true })\` BEFORE your response. Then stay silent or respond briefly.`,
+    `3. **Everyone?** You MUST call \`internal({ backchannel: "All agents respond", trigger: true })\` BEFORE your own response. This is NOT optional — if the message is addressed to the group, asks everyone to participate, or asks for input from all, you MUST trigger. Then respond yourself.`,
+    ``,
+    `**Failure to trigger when the message addresses the group means the other agents will be silent. You are the only one who can wake them up. This is your responsibility as leader.**`,
+    ``,
+    `Use \`internal({ thought: "..." })\` for private observations. Users never see backchannel or internal thoughts.`,
+  ].join('\n')
+
   if (config.rooms && config.rooms.length > 0) {
-    const roomNames = config.rooms.map(r => r.name)
-    operationalSections.push([
-      `## Connected Offices`,
-      `You are present in multiple offices simultaneously. Direct users are in your office. You are also connected to these other agents' offices: ${roomNames.join(', ')}.`,
-      ``,
-      `Every message is tagged with its source: \`[HH:MM][office/name@domain]\`. Your office shows as \`[HH:MM][home/name@yourdomain]\`, other agents' offices show as \`[HH:MM][officename/name@theirdomain]\`. Always check the tag to know where a message came from.`,
-      ``,
-      `When you respond, your response goes to the office the triggering message came from. Pay close attention to the tag — a message in \`[home/...]\` is in YOUR office, not someone else's.`,
-      ``,
-      `### Being a Visitor (IMPORTANT)`,
-      `In other agents' offices, you are a GUEST. Everyone in that office sees everything you say. Only speak publicly when you have something genuinely useful to contribute. If a message isn't addressed to you or doesn't need your input, don't say anything publicly — use the \`internal\` tool instead.`,
-      ``,
-      `You have the \`internal\` tool for private reactions. When you observe something in another agent's office but have nothing to say publicly, call \`internal({ thought: "..." })\`. To coordinate with the other agent privately, call \`internal({ backchannel: "..." })\`. You can combine both in one call. Anything you say without using this tool goes to that office publicly.`,
-      ``,
-      `### Backchannel`,
-      `You can talk to other agents in public chat — that's fine and natural ("Hey Brad, what do you think about this?"). But social cue coordination — who should respond, turn-taking, domain handoffs — MUST go through backchannel, not public chat. Users should not see logistics like "this one's for you" or "I'll handle this" or "go ahead."`,
-      ``,
-      `Use \`internal({ backchannel: "..." })\` to send private coordination messages. The backchannel is delivered privately to the other agent and triggers their attention.`,
-      ``,
-      `Incoming backchannel from other agents appears as \`[backchannel/office/name@domain]: message\`. Users never see these.`,
-    ].join('\n'))
+    operationalSections.push(TURN_TAKING)
   }
 
   if (config.agents && config.agents.length > 0) {
-    const agentNames = config.agents.map(a => a.name)
-    operationalSections.push([
-      `## Visiting Agents`,
-      `Other agents may visit your office: ${agentNames.join(', ')}. They appear as participants and their messages show in chat. You do not need to respond to every agent message.`,
-      ``,
-      `### Coordinating Responses`,
-      `When a user sends a message and visiting agents are present, consider whether to handle it yourself, delegate to a visiting agent, or collaborate. Use \`internal({ backchannel: "..." })\` to coordinate before responding publicly. You don't need to coordinate for every message — only when delegation or collaboration is warranted.`,
-      ``,
-      `### Private Channels`,
-      `Use \`internal({ backchannel: "..." })\` to coordinate privately with visiting agents — turn-taking, domain handoffs, delegation. Users never see backchannel. Use \`internal({ thought: "..." })\` for private observations.`,
-      ``,
-      `Visiting agents send you private messages via backchannel — these appear as \`[backchannel/agentname]: message\`. Users cannot see these.`,
-    ].join('\n'))
+    operationalSections.push(TURN_TAKING)
   }
 
   if (config.office_url) {
     operationalSections.push([
       `## Your Office`,
-      `Your office is at ${config.office_url}. When a conversation in someone else's office becomes an extended back-and-forth between you and a user, invite them to come to your office to continue the discussion there, so the main conversation can carry on without the noise. Share your office URL when you do this.`,
-      ``,
-      `**Before inviting someone to your office, check the message tag.** If it shows \`[home/...]\`, they are already in your office — do not invite them. Only invite when the tag shows a different room name.`,
+      `Your office is at ${config.office_url}. When a conversation in someone else's room becomes an extended back-and-forth, invite them to your office so the main conversation can continue without the noise.`,
     ].join('\n'))
   }
 
@@ -257,7 +243,7 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
     ]
   }
 
-  // Anthropic: single joined string (unchanged behavior for single-model)
+  // Anthropic (Claude) path — single joined string, no behavioral base
   const sections = []
   if (config.display_name) {
     sections.push(`Your name is ${config.display_name}.`)
@@ -266,7 +252,6 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
   if (soul) sections.push(soul)
   if (systemPromptContent) sections.push(systemPromptContent)
   sections.push(...operationalSections)
-  // In hybrid mode, inject batching discipline even for Anthropic orchestrator
   if (isHybrid) {
     sections.push(TOOL_DISCIPLINE_HYBRID)
   }

@@ -87,8 +87,8 @@ export class RoomClient {
     return this._post({ message: text, name: this.agentName, backchannel: true, ...options })
   }
 
-  async sendMessage(text) {
-    return this._post({ message: text, name: this.agentName })
+  async sendMessage(text, options = {}) {
+    return this._post({ message: text, name: this.agentName, ...options })
   }
 
   async sendEvent(event) {

@@ -203,7 +203,9 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       return block
     })
 
-    messages.push({ role: 'assistant', content: assistantContent })
+    // Strip thinking blocks — they cause 400 errors when replayed in history
+    const cleanedContent = assistantContent.filter(b => b.type !== 'thinking')
+    messages.push({ role: 'assistant', content: cleanedContent })
 
     // If no tool use, we're done
     if (stopReason !== 'tool_use') {
@@ -295,7 +297,8 @@ async function _nudgeIfEmpty(messages, provider, config, systemPrompt, totalUsag
   totalUsage.input_tokens += result.usage.input_tokens
   totalUsage.output_tokens += result.usage.output_tokens
 
-  messages.push({ role: 'assistant', content: result.contentBlocks })
+  const cleanedBlocks = result.contentBlocks.filter(b => b.type !== 'thinking')
+  messages.push({ role: 'assistant', content: cleanedBlocks })
 }
 
 /**
@@ -436,7 +439,8 @@ async function callOrchestratorWithFallback(config, params, onEvent) {
  * 4. Orchestrator: sees all accumulated results, generates final response
  */
 export async function runHybridAgent(systemPrompt, messages, tools, config, onEvent) {
-  const orchestrator = config.provider
+  // NOTE: do not capture config.provider — step_up may reassign it mid-loop
+  let orchestrator = config.provider
   // Resolve executor from registry if available, fall back to config.executorProvider
   const executorResolved = config.registry && config.executorModel
     ? config.registry.resolve(config.executorModel)
@@ -547,7 +551,9 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       return block
     })
 
-    messages.push({ role: 'assistant', content: assistantContent })
+    // Strip thinking blocks — they cause 400 errors when replayed in history
+    const cleanedAssistant = assistantContent.filter(b => b.type !== 'thinking')
+    messages.push({ role: 'assistant', content: cleanedAssistant })
 
     // No tool use — orchestrator is done
     if (stopReason !== 'tool_use') {
@@ -596,6 +602,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
         const resolved = config.registry.resolve(newModel)
         config.model = resolved.modelId
         config.provider = resolved.provider
+        orchestrator = resolved.provider // update local ref for intent routing
         stepUpUsed = true // prevent re-run loops
 
         console.log(`[hybrid] step_up: re-running turn with ${resolved.modelId}`)
@@ -618,6 +625,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       ]
 
       const MAX_EXECUTOR_TURNS = 3
+      let activeExecutorModel = executorModel // best-known executor model for event tagging
       for (let execTurn = 0; execTurn < MAX_EXECUTOR_TURNS; execTurn++) {
         try {
           const { result: execResult, model: usedModel } = await callExecutorWithFallback(
@@ -632,10 +640,11 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
             },
             (event) => {
               if (event.type === 'tool_start' || event.type === 'tool_result') {
-                onEvent(event)
+                onEvent({ ...event, model: activeExecutorModel, executor: true })
               }
             },
           )
+          activeExecutorModel = usedModel // update with actual model used (may differ after fallback)
 
           executorUsage.input_tokens += execResult.usage.input_tokens
           executorUsage.output_tokens += execResult.usage.output_tokens
@@ -667,7 +676,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
             } catch (err) {
               toolResult = { output: `Tool error: ${err.message}`, is_error: true }
             }
-            onEvent({ type: 'tool_result', name: block.name, input: block.input, result: toolResult })
+            onEvent({ type: 'tool_result', name: block.name, input: block.input, result: toolResult, model: activeExecutorModel, executor: true })
             moreResults.push({
               type: 'tool_result',
               tool_use_id: block.id,
@@ -698,7 +707,8 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
   // If the orchestrator ended with no text after tool results, make one more call
   // with tools disabled so it summarizes in its own voice.
-  await _nudgeIfEmpty(messages, orchestrator, config, systemPrompt, totalUsage, onEvent)
+  // Use config.provider (not the captured `orchestrator`) because step_up may have changed it
+  await _nudgeIfEmpty(messages, config.provider, config, systemPrompt, totalUsage, onEvent)
 
   console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | executor: ${executorUsage.input_tokens} in / ${executorUsage.output_tokens} out | reasoner: ${reasonerUsage.input_tokens} in / ${reasonerUsage.output_tokens} out | tools: ${totalToolTurns}`)
   onEvent({ type: 'done', model: config.model, usage: { input_tokens: totalUsage.input_tokens + executorUsage.input_tokens + reasonerUsage.input_tokens, output_tokens: totalUsage.output_tokens + executorUsage.output_tokens + reasonerUsage.output_tokens } })

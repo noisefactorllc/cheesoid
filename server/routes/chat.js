@@ -71,7 +71,7 @@ router.post('/api/chat/send', async (req, res) => {
   if (req.isAgent && req.body.backchannel) {
     room.addBackchannelMessage(name, message, { trigger: req.body.trigger })
   } else if (req.isAgent) {
-    room.addAgentMessage(name, message, { source: 'room' })
+    room.addAgentMessage(name, message, { source: 'room', model: req.body.model })
   } else {
     room.sendMessage(name, message).catch(err => {
       console.error('sendMessage error:', err.message)

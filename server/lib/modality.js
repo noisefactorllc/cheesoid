@@ -34,19 +34,20 @@ export class Modality {
 
   stepUp(reason) {
     const previous = this._mode
-    if (this._isModal) this._mode = 'cognition'
-    return { previous, current: this._mode }
+    if (this._isModal && this._mode !== 'cognition') this._mode = 'cognition'
+    return { previous, current: this._mode, changed: previous !== this._mode }
   }
 
   stepDown(reason) {
     const previous = this._mode
-    if (this._isModal) this._mode = 'attention'
-    return { previous, current: this._mode }
+    if (this._isModal && this._mode !== 'attention') this._mode = 'attention'
+    return { previous, current: this._mode, changed: previous !== this._mode }
   }
 
   toolDefinitions() {
-    return [
-      {
+    const tools = []
+    if (this._mode === 'attention') {
+      tools.push({
         name: 'step_up',
         description:
           'Shift from attention mode to cognition mode. Call this when you are being directly addressed, need to engage substantively, or the moment calls for your full voice and personality. This re-runs the current turn with a more capable model.',
@@ -60,8 +61,10 @@ export class Modality {
           },
           required: ['reason'],
         },
-      },
-      {
+      })
+    }
+    if (this._mode === 'cognition') {
+      tools.push({
         name: 'step_down',
         description:
           'Shift from cognition mode back to attention mode. Call this when the conversation has gone quiet, the thread has shifted to other participants, or monitoring mode is sufficient. Takes effect on the next turn.',
@@ -75,26 +78,28 @@ export class Modality {
           },
           required: ['reason'],
         },
-      },
-    ]
+      })
+    }
+    return tools
   }
 
   executeTool(name, input) {
     if (name === 'step_up') {
-      const previous = this._mode
-      const { current } = this.stepUp(input.reason)
-      const changed = previous !== current
+      const { previous, current, changed } = this.stepUp(input.reason)
       return {
-        output: `Shifted from ${previous} to ${current}. Reason: ${input.reason}`,
+        output: changed
+          ? `Shifted from ${previous} to ${current}. Reason: ${input.reason}`
+          : `Already in ${current} mode.`,
         _stepUp: changed,
       }
     }
 
     if (name === 'step_down') {
-      const previous = this._mode
-      const { current } = this.stepDown(input.reason)
+      const { previous, current, changed } = this.stepDown(input.reason)
       return {
-        output: `Shifted from ${previous} to ${current}. Reason: ${input.reason}`,
+        output: changed
+          ? `Shifted from ${previous} to ${current}. Reason: ${input.reason}`
+          : `Already in ${current} mode.`,
       }
     }
 

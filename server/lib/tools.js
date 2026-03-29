@@ -26,7 +26,7 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   // Modality tools (attention/cognition gear shifting)
   const modalityTools = buildModalityTools(modality)
 
-  const allDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...reasonerTools.definitions, ...modalityTools.definitions, ...personaTools.definitions]
+  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...reasonerTools.definitions, ...personaTools.definitions]
 
   async function execute(name, input, options) {
     if (memoryTools.handles(name)) {
@@ -47,7 +47,11 @@ export async function loadTools(personaDir, config, memory, state, room, registr
     return personaTools.execute(name, input)
   }
 
-  return { definitions: allDefinitions, execute }
+  return {
+    // Dynamic: modality tools change based on current mode
+    get definitions() { return [...staticDefinitions, ...modalityTools.definitions] },
+    execute,
+  }
 }
 
 function buildRoomTools(room, config) {
@@ -82,12 +86,13 @@ function buildRoomTools(room, config) {
   if (hasMultiAgent) {
     definitions.push({
       name: 'internal',
-      description: 'Record an internal thought (visible as idle text) and/or send a backchannel message to coordinate with other agents. At least one of thought or backchannel must be provided.',
+      description: 'Record an internal thought and/or send a backchannel message to coordinate with other agents. Use trigger: true to wake up other agents and prompt them to respond.',
       input_schema: {
         type: 'object',
         properties: {
           thought: { type: 'string', description: 'An internal thought to broadcast as idle text and record in history.' },
-          backchannel: { type: 'string', description: 'A backchannel message for agent coordination, sent to the current pending room.' },
+          backchannel: { type: 'string', description: 'A backchannel message for agent coordination.' },
+          trigger: { type: 'boolean', description: 'If true, the backchannel message triggers other agents to process and respond. Use when delegating or inviting others to speak.' },
         },
       },
     })
@@ -134,12 +139,12 @@ function buildRoomTools(room, config) {
           if (pendingRoom && pendingRoom !== 'home') {
             const client = room.roomClients.get(pendingRoom)
             if (client) {
-              await client.sendBackchannel(input.backchannel)
+              await client.sendBackchannel(input.backchannel, { trigger: !!input.trigger })
             }
           } else {
-            room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel })
+            room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel, trigger: !!input.trigger })
           }
-          parts.push('Backchannel sent.')
+          parts.push(input.trigger ? 'Backchannel sent (triggered).' : 'Backchannel sent.')
         }
 
         return { output: parts.join('\n') }
@@ -339,15 +344,17 @@ function buildReasonerTools(config, registry) {
 
 function buildModalityTools(modality) {
   if (!modality?.isModal) {
-    return { definitions: [], handles: () => false, execute: async () => ({ error: 'unknown tool' }) }
+    return { get definitions() { return [] }, handles: () => false, execute: async () => ({ error: 'unknown tool' }) }
   }
-
-  const definitions = modality.toolDefinitions()
-  const toolNames = new Set(definitions.map(d => d.name))
 
   async function execute(name, input) {
     return modality.executeTool(name, input)
   }
 
-  return { definitions, handles: (name) => toolNames.has(name), execute }
+  return {
+    // Dynamic — only expose step_up in attention mode, step_down in cognition mode
+    get definitions() { return modality.toolDefinitions() },
+    handles: (name) => name === 'step_up' || name === 'step_down',
+    execute,
+  }
 }

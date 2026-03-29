@@ -77,6 +77,7 @@ body {
 }
 
 #sidebar-toggle {
+  margin-top: auto;
   border-top: 1px solid var(--hf-border);
   border-radius: 0;
 }
@@ -219,6 +220,14 @@ main {
 #input-area {
   padding: var(--hf-space-3) var(--hf-space-4);
   background: var(--hf-bg-surface);
+  align-items: center;
+}
+
+.channel-label {
+  font-size: var(--hf-size-sm);
+  color: var(--hf-text-dim);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 #input {
@@ -259,13 +268,29 @@ main {
   padding: var(--hf-space-1) 0;
 }
 
+.tool-details {
+  margin: var(--hf-space-1) 0;
+  padding-left: var(--hf-space-2);
+  border-left: 2px solid var(--hf-border);
+}
+
+.tool-summary {
+  color: var(--hf-text-dim);
+  font-size: var(--hf-size-sm);
+  cursor: pointer;
+  user-select: none;
+  padding: 2px 0;
+}
+
+.tool-summary:hover {
+  color: var(--hf-text-normal);
+}
+
 .tool-call {
   color: var(--hf-text-dim);
   font-size: var(--hf-size-sm);
   font-style: italic;
   margin: 2px 0;
-  padding-left: var(--hf-space-2);
-  border-left: 2px solid var(--hf-border);
 }
 
 /* Thinking indicator */

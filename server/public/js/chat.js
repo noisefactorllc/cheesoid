@@ -209,7 +209,7 @@ function handleEvent(e) {
       idleBuffer = ''
       for (const msg of event.messages) {
         if (msg.type === 'user_message') {
-          appendMessage('user', msg.text, msg.name, msg.timestamp)
+          appendMessage('user', msg.text, msg.name, msg.timestamp, false, msg.model)
         } else if (msg.type === 'assistant_message') {
           if (msg.name) {
             // Visiting agent message with optional tool summary
@@ -247,12 +247,35 @@ function handleEvent(e) {
       // message replaces the tool-use placeholder
       if (event.fromAgent && visitorStreams.has(event.name)) {
         const vs = visitorStreams.get(event.name)
-        for (const tc of vs.element.querySelectorAll('.tool-call')) tc.remove()
         const body = vs.element.querySelector('.message-body')
         if (body) body.innerHTML = renderMarkdown(event.text)
+        // Attach model to the visitor message and its tool calls
+        if (event.model) {
+          const meta = vs.element.querySelector('.message-meta')
+          if (meta && !meta.querySelector('.message-model')) {
+            const modelSpan = document.createElement('span')
+            modelSpan.className = 'message-model'
+            modelSpan.textContent = event.model
+            meta.appendChild(modelSpan)
+          }
+          for (const tc of vs.element.querySelectorAll('.tool-call:not(.has-model)')) {
+            const modelSpan = document.createElement('span')
+            modelSpan.className = 'message-model'
+            modelSpan.textContent = event.model
+            tc.appendChild(modelSpan)
+            tc.classList.add('has-model')
+          }
+        }
+        // Remove thinking indicator and collapse tool details
+        if (vs.thinkingEl) {
+          vs.thinkingEl.remove()
+          vs.thinkingEl = null
+        }
+        const vToolDetails = vs.element.querySelector('details.tool-details')
+        if (vToolDetails) vToolDetails.open = false
         visitorStreams.delete(event.name)
       } else {
-        appendMessage('user', event.text, event.name, null, event.fromAgent)
+        appendMessage('user', event.text, event.name, null, event.fromAgent, event.model)
       }
       if (!event.fromAgent) {
         assistantEl = appendMessage('assistant', '')
@@ -261,6 +284,20 @@ function handleEvent(e) {
         thinkingEl.className = 'thinking-indicator'
         thinkingEl.innerHTML = '<span>thinking</span><div class="thinking-dots"><span></span><span></span><span></span></div>'
         assistantEl.appendChild(thinkingEl)
+      }
+      break
+
+    case 'response_model':
+      // Model name arrives before any tool calls — set it so tools get labeled immediately
+      currentModel = event.model || null
+      if (assistantEl && currentModel) {
+        const meta = assistantEl.querySelector('.message-meta')
+        if (meta && !meta.querySelector('.message-model')) {
+          const modelSpan = document.createElement('span')
+          modelSpan.className = 'message-model'
+          modelSpan.textContent = currentModel
+          meta.appendChild(modelSpan)
+        }
       }
       break
 
@@ -292,20 +329,40 @@ function handleEvent(e) {
           const el = appendMessage('assistant', '', agentName, null, true)
           el.classList.add('visitor-message')
           el.style.borderLeftColor = nameColor(agentName)
-          visitorStreams.set(agentName, { element: el, buffer: '' })
+          // Add thinking indicator for visitor
+          const vThinking = document.createElement('div')
+          vThinking.className = 'thinking-indicator'
+          vThinking.innerHTML = '<span>thinking</span><div class="thinking-dots"><span></span><span></span><span></span></div>'
+          el.appendChild(vThinking)
+          visitorStreams.set(agentName, { element: el, buffer: '', thinkingEl: vThinking })
         }
-        appendTool(visitorStreams.get(agentName).element, `Using tool: ${event.name}...`)
+        // Remove visitor thinking indicator on first tool
+        const vs = visitorStreams.get(agentName)
+        if (vs.thinkingEl) {
+          vs.thinkingEl.remove()
+          vs.thinkingEl = null
+        }
+        appendTool(vs.element, `Using tool: ${event.name}...`, false, event.model)
       } else if (assistantEl && !event.idle) {
-        appendTool(assistantEl, `Using tool: ${event.name}...`)
+        appendTool(assistantEl, `Using tool: ${event.name}...`, false, event.model)
       }
       break
 
     case 'tool_result':
       if (event.visiting) {
         const vs = visitorStreams.get(event.agentName)
-        if (vs) appendTool(vs.element, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`)
+        if (vs) {
+          appendTool(vs.element, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`, false, event.model)
+          // Re-show thinking indicator for visitor
+          if (!vs.thinkingEl) {
+            vs.thinkingEl = document.createElement('div')
+            vs.thinkingEl.className = 'thinking-indicator'
+            vs.thinkingEl.innerHTML = '<span>thinking</span><div class="thinking-dots"><span></span><span></span><span></span></div>'
+            vs.element.appendChild(vs.thinkingEl)
+          }
+        }
       } else if (assistantEl && !event.idle) {
-        appendTool(assistantEl, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`)
+        appendTool(assistantEl, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`, false, event.model)
         // Re-show thinking indicator after tool result — agent is processing
         if (!thinkingEl) {
           thinkingEl = document.createElement('div')
@@ -323,7 +380,7 @@ function handleEvent(e) {
       }
       currentModel = event.model || null
       if (assistantEl) {
-        // Add model + timestamp to meta if available
+        // Add model to message meta
         if (currentModel) {
           const meta = assistantEl.querySelector('.message-meta')
           if (meta && !meta.querySelector('.message-model')) {
@@ -332,8 +389,18 @@ function handleEvent(e) {
             modelSpan.textContent = currentModel
             meta.appendChild(modelSpan)
           }
+          // Also add model to all tool calls that were rendered during this response
+          for (const tc of assistantEl.querySelectorAll('.tool-call:not(.has-model)')) {
+            const modelSpan = document.createElement('span')
+            modelSpan.className = 'message-model'
+            modelSpan.textContent = currentModel
+            tc.appendChild(modelSpan)
+            tc.classList.add('has-model')
+          }
         }
-        for (const tc of assistantEl.querySelectorAll('.tool-call')) tc.remove()
+        // Collapse tool details now that streaming is done
+        const toolDetails = assistantEl.querySelector('details.tool-details')
+        if (toolDetails) toolDetails.open = false
         // Extract thought tags and render as idle thoughts
         if (assistantBuffer.includes('<thought>')) {
           const thoughts = []
@@ -344,7 +411,8 @@ function handleEvent(e) {
           for (const thought of thoughts) {
             const el = document.createElement('div')
             el.className = 'idle-thought'
-            el.innerHTML = renderMarkdown(thought)
+            const metaHtml = `<div class="inline-meta"><span class="message-time">${formatTime(Date.now())}</span>${currentModel ? `<span class="message-model">${escapeHtml(currentModel)}</span>` : ''}</div>`
+            el.innerHTML = metaHtml + renderMarkdown(thought)
             messages.appendChild(el)
           }
         }
@@ -403,14 +471,9 @@ function handleEvent(e) {
       refreshPresence()
       break
 
-    case 'backchannel': {
-      const el = document.createElement('div')
-      el.className = 'idle-thought agent-backchannel'
-      el.innerHTML = `<div class="inline-meta"><span class="message-time">${formatTime(Date.now())}</span></div><span class="backchannel-label">[backchannel/${event.name}]</span> ${renderMarkdown(event.text)}`
-      messages.appendChild(el)
-      lastSender = null
+    case 'backchannel':
+      // Backchannel is agent-only coordination — hidden from human users
       break
-    }
 
     case 'presence':
       if (hubMode && event.room) {
@@ -437,7 +500,7 @@ function handleEvent(e) {
       } else {
         const el = document.createElement('div')
         el.className = 'message error'
-        el.textContent = event.message
+        el.innerHTML = `<span class="message-time">${formatTime(Date.now())}</span> ${escapeHtml(event.message)}`
         messages.appendChild(el)
         scrollToBottom()
       }
@@ -635,7 +698,7 @@ async function send() {
   } catch (err) {
     const el = document.createElement('div')
     el.className = 'message error'
-    el.textContent = `Send failed: ${err.message}`
+    el.innerHTML = `<span class="message-time">${formatTime(Date.now())}</span> ${escapeHtml('Send failed: ' + err.message)}`
     messages.appendChild(el)
   }
 
@@ -645,7 +708,7 @@ async function send() {
 }
 
 function formatTime(timestamp) {
-  if (!timestamp) return ''
+  if (timestamp == null) return ''
   const d = new Date(timestamp)
   const h = d.getHours()
   const m = d.getMinutes().toString().padStart(2, '0')
@@ -718,6 +781,23 @@ function appendMessage(role, text, name, timestamp, fromAgent = false, model = n
     el.appendChild(meta)
   }
 
+  // Inline meta for continuation messages (non-first in a group)
+  if (!isFirst) {
+    const inlineMeta = document.createElement('div')
+    inlineMeta.className = 'inline-meta'
+    const timeSpan = document.createElement('span')
+    timeSpan.className = 'message-time'
+    timeSpan.textContent = formatTime(timestamp) || formatTime(Date.now())
+    inlineMeta.appendChild(timeSpan)
+    if (model) {
+      const modelSpan = document.createElement('span')
+      modelSpan.className = 'message-model'
+      modelSpan.textContent = model
+      inlineMeta.appendChild(modelSpan)
+    }
+    el.appendChild(inlineMeta)
+  }
+
   lastSender = senderKey
 
   // Message body
@@ -731,15 +811,52 @@ function appendMessage(role, text, name, timestamp, fromAgent = false, model = n
   return el
 }
 
-function appendTool(parentEl, text, isError = false) {
+function getToolContainer(parentEl) {
+  let details = parentEl.querySelector('details.tool-details')
+  if (!details) {
+    details = document.createElement('details')
+    details.className = 'tool-details'
+    details.open = true // open during streaming, collapsed on done
+    const summary = document.createElement('summary')
+    summary.className = 'tool-summary'
+    summary.textContent = 'tools'
+    details.appendChild(summary)
+    // Insert before thinking indicator if present, else append
+    const thinking = parentEl.querySelector('.thinking-indicator')
+    if (thinking) {
+      parentEl.insertBefore(details, thinking)
+    } else {
+      parentEl.appendChild(details)
+    }
+  }
+  return details
+}
+
+function updateToolSummary(details) {
+  const count = details.querySelectorAll('.tool-call').length
+  const summary = details.querySelector('summary')
+  if (summary) summary.textContent = `${count} tool call${count !== 1 ? 's' : ''}`
+}
+
+function appendTool(parentEl, text, isError = false, model = null) {
+  const details = getToolContainer(parentEl)
   const el = document.createElement('div')
   el.className = isError ? 'tool-call error' : 'tool-call'
   const time = document.createElement('span')
   time.className = 'message-time'
   time.textContent = formatTime(Date.now())
   el.appendChild(time)
+  const effectiveModel = model || currentModel
+  if (effectiveModel) {
+    const modelSpan = document.createElement('span')
+    modelSpan.className = 'message-model'
+    modelSpan.textContent = effectiveModel
+    el.appendChild(modelSpan)
+    el.classList.add('has-model')
+  }
   el.appendChild(document.createTextNode(' ' + text))
-  parentEl.appendChild(el)
+  details.appendChild(el)
+  updateToolSummary(details)
   scrollToBottom()
 }
 

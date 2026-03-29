@@ -23,7 +23,7 @@ function replaceTimestamp(prompt) {
 
 const IDLE_THOUGHT_INTERVAL = 30 * 60 * 1000 // 30 minutes, doubles each time
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
-const MAX_HISTORY = 50
+const MAX_HISTORY = 100
 const MAX_QUEUED_WEBHOOKS = 10
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
@@ -69,6 +69,13 @@ export class Room {
     this._destroyed = false
     this._sessionStartHandled = false
     this.modality = null // initialized in initialize() if modal config present
+
+    // RAFT-like rotating leadership for multi-agent turn-taking
+    this._leaderPool = [persona.config.display_name]
+    for (const agent of persona.config.agents || []) {
+      this._leaderPool.push(agent.name)
+    }
+    this._leaderIndex = 0
 
     // Venue awareness: derive domain from office_url and room configs
     const officeUrl = persona.config.office_url
@@ -125,10 +132,10 @@ export class Room {
         if (entry.type === 'assistant_message' || entry.type === 'idle_thought') {
           this.messages.push({ role: 'assistant', content: entry.text })
         } else if (entry.type === 'user_message') {
-          const prefix = entry.name ? `[${ts}] ${entry.name}` : `[${ts}]`
+          const prefix = entry.name || 'anon'
           this.messages.push({ role: 'user', content: `${prefix}: ${entry.text}` })
         } else if (entry.type === 'system') {
-          this.messages.push({ role: 'user', content: `[${ts}] * ${entry.text}` })
+          this.messages.push({ role: 'user', content: `* ${entry.text}` })
         }
       }
       this.history = recent // also restore scrollback
@@ -226,6 +233,20 @@ export class Room {
     }
   }
 
+  /**
+   * RAFT-like leader election. Returns the current leader name and advances
+   * the index. If the elected leader is busy, cycles through the pool once
+   * to find an available agent. Returns null if all are busy (shouldn't happen
+   * since the host's busy flag is checked before calling this).
+   */
+  _electLeader() {
+    if (this._leaderPool.length <= 1) return this._leaderPool[0] || null
+    const pool = this._leaderPool
+    const start = this._leaderIndex % pool.length
+    this._leaderIndex++
+    return pool[start]
+  }
+
   _timestamp() {
     const now = new Date()
     const h = now.getHours().toString().padStart(2, '0')
@@ -238,11 +259,12 @@ export class Room {
     return domain ? `@${domain}` : ''
   }
 
-  addAgentMessage(name, text, { source = 'user' } = {}) {
-    const taggedMessage = `[${this._timestamp()}][home/${name}${this._domainSuffix('home')}]: ${text}`
-    this._safeAppendMessage({ role: 'user', content: taggedMessage })
-    this.broadcast({ type: 'user_message', name, text, fromAgent: true })
-    this.recordHistory({ type: 'user_message', name, text })
+  addAgentMessage(name, text, { source = 'user', model } = {}) {
+    this._safeAppendMessage({ role: 'user', content: `${name}: ${text}` })
+    this.broadcast({ type: 'user_message', name, text, fromAgent: true, model })
+    const histEntry = { type: 'user_message', name, text }
+    if (model) histEntry.model = model
+    this.recordHistory(histEntry)
     this.lastActivity = Date.now()
     this._clearIdleTimer()
     this._consecutiveDegenerateCount = 0 // new info arrived, worth thinking about
@@ -253,11 +275,12 @@ export class Room {
   }
 
   addBackchannelMessage(name, text, options = {}) {
-    const taggedMessage = `[${this._timestamp()}][backchannel/${name}${this._domainSuffix('home')}]: ${text}`
-    this._safeAppendMessage({ role: 'user', content: taggedMessage })
+    this._safeAppendMessage({ role: 'user', content: `(backchannel) ${name}: ${text}` })
 
     if (options.trigger) {
-      this._processMessage('home', name, text).catch(err => {
+      // Trigger processing with a nudge — the original message is already in context,
+      // the backchannel just wakes the agent up to respond to what's there.
+      this._processMessage('home', 'system', `(backchannel from ${name}) ${text} — respond to the conversation above.`).catch(err => {
         console.error(`[${this.persona.config.name}] Triggered backchannel error:`, err.message)
       })
     }
@@ -301,26 +324,43 @@ export class Room {
   }
 
   _handleRemoteEvent(event) {
-    const ds = this._domainSuffix(event.room)
     if (event.type === 'user_message') {
       if (event.scrollback) {
-        // Historical context from remote room — don't trigger agent
-        const tag = `[${event.room}/${event.name}${ds}]`
-        this._safeAppendMessage({ role: 'user', content: `${tag}: ${event.text}` })
+        this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
+      } else if (event.fromAgent) {
+        // Another agent spoke — context only, don't trigger a response
+        this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
       } else {
-        this._processMessage(event.room, event.name, event.text)
+        // Human message — check turn-taking leader + modality shift
+        const myName = this.persona.config.display_name
+        if (this.modality?.isModal) {
+          if (event.leader === myName) {
+            this.modality.stepUp('elected leader')
+          } else {
+            this.modality.stepDown('not leader')
+          }
+        }
+        const mentionedByName = new RegExp(`\\b${myName}\\b`, 'i').test(event.text)
+        if (mentionedByName) {
+          if (this.modality?.isModal) this.modality.stepUp('addressed by name')
+          console.log(`[${this.persona.config.name}] Mentioned by name — responding`)
+          this._processMessage(event.room, event.name, event.text)
+        } else if (event.leader && event.leader !== myName) {
+          this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
+          this._safeAppendMessage({ role: 'user', content: `(system) ${event.leader} has the floor for this message.` })
+          console.log(`[${this.persona.config.name}] Deferring to ${event.leader}`)
+        } else {
+          console.log(`[${this.persona.config.name}] Taking the floor`)
+          this._processMessage(event.room, event.name, event.text)
+        }
       }
     } else if (event.type === 'assistant_message') {
-      // Another room's agent responded — add context only, don't trigger
-      const tag = `[${event.room}/assistant${ds}]`
-      this._safeAppendMessage({ role: 'user', content: `${tag}: ${event.text}` })
+      // Host agent responded — context only, don't trigger
+      this._safeAppendMessage({ role: 'user', content: `${event.name || 'assistant'}: ${event.text}` })
     } else if (event.type === 'backchannel') {
-      // Agent-only coordination message — add to conversation log, no UI
-      const tag = `[${this._timestamp()}][backchannel/${event.room}/${event.name}${ds}]`
-      this._safeAppendMessage({ role: 'user', content: `${tag}: ${event.text}` })
-
+      this._safeAppendMessage({ role: 'user', content: `(backchannel) ${event.name}: ${event.text}` })
       if (event.trigger) {
-        this._processMessage(event.room, event.name, event.text)
+        this._processMessage(event.room, 'system', `(backchannel from ${event.name}) ${event.text} — respond to the conversation above.`)
       }
     }
   }
@@ -375,17 +415,52 @@ export class Room {
     try {
       if (!this.systemPrompt) await this.initialize()
 
-      const ts = this._timestamp()
-      const roomLabel = room === 'home' ? 'home' : room
-      const ds = this._domainSuffix(room)
-      const tag = `[${ts}][${roomLabel}/${name}${ds}]`
       const presence = room === 'home' ? ` (present: ${this.participantList.join(', ')})` : ''
-      this.messages.push({ role: 'user', content: `${tag}${presence}: ${text}` })
+      this.messages.push({ role: 'user', content: `${name}${presence}: ${text}` })
+
+      // Multi-agent turn-taking: check for direct address, else rotate
+      // Skip leader election for system/backchannel-triggered messages
+      let leader = null
+      const isMultiAgent = room === 'home' && this._leaderPool.length > 1 && name !== 'system'
+      if (isMultiAgent) {
+        // If the message mentions a specific agent by name, they get the floor
+        for (const agentName of this._leaderPool) {
+          if (new RegExp(`\\b${agentName}\\b`, 'i').test(text)) {
+            leader = agentName
+            break
+          }
+        }
+        if (!leader) {
+          leader = this._electLeader()
+        }
+        console.log(`[${this.persona.config.name}] Turn leader: ${leader} (pool: ${this._leaderPool.join(', ')})`)
+      }
 
       if (room === 'home') {
         if (name) this.participants.set(name, Date.now())
-        this.broadcast({ type: 'user_message', name, text })
+        this.broadcast({ type: 'user_message', name, text, leader })
         this.recordHistory({ type: 'user_message', name, text })
+      }
+
+      // Modality gear shift on leader election: leader steps up, others step down
+      const myName = this.persona.config.display_name
+      if (leader && this.modality?.isModal) {
+        if (leader === myName) {
+          this.modality.stepUp('elected leader')
+        } else {
+          this.modality.stepDown('not leader')
+        }
+      }
+
+      // If another agent is the leader for this turn, defer — add context but don't respond
+      if (leader && leader !== myName) {
+        console.log(`[${this.persona.config.name}] Deferring to ${leader}`)
+        this.messages.push({ role: 'user', content: `(system) ${leader} has the floor for this message.` })
+        // Tell the UI to clean up the empty assistant placeholder
+        if (room === 'home') {
+          this.broadcast({ type: 'done', model: null, deferred: true })
+        }
+        return // skip agent loop — finally block handles cleanup
       }
 
       // Determine mode: modal (attention/cognition), hybrid (orchestrator), or direct
@@ -433,12 +508,21 @@ export class Room {
 
       let assistantText = ''
       let assistantModel = null
+      // Emit the model name immediately so the UI can label all messages from the start
+      if (this._pendingRoom === 'home') {
+        this.broadcast({ type: 'response_model', model: orchestratorModel })
+      }
       const onEvent = (event) => {
         if (event.type === 'text_delta') {
           assistantText += event.text
         }
         if (event.type === 'done' && event.model) {
           assistantModel = event.model
+        }
+        // Tag all tool events with the model that initiated them
+        // (executor events already have model from the hybrid loop wrapper)
+        if ((event.type === 'tool_start' || event.type === 'tool_result') && !event.model) {
+          event.model = orchestratorModel
         }
         if (this._pendingRoom === 'home') {
           this.broadcast(event)
@@ -460,7 +544,12 @@ export class Room {
         })
       }
 
-      const prompt = replaceTimestamp(this.systemPrompt)
+      // Non-Claude models get the hierarchical soul corpus, assembled fresh
+      const activeIsClaude = orchestratorModel.startsWith('claude')
+      const basePrompt = activeIsClaude
+        ? this.systemPrompt
+        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false })
+      const prompt = replaceTimestamp(basePrompt)
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
@@ -476,7 +565,7 @@ export class Room {
       } else {
         const client = this.roomClients.get(this._pendingRoom)
         if (client && assistantText.trim()) {
-          await client.sendMessage(assistantText.trim())
+          await client.sendMessage(assistantText.trim(), { model: assistantModel })
         }
         this._autoNudgeMentionedAgents(assistantText)
       }
@@ -550,8 +639,11 @@ export class Room {
       let orchestratorModel, orchestratorProvider, executorModel
 
       if (hasModality) {
-        // Idle thoughts always run in attention mode — don't step up for idle
-        const modalModel = this.modality.attentionModel
+        // Non-leaders step down on idle; leader stays in cognition
+        const currentLeader = this._leaderPool[((this._leaderIndex - 1) % this._leaderPool.length + this._leaderPool.length) % this._leaderPool.length]
+        const isLeader = currentLeader === this.persona.config.display_name
+        if (!isLeader) this.modality.stepDown('idle — not leader')
+        const modalModel = isLeader ? this.modality.model : this.modality.attentionModel
         const resolved = this.registry.resolve(modalModel)
         orchestratorModel = resolved.modelId
         orchestratorProvider = resolved.provider
@@ -610,7 +702,11 @@ export class Room {
         }
       }
 
-      const prompt = replaceTimestamp(this.systemPrompt)
+      const activeIsClaude = orchestratorModel.startsWith('claude')
+      const basePrompt = activeIsClaude
+        ? this.systemPrompt
+        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false })
+      const prompt = replaceTimestamp(basePrompt)
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, idleMessages, this.tools, agentConfig, onEvent)
 

@@ -42,7 +42,7 @@ router.get('/api/presence', async (req, res) => {
   const result = {
     persona: persona.config.display_name,
     state: stateData,
-    participants: rooms ? rooms.allParticipants : room.participantList,
+    participants: rooms ? [persona.config.display_name, ...rooms.allParticipants] : room.participantList,
     auth_proxy: authProxy,
   }
 
