@@ -23,23 +23,27 @@ function resolveRoom(req, roomName) {
   return rooms.resolve(roomName)
 }
 
-// SSE stream — client connects and receives events from a room
+// SSE stream — client connects and receives room events
 router.get('/api/chat/stream', (req, res) => {
   const name = req.userName || req.query.name || null
-  const room = resolveRoom(req, req.query.room)
-  if (!room) return res.status(404).json({ error: 'room not found' })
+  const { rooms } = req.app.locals
 
   res.setHeader('Content-Type', 'text/event-stream')
   res.setHeader('Cache-Control', 'no-cache')
   res.setHeader('Connection', 'keep-alive')
   res.flushHeaders()
 
-  room.addClient(res, name, req.isAgent)
-
-  // Also register for DM delivery in hub mode
-  const { rooms } = req.app.locals
   if (rooms && rooms.isHub) {
+    // Hub mode: subscribe to all rooms + DMs
+    for (const room of rooms.rooms()) {
+      room.addClient(res, name, req.isAgent)
+    }
     rooms.addDMClient(res, name)
+  } else {
+    // Legacy single-room mode
+    const room = resolveRoom(req, req.query.room)
+    if (!room) return res.status(404).json({ error: 'room not found' })
+    room.addClient(res, name, req.isAgent)
   }
 })
 
