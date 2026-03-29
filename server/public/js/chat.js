@@ -476,6 +476,18 @@ function switchView(view) {
     buf.unread = 0
     updateUnreadBadges()
   }
+
+  // Fetch scrollback for room views
+  if (!view.startsWith('dm:')) {
+    fetch(`/api/chat/scrollback?room=${encodeURIComponent(view)}`)
+      .then(r => r.json())
+      .then(data => {
+        if (data.messages && currentView === view) {
+          handleEvent({ data: JSON.stringify({ type: 'scrollback', messages: data.messages }) })
+        }
+      })
+      .catch(() => {})
+  }
 }
 
 function updateUnreadBadges() {

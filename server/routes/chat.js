@@ -95,4 +95,11 @@ router.post('/api/chat/event', (req, res) => {
   res.json({ status: 'relayed' })
 })
 
+// Request scrollback for a specific room
+router.get('/api/chat/scrollback', (req, res) => {
+  const room = resolveRoom(req, req.query.room)
+  if (!room) return res.status(404).json({ error: 'room not found' })
+  res.json({ messages: room.getScrollback() })
+})
+
 export default router
