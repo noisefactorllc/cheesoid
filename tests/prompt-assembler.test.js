@@ -325,4 +325,55 @@ describe('assemblePrompt', () => {
     const allContent = result.map(s => s.content).join('\n')
     assert.ok(allContent.includes('deep_think'))
   })
+
+  it('includes modality section when cognition and attention configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Test soul.',
+      'prompts/system.md': 'System prompt.',
+      'memory/.keep': '',
+    })
+
+    const config = {
+      name: 'test',
+      display_name: 'Test',
+      cognition: 'claude-sonnet-4-6',
+      attention: 'claude-haiku-4-5',
+      model: 'gpt-4.1-nano:openai',
+      provider: 'openai-compat',
+      chat: { prompt: 'prompts/system.md' },
+      memory: { dir: 'memory/', auto_read: [] },
+    }
+
+    const result = await assemblePrompt(dir, config, [])
+    assert.ok(Array.isArray(result))
+    const prompt = result.map(s => s.content).join('\n')
+    assert.ok(prompt.includes('Attention Mode'), 'should include attention mode docs')
+    assert.ok(prompt.includes('Cognition Mode'), 'should include cognition mode docs')
+    assert.ok(prompt.includes('step_up'), 'should mention step_up tool')
+    assert.ok(prompt.includes('step_down'), 'should mention step_down tool')
+  })
+
+  it('includes modality section in anthropic mode when cognition and attention configured', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Test soul.',
+      'prompts/system.md': 'System prompt.',
+      'memory/.keep': '',
+    })
+
+    const config = {
+      name: 'test',
+      display_name: 'Test',
+      cognition: 'claude-sonnet-4-6',
+      attention: 'claude-haiku-4-5',
+      chat: { prompt: 'prompts/system.md' },
+      memory: { dir: 'memory/', auto_read: [] },
+    }
+
+    const result = await assemblePrompt(dir, config, [])
+    assert.ok(typeof result === 'string')
+    assert.ok(result.includes('Attention Mode'), 'should include attention mode docs')
+    assert.ok(result.includes('Cognition Mode'), 'should include cognition mode docs')
+    assert.ok(result.includes('step_up'), 'should mention step_up tool')
+    assert.ok(result.includes('step_down'), 'should mention step_down tool')
+  })
 })

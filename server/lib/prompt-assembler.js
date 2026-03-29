@@ -54,6 +54,38 @@ const TAIL_REINFORCEMENT = `REMINDERS: Use tools via function calling — never 
 const REASONER_GUIDANCE = `## Deep Reasoning
 You have access to \`deep_think\` for problems requiring careful multi-step reasoning or complex analysis. Use it when a question would benefit from extended deliberation — don't use it for simple lookups or straightforward responses. Pass a self-contained prompt with all necessary context.`
 
+const MODALITY_GUIDANCE = `## Engagement Modality
+
+You operate in two modes — **Attention** and **Cognition** — that share identical tools, memory, and conversation history. The only difference is the model running.
+
+### Attention Mode (your resting state)
+- You are monitoring with "half an eye" — watching threads, triaging, handling routine observations
+- Handle simple acknowledgments, background monitoring, tool delegation
+- Do NOT engage substantively with your full voice — keep responses brief and functional
+- If someone needs your real attention, call \`step_up\` to shift to cognition mode
+
+### Cognition Mode (full engagement)
+- This is where your personality, opinions, and nuanced communication shine
+- Speak with your full voice — this is the mode for substantive conversation
+- When engagement winds down, call \`step_down\` to return to attention mode
+
+### When to Step Up (attention → cognition)
+- You are being directly addressed or mentioned by name
+- A question or topic requires a substantive, thoughtful response
+- The situation calls for your personality, opinion, or nuanced communication
+- Your judgment says this moment deserves full engagement
+
+### When to Step Down (cognition → attention)
+- The conversation has gone quiet — no direct engagement for a while
+- The thread has shifted to other participants
+- Your judgment says monitoring mode is sufficient
+- You've finished a substantive exchange and the topic is resolved
+
+### How Gear Shifting Works
+- \`step_up\`: Immediately re-runs this turn with the cognition model. Your current response is discarded and the cognition model handles it fresh.
+- \`step_down\`: Takes effect on the next turn. You finish your current response normally, then the next turn runs in attention mode.
+- You are the same agent in both modes — same memory, same history, same identity. Think of it as adjusting your engagement level, not switching personas.`
+
 const SOURCE_TRUST_HIERARCHY = `## Source Trust Hierarchy
 When sources conflict, trust in this order:
 1. Live data (API responses, database queries, health checks)
@@ -88,6 +120,7 @@ export function currentTimestamp() {
 export async function assemblePrompt(personaDir, config, plugins = []) {
   const isOpenAICompat = config.provider === 'openai-compat'
   const isHybrid = !!config.orchestrator
+  const isModal = !!(config.cognition && config.attention)
 
   // Collect raw sections first, then structure by provider
 
@@ -196,6 +229,9 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
     if (config.reasoner || config.reasoner_fallback_models?.length) {
       layer1Parts.push(REASONER_GUIDANCE)
     }
+    if (isModal) {
+      layer1Parts.push(MODALITY_GUIDANCE)
+    }
 
     // Layer 2: Identity — name + soul
     const layer2Parts = [...identityParts]
@@ -233,6 +269,9 @@ export async function assemblePrompt(personaDir, config, plugins = []) {
   // In hybrid mode, inject batching discipline even for Anthropic orchestrator
   if (isHybrid) {
     sections.push(TOOL_DISCIPLINE_HYBRID)
+  }
+  if (isModal) {
+    sections.push(MODALITY_GUIDANCE)
   }
   if (config.reasoner || config.reasoner_fallback_models?.length) {
     sections.push(REASONER_GUIDANCE)
