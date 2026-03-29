@@ -17,6 +17,14 @@ model: some-fast-model:my-provider
 
 orchestrator: gpt-5.4:openai
 
+## Modal mode: attention/cognition gear shifting (replaces orchestrator)
+## The agent starts in attention mode (cheap) and shifts to cognition (frontier)
+## when directly engaged. Both modes share the same tools and prompt.
+# cognition: claude-sonnet-4-6              # frontier model, full engagement
+# attention: claude-haiku-4-5               # capable model, monitoring
+# cognition_fallback_models:
+#   - claude-sonnet-4-6
+
 fallback_models:
   - some-other-model:my-provider
   - gpt-5.4-mini:openai
