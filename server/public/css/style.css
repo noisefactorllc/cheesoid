@@ -262,7 +262,7 @@ main {
 }
 
 .idle-thought-name::after {
-  content: ' is thinking...';
+  content: ' \00b7  idle thought';
   font-weight: 400;
   color: var(--hf-text-muted);
 }

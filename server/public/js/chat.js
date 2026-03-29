@@ -16,8 +16,7 @@ let myName = localStorage.getItem('cheesoid-name')
 let evtSource = null
 let assistantEl = null
 let assistantBuffer = ''
-let idleEl = null
-let idleBuffer = ''
+const idleStreams = new Map() // agentName → { el, buffer }
 let lastSender = null
 let personaLabel = 'Cheesoid'
 let thinkingEl = null
@@ -211,8 +210,7 @@ function handleEvent(e) {
       assistantEl = null
       assistantBuffer = ''
       thinkingEl = null
-      idleEl = null
-      idleBuffer = ''
+      idleStreams.clear()
       for (const msg of event.messages) {
         // Filter by view: DMs to DM views, room messages to matching room views
         if (msg.dm_from || msg.dm_to) {
@@ -488,13 +486,15 @@ function handleEvent(e) {
       refreshPresence()
       break
 
-    case 'idle_text_delta':
-      if (!idleEl) {
-        idleEl = document.createElement('div')
-        idleEl.className = 'idle-thought'
+    case 'idle_text_delta': {
+      const idleKey = event.name || '_default'
+      let idle = idleStreams.get(idleKey)
+      if (!idle) {
+        const el = document.createElement('div')
+        el.className = 'idle-thought'
         if (event.name) {
-          idleEl.style.borderLeftColor = nameColor(event.name)
-          idleEl.dataset.agent = event.name
+          el.style.borderLeftColor = nameColor(event.name)
+          el.dataset.agent = event.name
         }
         const idleMeta = document.createElement('div')
         idleMeta.className = 'inline-meta'
@@ -509,22 +509,27 @@ function handleEvent(e) {
         idleTime.className = 'message-time'
         idleTime.textContent = formatTime(Date.now())
         idleMeta.appendChild(idleTime)
-        idleEl.appendChild(idleMeta)
+        el.appendChild(idleMeta)
         const idleBody = document.createElement('span')
         idleBody.className = 'idle-thought-body'
-        idleEl.appendChild(idleBody)
-        messages.appendChild(idleEl)
+        el.appendChild(idleBody)
+        messages.appendChild(el)
         lastSender = null
+        idle = { el, buffer: '' }
+        idleStreams.set(idleKey, idle)
       }
-      idleBuffer += event.text
-      const idleBody = idleEl.querySelector('.idle-thought-body')
-      if (idleBody) idleBody.innerHTML = renderMarkdown(idleBuffer)
+      idle.buffer += event.text
+      const idleBody = idle.el.querySelector('.idle-thought-body')
+      if (idleBody) idleBody.innerHTML = renderMarkdown(idle.buffer)
       scrollToBottom()
       break
+    }
 
-    case 'idle_done':
-      if (idleEl && event.model) {
-        const meta = idleEl.querySelector('.inline-meta')
+    case 'idle_done': {
+      const doneKey = event.name || '_default'
+      const doneIdle = idleStreams.get(doneKey)
+      if (doneIdle && event.model) {
+        const meta = doneIdle.el.querySelector('.inline-meta')
         if (meta) {
           const modelSpan = document.createElement('span')
           modelSpan.className = 'message-model'
@@ -532,10 +537,10 @@ function handleEvent(e) {
           meta.appendChild(modelSpan)
         }
       }
-      idleEl = null
-      idleBuffer = ''
+      idleStreams.delete(doneKey)
       refreshPresence()
       break
+    }
 
     case 'backchannel':
       // Backchannel is agent-only coordination — hidden from human users

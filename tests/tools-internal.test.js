@@ -90,7 +90,7 @@ describe('internal tool', () => {
     assert.ok(calls.some(c => c.type === 'idle_done' && c.name === 'TestAgent'))
 
     const historyCalls = room.recordHistory.mock.calls.map(c => c.arguments[0])
-    assert.ok(historyCalls.some(c => c.type === 'idle_thought' && c.text === 'This is interesting.'))
+    assert.ok(historyCalls.some(c => c.type === 'idle_thought' && c.text === 'This is interesting.' && c.name === 'TestAgent'))
   })
 
   it('backchannel sends via room client when in remote room', async () => {
