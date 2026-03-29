@@ -143,4 +143,45 @@ reasoner: claude-opus-4-6
     const persona = await loadPersona(dir)
     assert.equal(persona.config.reasoner, 'claude-opus-4-6')
   })
+
+  it('validates cognition + attention config', async () => {
+    const dir = await makePersona(`
+name: test-modal
+model: gpt-4.1-nano:openai
+cognition: claude-sonnet-4-6
+attention: claude-haiku-4-5
+`)
+    const persona = await loadPersona(dir)
+    assert.equal(persona.config.cognition, 'claude-sonnet-4-6')
+    assert.equal(persona.config.attention, 'claude-haiku-4-5')
+  })
+
+  it('rejects cognition without attention', async () => {
+    const dir = await makePersona(`
+name: test-modal-bad
+model: gpt-4.1-nano:openai
+cognition: claude-sonnet-4-6
+`)
+    await assert.rejects(() => loadPersona(dir), /cognition requires attention/)
+  })
+
+  it('rejects attention without cognition', async () => {
+    const dir = await makePersona(`
+name: test-modal-bad
+model: gpt-4.1-nano:openai
+attention: claude-haiku-4-5
+`)
+    await assert.rejects(() => loadPersona(dir), /attention requires cognition/)
+  })
+
+  it('rejects modal config with orchestrator', async () => {
+    const dir = await makePersona(`
+name: test-modal-conflict
+model: gpt-4.1-nano:openai
+cognition: claude-sonnet-4-6
+attention: claude-haiku-4-5
+orchestrator: claude-opus-4-6
+`)
+    await assert.rejects(() => loadPersona(dir), /cannot use both orchestrator and cognition\/attention/)
+  })
 })

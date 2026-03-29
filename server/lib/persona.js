@@ -25,6 +25,10 @@ export async function loadPersona(personaDir) {
     validateOrchestrator(config)
   }
 
+  if (config.cognition || config.attention) {
+    validateModality(config)
+  }
+
   if (config.reasoner) {
     validateReasoner(config)
   }
@@ -103,6 +107,23 @@ function validateOrchestrator(config) {
   }
 
   console.log(`[${name}] Hybrid mode: orchestrator=${orch.provider}/${orch.model}, executor=${config.provider || 'anthropic'}/${config.model}`)
+}
+
+function validateModality(config) {
+  const name = config.name || 'unknown'
+
+  if (config.cognition && !config.attention) {
+    throw new Error(`[${name}] cognition requires attention — both must be set for modal operation`)
+  }
+  if (config.attention && !config.cognition) {
+    throw new Error(`[${name}] attention requires cognition — both must be set for modal operation`)
+  }
+  if (config.orchestrator) {
+    throw new Error(`[${name}] cannot use both orchestrator and cognition/attention — modal mode replaces orchestrator`)
+  }
+
+  const fallbacks = config.cognition_fallback_models || []
+  console.log(`[${name}] Modal mode: cognition=${config.cognition}, attention=${config.attention}, executor=${config.model}${fallbacks.length ? `, cognition_fallbacks=${fallbacks.join(',')}` : ''}`)
 }
 
 function validateReasoner(config) {
