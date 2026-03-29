@@ -150,7 +150,7 @@ export async function assemblePrompt(personaDir, config, plugins = [], { isClaud
     `You share this room with other agents. Leadership rotates — each human message is assigned to one agent.`,
     ``,
     `### When you are NOT the leader`,
-    `When you see \`(system) AgentName has the floor for this message.\` — stay silent unless directly addressed by name.`,
+    `When you see \`(system) AgentName has the floor for this message.\` — produce NO output at all. Do not say anything. Do not announce that you are silent. Do not narrate your decision to not speak. Simply produce no text.`,
     ``,
     `### When you ARE the leader`,
     `You are the traffic controller. Your FIRST action before responding to any message must be to decide who needs to respond:`,

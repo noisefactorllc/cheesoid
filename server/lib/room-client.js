@@ -182,7 +182,8 @@ export class RoomClient {
       return
     }
 
-    this.onMessage({ ...event, room: this.roomName, scrollback: isScrollback })
+    // Preserve host's room tag if present, fall back to client room name
+    this.onMessage({ ...event, room: event.room || this.roomName, scrollback: isScrollback })
   }
 
   _scheduleReconnect() {

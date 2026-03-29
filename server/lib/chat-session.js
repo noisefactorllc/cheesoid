@@ -23,7 +23,8 @@ function replaceTimestamp(prompt) {
 
 const IDLE_THOUGHT_INTERVAL = 30 * 60 * 1000 // 30 minutes, doubles each time
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
-const MAX_HISTORY = 100
+const MAX_HISTORY = 50
+const MAX_CONTEXT_MESSAGES = 100 // max messages in the live agent context
 const MAX_QUEUED_WEBHOOKS = 10
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
@@ -386,9 +387,13 @@ export class Room {
   }
 
   _handleRemoteEvent(event) {
+    // Skip all host scrollback — visitor has own history from initialize()
+    if (event.scrollback) return
+
     // Ignore DM user_message events — they're handled via dm_request
     if (event.to && event.type === 'user_message') return
 
+    // DM requests are always processed regardless of room
     if (event.type === 'dm_request') {
       const myName = this.persona.config.display_name
       if (event.to === myName) {
@@ -401,12 +406,9 @@ export class Room {
     }
 
     if (event.type === 'user_message') {
-      if (event.scrollback) {
-        this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
-      } else if (event.fromAgent) {
-        // Another agent spoke — context only, don't trigger a response
-        this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
-        this.recordHistory({ type: 'user_message', name: event.name, text: event.text })
+      if (event.fromAgent) {
+        // Another agent spoke — don't add to context, don't trigger
+        return
       } else {
         // Human message — check turn-taking leader + modality shift
         const myName = this.persona.config.display_name
@@ -421,21 +423,19 @@ export class Room {
         if (mentionedByName) {
           if (this.modality?.isModal) this.modality.stepUp('addressed by name')
           console.log(`[${this.persona.config.name}] Mentioned by name — responding`)
+          this._pendingRoomChannel = event.room || null
           this._processMessage(event.room, event.name, event.text)
         } else if (event.leader && event.leader !== myName) {
-          this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
-          this._safeAppendMessage({ role: 'user', content: `(system) ${event.leader} has the floor for this message.` })
-          this.recordHistory({ type: 'user_message', name: event.name, text: event.text })
+          // Not our turn — don't add to context, don't process
           console.log(`[${this.persona.config.name}] Deferring to ${event.leader}`)
         } else {
           console.log(`[${this.persona.config.name}] Taking the floor`)
+          this._pendingRoomChannel = event.room || null
           this._processMessage(event.room, event.name, event.text)
         }
       }
     } else if (event.type === 'assistant_message') {
-      // Host agent responded — context only, don't trigger
-      this._safeAppendMessage({ role: 'user', content: `${event.name || 'assistant'}: ${event.text}` })
-      this.recordHistory({ type: 'assistant_message', name: event.name, text: event.text })
+      // Host agent responded — don't add to visitor context
     } else if (event.type === 'backchannel') {
       this._safeAppendMessage({ role: 'user', content: `(backchannel) ${event.name}: ${event.text}` })
       if (event.trigger) {
@@ -534,6 +534,10 @@ export class Room {
         if (event.type === 'text_delta') assistantText += event.text
       })
       this.messages = result.messages
+      // Trim context to prevent unbounded growth
+      if (this.messages.length > MAX_CONTEXT_MESSAGES) {
+        this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
+      }
 
       // Route response back as a DM — strip any DM prefix the agent may have echoed
       let dmResponse = assistantText.trim()
@@ -565,20 +569,16 @@ export class Room {
       }
       this._startIdleTimer()
 
-      // Drain queued messages
+      // Drain queued messages on correct Room instance
       if (this._messageQueue.length > 0) {
         const next = this._messageQueue.shift()
+        const targetRoom = next._roomInstance || this
         if (next.room === 'dm') {
-          this.processDM(next.name, next.text).catch(err => {
+          targetRoom.processDM(next.name, next.text).catch(err => {
             console.error(`[${this.persona.config.name}] Queued DM error:`, err.message)
           })
-        } else if (next.name === 'webhook') {
-          // Don't batch here — let _processMessage's finally handle webhook batching
-          this._processMessage(next.room, next.name, next.text).catch(err => {
-            console.error(`[${this.persona.config.name}] Queued message error:`, err.message)
-          })
         } else {
-          this._processMessage(next.room, next.name, next.text).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text).catch(err => {
             console.error(`[${this.persona.config.name}] Queued message error:`, err.message)
           })
         }
@@ -589,19 +589,19 @@ export class Room {
   async _processMessage(room, name, text, options = {}) {
     if (this.busy) {
       if (room === 'home' && name === 'webhook') {
-        // Queue webhooks — they can't retry and shouldn't be dropped
         const webhookCount = this._messageQueue.filter(m => m.name === 'webhook').length
         if (webhookCount >= MAX_QUEUED_WEBHOOKS) {
           console.warn(`[${this.persona.config.name}] Webhook queue full (${MAX_QUEUED_WEBHOOKS}), dropping webhook`)
           return
         }
         this._messageQueue.push({ room, name, text })
-      } else if (room === 'home') {
-        // Don't queue human messages — user can resend with up-arrow after agent finishes
-        this.broadcast({ type: 'error', message: `${this.persona.config.display_name} is thinking, please wait...` })
+      } else if (room === 'home' && name !== 'system') {
+        // Queue human messages — broadcast immediately so they appear in chat
+        this.broadcast({ type: 'user_message', name, text })
+        this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
+        this._messageQueue.push({ room, name, text, _roomInstance: this })
       } else {
-        // Queue remote room messages (agents can't up-arrow)
-        this._messageQueue.push({ room, name, text })
+        this._messageQueue.push({ room, name, text, _roomInstance: this })
       }
       return
     }
@@ -655,28 +655,27 @@ export class Room {
         }
       }
 
-      // If another agent is the leader for this turn, defer — add context but don't respond
+      // If another agent is the leader for this turn, defer — don't respond
       if (leader && leader !== myName) {
         console.log(`[${this.persona.config.name}] Deferring to ${leader}`)
-        this.messages.push({ role: 'user', content: `(system) ${leader} has the floor for this message.` })
-        // Tell the UI to clean up the empty assistant placeholder
         if (room === 'home') {
           this.broadcast({ type: 'done', model: null, deferred: true })
         }
         return // skip agent loop — finally block handles cleanup
       }
 
-      // Inject leader duties into context so the elected leader knows their role
+      // Build leader duties addendum for the system prompt (not injected into messages)
+      let leaderAddendum = ''
       if (leader && leader === myName) {
         const otherAgents = this._leaderPool.filter(n => n !== myName).join(', ')
-        this.messages.push({ role: 'user', content: [
-          `(system) You are the elected leader for this message. Your duties:`,
-          `1. Read the message and decide who should respond.`,
-          `2. If the message is addressed to everyone or the group — you MUST call internal({ backchannel: "All agents respond", trigger: true }) BEFORE your own response. ${otherAgents} cannot speak unless you trigger them.`,
-          `3. If the message is meant for a specific other agent — call internal({ backchannel: "This is for you", trigger: true }) to hand off.`,
-          `4. If the message is just for you — respond normally, no trigger needed.`,
-          `Other agents are silent until you trigger them. If you skip the trigger, they stay silent. This is your responsibility.`,
-        ].join('\n') })
+        leaderAddendum = [
+          `\n\n## CURRENT TURN: You are the leader`,
+          `Decide who should respond to the message above:`,
+          `- If addressed to everyone: call internal({ backchannel: "All agents respond", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
+          `- If meant for another agent: call internal({ backchannel: "This is for you", trigger: true }) to hand off.`,
+          `- If just for you: respond normally.`,
+          `If you skip the trigger, other agents stay silent. This is your responsibility.`,
+        ].join('\n')
       }
 
       // Determine mode: modal (attention/cognition), hybrid (orchestrator), or direct
@@ -765,10 +764,23 @@ export class Room {
       const basePrompt = activeIsClaude
         ? this.systemPrompt
         : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false })
-      const prompt = replaceTimestamp(basePrompt)
+      let prompt = replaceTimestamp(basePrompt)
+      // Append leader duties to system prompt — NOT to messages (prevents echo leak)
+      if (leaderAddendum) {
+        if (typeof prompt === 'string') {
+          prompt += leaderAddendum
+        } else if (Array.isArray(prompt)) {
+          const last = prompt[prompt.length - 1]
+          prompt[prompt.length - 1] = { ...last, content: last.content + leaderAddendum }
+        }
+      }
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
+      // Trim context to prevent unbounded growth
+      if (this.messages.length > MAX_CONTEXT_MESSAGES) {
+        this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
+      }
 
       // Route response — freeform text is always public
       if (this._pendingRoom === 'home') {
@@ -781,7 +793,8 @@ export class Room {
       } else {
         const client = this.roomClients.get(this._pendingRoom)
         if (client && assistantText.trim()) {
-          await client.sendMessage(assistantText.trim(), { model: assistantModel })
+          // Include the host's room name so the response routes to the correct channel
+          await client.sendMessage(assistantText.trim(), { model: assistantModel, room: this._pendingRoomChannel })
         }
         // Record remote interactions in own history for continuity across restarts
         this.recordHistory({ type: 'user_message', name, text })
@@ -836,12 +849,14 @@ export class Room {
         })
       } else if (this._messageQueue.length > 0) {
         const next = this._messageQueue.shift()
+        // Process on the correct Room instance (may differ from current Room)
+        const targetRoom = next._roomInstance || this
         if (next.room === 'dm') {
-          this.processDM(next.name, next.text).catch(err => {
+          targetRoom.processDM(next.name, next.text).catch(err => {
             console.error(`[${this.persona.config.name}] Queued DM processing error:`, err.message)
           })
         } else {
-          this._processMessage(next.room, next.name, next.text).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text).catch(err => {
             console.error(`[${this.persona.config.name}] Queue processing error:`, err.message)
           })
         }
@@ -951,6 +966,10 @@ export class Room {
       }
 
       this.messages = result.messages
+      // Trim context to prevent unbounded growth
+      if (this.messages.length > MAX_CONTEXT_MESSAGES) {
+        this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
+      }
       if (idleText) {
         const histEntry = { type: 'idle_thought', text: idleText }
         if (idleModel) histEntry.model = idleModel
