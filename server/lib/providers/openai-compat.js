@@ -207,6 +207,7 @@ export function createOpenAICompatProvider(config) {
       } catch (err) {
         const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
         console.log(`[openai-compat] classifier fetch failed${cause}, falling back to auto`)
+        circuitBreaker.recordFailure(baseUrl)
       }
       return 'auto'
     },
