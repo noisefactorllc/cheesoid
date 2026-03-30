@@ -75,6 +75,8 @@ export class Room {
         history: [],
         roomClients: new Map(),
         _pendingRoom: null,
+        _lastRemoteRoom: null,
+        _lastRemoteRoomChannel: null,
         _messageQueue: [],
         _idleInterval: IDLE_THOUGHT_INTERVAL,
         _consecutiveDegenerateCount: 0,
@@ -142,6 +144,10 @@ export class Room {
   set roomClients(v) { this._a.roomClients = v }
   get _pendingRoom() { return this._a._pendingRoom }
   set _pendingRoom(v) { this._a._pendingRoom = v }
+  get _lastRemoteRoom() { return this._a._lastRemoteRoom }
+  set _lastRemoteRoom(v) { this._a._lastRemoteRoom = v }
+  get _lastRemoteRoomChannel() { return this._a._lastRemoteRoomChannel }
+  set _lastRemoteRoomChannel(v) { this._a._lastRemoteRoomChannel = v }
   get _messageQueue() { return this._a._messageQueue }
   set _messageQueue(v) { this._a._messageQueue = v }
   get _idleInterval() { return this._a._idleInterval }
@@ -376,15 +382,17 @@ export class Room {
   }
 
   relayAgentEvent(name, event) {
-    // Relay visiting agent tool events to SSE clients.
+    // Relay visiting agent events to SSE clients.
     // Does NOT interact with the agent loop, this.messages, or the busy flag.
     // Uses agentName key to avoid clobbering event.name (which is the tool name
     // on tool_start/tool_result events).
     //
-    // Only tool_start/tool_result are relayed — text_delta/done are NOT forwarded
-    // to avoid duplicate messages. The final public text arrives separately via
-    // addAgentMessage after the agent loop completes.
+    // For tool_start/tool_result and idle streaming events: broadcast to SSE.
+    // For idle_thought: also record in host history for scrollback.
     this.broadcast({ ...event, agentName: name, visiting: true })
+    if (event.type === 'idle_thought') {
+      this.recordHistory(event)
+    }
   }
 
   _handleRemoteEvent(event, roomConfigName) {
@@ -447,12 +455,12 @@ export class Room {
       if (event.trigger) {
         this._processMessage(routeRoom, 'system', `(backchannel from ${event.name}) ${event.text} — respond to the conversation above.`, { _silent: true })
       }
-    } else if (event.type === 'idle_text_delta' || event.type === 'idle_done') {
-      // Relay visiting agent idle thoughts to the host's SSE clients
+    } else if (event.type === 'idle_text_delta' || event.type === 'idle_done' || event.type === 'idle_thought') {
+      // Suppress own idle events bounced back from the host — we already
+      // broadcast them locally in _idleThought's onEvent callback.
+      if (event.name === this.persona.config.display_name) return
       this.broadcast(event)
-    } else if (event.type === 'idle_thought') {
-      // Scrollback idle thought from visitor — record in host history
-      this.recordHistory(event)
+      if (event.type === 'idle_thought') this.recordHistory(event)
     }
   }
 
@@ -534,7 +542,7 @@ export class Room {
       }
 
       let assistantText = ''
-      const onEvent = () => {} // DMs don't stream to room
+      let assistantModel = null
 
       const activeIsClaude = orchestratorModel.startsWith('claude')
       const basePrompt = activeIsClaude
@@ -544,6 +552,7 @@ export class Room {
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, (event) => {
         if (event.type === 'text_delta') assistantText += event.text
+        else if (event.type === 'done' && event.model) assistantModel = event.model
       })
       this.messages = result.messages
       // Trim context to prevent unbounded growth
@@ -558,15 +567,17 @@ export class Room {
         dmResponse = dmResponse.replace(/^\(DM[^)]*\)\s*/i, '')
       }
       if (dmResponse) {
-        this.recordHistory({ type: 'assistant_message', text: dmResponse, dm_from: this.persona.config.display_name, dm_to: from })
+        const histEntry = { type: 'assistant_message', text: dmResponse, dm_from: this.persona.config.display_name, dm_to: from }
+        if (assistantModel) histEntry.model = assistantModel
+        this.recordHistory(histEntry)
         const agentName = this.persona.config.display_name
         if (this.roomClients.size > 0) {
           for (const client of this.roomClients.values()) {
-            await client.sendDMResponse(from, dmResponse)
+            await client.sendDMResponse(from, dmResponse, assistantModel)
             break
           }
         } else if (this._roomManager) {
-          this._roomManager.routeDM(agentName, from, dmResponse, true)
+          this._roomManager.routeDM(agentName, from, dmResponse, true, assistantModel)
         }
       }
     } catch (err) {
@@ -626,6 +637,10 @@ export class Room {
       this._consecutiveDegenerateCount = 0
     }
     this._pendingRoom = room
+    if (room !== 'home') {
+      this._lastRemoteRoom = room
+      this._lastRemoteRoomChannel = this._pendingRoomChannel || null
+    }
 
     try {
       if (!this.systemPrompt) await this.initialize()
@@ -818,10 +833,17 @@ export class Room {
         this._autoNudgeMentionedAgents(assistantText)
       }
     } catch (err) {
+      console.error(`[${this.persona.config.name}] Error responding in ${this._pendingRoom}: ${err.message}`)
+      const providerUrl = err.url || 'unknown'
+      const modelName = orchestratorModel || this.persona.config.model || 'unknown'
+      const statusMsg = `[provider unavailable: ${modelName} via ${providerUrl} — retrying until it returns. I can't see or respond to messages in the meantime, but I'll catch up on recent scrollback when the provider is back.]`
       if (this._pendingRoom === 'home') {
-        this.broadcast({ type: 'error', message: err.message })
+        this.broadcast({ type: 'error', message: statusMsg })
       } else {
-        console.error(`[${this.persona.config.name}] Error responding in ${this._pendingRoom}: ${err.message}`)
+        const client = this.roomClients.get(this._pendingRoom)
+        if (client) {
+          client.sendMessage(statusMsg, { room: this._pendingRoomChannel }).catch(() => {})
+        }
       }
     } finally {
       this.busy = false
@@ -940,14 +962,20 @@ export class Room {
       let idleModel = null
       let toolUseCount = 0
       const agentName = this.persona.config.display_name
+      // Relay idle thoughts to the most recently latched host room
+      const remoteClient = this._lastRemoteRoom
+        ? this.roomClients.get(this._lastRemoteRoom) : null
+      const remoteChannel = this._lastRemoteRoomChannel
       const onEvent = (event) => {
         try {
           if (event.type === 'text_delta') {
             idleText += event.text
             this.broadcast({ type: 'idle_text_delta', text: event.text, name: agentName })
+            if (remoteClient) remoteClient.sendEvent({ type: 'idle_text_delta', text: event.text, name: agentName }, remoteChannel)
           } else if (event.type === 'done') {
             if (event.model) idleModel = event.model
             this.broadcast({ type: 'idle_done', model: event.model, name: agentName })
+            if (remoteClient) remoteClient.sendEvent({ type: 'idle_done', model: event.model, name: agentName }, remoteChannel)
           } else if (event.type === 'tool_start') {
             toolUseCount++
             this.broadcast({ ...event, idle: true })
@@ -987,6 +1015,7 @@ export class Room {
         const histEntry = { type: 'idle_thought', text: idleText, name: agentName }
         if (idleModel) histEntry.model = idleModel
         this.recordHistory(histEntry)
+        if (remoteClient) remoteClient.sendEvent(histEntry, remoteChannel)
       }
 
       if (this.state) {
