@@ -842,7 +842,7 @@ export class Room {
     } catch (err) {
       console.error(`[${this.persona.config.name}] Error responding in ${this._pendingRoom}: ${err.message}`)
       const providerUrl = err.url || 'unknown'
-      const modelName = orchestratorModel || this.persona.config.model || 'unknown'
+      const modelName = this.persona.config.cognition || this.persona.config.model || 'unknown'
       const statusMsg = `[provider unavailable: ${modelName} via ${providerUrl} — retrying until it returns. I can't see or respond to messages in the meantime, but I'll catch up on recent scrollback when the provider is back.]`
       if (this._pendingRoom === 'home') {
         this.broadcast({ type: 'error', message: statusMsg })
