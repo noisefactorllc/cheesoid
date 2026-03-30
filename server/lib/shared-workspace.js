@@ -19,11 +19,11 @@ export function buildSharedWorkspaceTools(sharedRoot) {
     },
     {
       name: 'read_shared',
-      description: 'Read a file from the shared workspace.',
+      description: 'Read a file from the shared workspace. Only files that have been previously created with write_shared will exist. Use list_shared first to see what files are available before attempting to read.',
       input_schema: {
         type: 'object',
         properties: {
-          path: { type: 'string', description: 'Path to the file to read, relative to shared workspace root' },
+          path: { type: 'string', description: 'Path to the file to read, relative to shared workspace root. Must be a file that already exists — use list_shared to discover available files.' },
         },
         required: ['path'],
       },
@@ -86,7 +86,16 @@ export function buildSharedWorkspaceTools(sharedRoot) {
           return { output: content }
         } catch (err) {
           if (err.code === 'ENOENT') {
-            return { output: `File not found: ${input.path}`, is_error: true }
+            let hint = ' Use list_shared to see available files.'
+            try {
+              const parentDir = dirname(filePath)
+              const entries = await readdir(parentDir, { withFileTypes: true })
+              if (entries.length > 0) {
+                const names = entries.map(e => e.isDirectory() ? `${e.name}/` : e.name)
+                hint = ` Available in ${relative(sharedRoot, parentDir) || '/'}: ${names.join(', ')}`
+              }
+            } catch { /* parent dir doesn't exist either */ }
+            return { output: `File not found: ${input.path}.${hint}`, is_error: true }
           }
           return { output: `Failed to read file: ${err.message}`, is_error: true }
         }
