@@ -460,6 +460,13 @@ export class Room {
     } else if (event.type === 'backchannel') {
       this._safeAppendMessage({ role: 'user', content: `(backchannel) ${event.name}: ${event.text}` })
       if (event.trigger) {
+        // Skip trigger if already busy — we're already responding to this
+        // conversation (e.g. mentioned by name). Queuing would cause a
+        // duplicate response when the current turn finishes.
+        if (this.busy) {
+          console.log(`[${this.persona.config.name}] Skipping backchannel trigger — already responding`)
+          return
+        }
         this._processMessage(routeRoom, 'system', `(backchannel from ${event.name}) ${event.text} — respond to the conversation above.`, { _silent: true })
       }
     } else if (event.type === 'idle_text_delta' || event.type === 'idle_done' || event.type === 'idle_thought') {
