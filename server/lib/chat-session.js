@@ -847,9 +847,11 @@ export class Room {
       if (!this._lastProviderStatusAt || now - this._lastProviderStatusAt > STATUS_COOLDOWN_MS) {
         this._lastProviderStatusAt = now
         const layer = err.layer || 'unknown'
-        const tried = err.triedModels?.length ? err.triedModels.join(' → ') : 'unknown'
-        const reason = err.isCircuitOpen ? `circuit open for ${err.url}` : err.message
-        const statusMsg = `**${layer} layer unavailable**\n- **Tried:** ${tried}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
+        const triedList = err.triedModels?.length
+          ? err.triedModels.map((m, i) => `  ${i + 1}. \`${m}\``).join('\n')
+          : '  - unknown'
+        const reason = err.isCircuitOpen ? `circuit open for \`${err.url}\`` : err.message
+        const statusMsg = `**${layer} layer unavailable**\n- **Tried:**\n${triedList}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
         if (this._pendingRoom === 'home') {
           this.broadcast({ type: 'error', message: statusMsg })
         } else {
