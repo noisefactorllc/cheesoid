@@ -841,15 +841,21 @@ export class Room {
       }
     } catch (err) {
       console.error(`[${this.persona.config.name}] Error responding in ${this._pendingRoom}: ${err.message}`)
-      const providerUrl = err.url || 'unknown'
-      const modelName = this.persona.config.cognition || this.persona.config.model || 'unknown'
-      const statusMsg = `[provider unavailable: ${modelName} via ${providerUrl} — retrying until it returns. I can't see or respond to messages in the meantime, but I'll catch up on recent scrollback when the provider is back.]`
-      if (this._pendingRoom === 'home') {
-        this.broadcast({ type: 'error', message: statusMsg })
-      } else {
-        const client = this.roomClients.get(this._pendingRoom)
-        if (client) {
-          client.sendMessage(statusMsg, { room: this._pendingRoomChannel }).catch(() => {})
+      // Send provider-unavailable status to chat, but only once per outage episode
+      const now = Date.now()
+      const STATUS_COOLDOWN_MS = 120_000 // 2 minutes
+      if (!this._lastProviderStatusAt || now - this._lastProviderStatusAt > STATUS_COOLDOWN_MS) {
+        this._lastProviderStatusAt = now
+        const providerUrl = err.url || 'unknown'
+        const modelName = this.persona.config.cognition || this.persona.config.model || 'unknown'
+        const statusMsg = `[provider unavailable: ${modelName} via ${providerUrl} — retrying until it returns. I can't see or respond to messages in the meantime, but I'll catch up on recent scrollback when the provider is back.]`
+        if (this._pendingRoom === 'home') {
+          this.broadcast({ type: 'error', message: statusMsg })
+        } else {
+          const client = this.roomClients.get(this._pendingRoom)
+          if (client) {
+            client.sendMessage(statusMsg, { room: this._pendingRoomChannel }).catch(() => {})
+          }
         }
       }
     } finally {
