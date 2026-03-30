@@ -447,6 +447,12 @@ export class Room {
       if (event.trigger) {
         this._processMessage(routeRoom, 'system', `(backchannel from ${event.name}) ${event.text} — respond to the conversation above.`, { _silent: true })
       }
+    } else if (event.type === 'idle_text_delta' || event.type === 'idle_done') {
+      // Relay visiting agent idle thoughts to the host's SSE clients
+      this.broadcast(event)
+    } else if (event.type === 'idle_thought') {
+      // Scrollback idle thought from visitor — record in host history
+      this.recordHistory(event)
     }
   }
 
