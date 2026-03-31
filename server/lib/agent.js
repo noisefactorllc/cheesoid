@@ -152,19 +152,26 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
 
     repairToolUseGaps(messages)
 
-    const result = await provider.streamMessage(
-      {
-        model: config.model,
-        maxTokens: 16384,
-        system: systemPrompt,
-        messages,
-        tools: toolChoice === 'none' ? [] : tools.definitions,
-        serverTools: config.serverTools || [],
-        thinkingBudget: config.thinkingBudget || null,
-        toolChoice: toolChoice === 'none' ? undefined : toolChoice,
-      },
-      onEvent,
-    )
+    let result
+    try {
+      result = await provider.streamMessage(
+        {
+          model: config.model,
+          maxTokens: 16384,
+          system: systemPrompt,
+          messages,
+          tools: toolChoice === 'none' ? [] : tools.definitions,
+          serverTools: config.serverTools || [],
+          thinkingBudget: config.thinkingBudget || null,
+          toolChoice: toolChoice === 'none' ? undefined : toolChoice,
+        },
+        onEvent,
+      )
+    } catch (err) {
+      err.layer = err.layer || config.layer
+      err.triedModels = err.triedModels || [config.model]
+      throw err
+    }
 
     let { contentBlocks, stopReason, usage } = result
     totalUsage.input_tokens += usage.input_tokens
@@ -297,7 +304,7 @@ async function _nudgeIfEmpty(messages, provider, config, systemPrompt, totalUsag
     )
   } catch (err) {
     // Enrich with context if missing — nudge uses the orchestrator model
-    err.layer = err.layer || (config.modality ? config.modality.mode : 'cognition')
+    err.layer = err.layer || config.layer
     err.triedModels = err.triedModels || [config.model]
     throw err
   }
@@ -419,7 +426,7 @@ function isOrchestratorRetryable(err) {
 
 async function callOrchestratorWithFallback(config, params, onEvent) {
   const triedModels = [params.model]
-  const layer = config.modality ? config.modality.mode : 'cognition'
+  const layer = config.layer
   try {
     return await config.provider.streamMessage(params, onEvent)
   } catch (err) {
@@ -586,6 +593,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
     // Execute tools directly
     let toolResults = []
+    let stepUpTriggered = false
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
       let toolResult
       try {
@@ -593,6 +601,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       } catch (err) {
         toolResult = { output: `Tool error: ${err.message}`, is_error: true }
       }
+      if (toolResult._stepUp) stepUpTriggered = true
       if (toolResult._usage) {
         reasonerUsage.input_tokens += toolResult._usage.input_tokens
         reasonerUsage.output_tokens += toolResult._usage.output_tokens
@@ -609,12 +618,10 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
     // --- MODALITY: step_up re-run ---
     // If a modality step_up tool was called AND the mode actually changed,
-    // discard the attention response and re-run this turn with the cognition model.
-    // Only one re-run per turn to prevent infinite loops (e.g. if cognition
-    // model also calls step_up, it's a no-op and we proceed normally).
+    // discard the attention response and re-run this turn with the new model.
+    // Only one re-run per turn to prevent infinite loops.
     if (config.modality && !stepUpUsed) {
-      const stepUpBlock = assistantContent.find(b => b.type === 'tool_use' && b.name === 'step_up')
-      if (stepUpBlock && config.modality.mode === 'cognition') {
+      if (stepUpTriggered) {
         // Remove the attention model's assistant message — tool results
         // are intentionally NOT pushed, so the cognition model sees the
         // original conversation without the aborted attention turn.

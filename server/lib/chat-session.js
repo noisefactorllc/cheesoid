@@ -92,6 +92,7 @@ export class Room {
         _pendingContextMessages: [],
         _moderatorPool: [persona.config.display_name],
         _moderatorIndex: 0,
+        _floor: null, // array of agent names that currently have the floor, or null
         _wakeupSchedulers: [],
       }
       for (const a of persona.config.agents || []) {
@@ -171,6 +172,8 @@ export class Room {
   set _moderatorPool(v) { this._a._moderatorPool = v }
   get _moderatorIndex() { return this._a._moderatorIndex }
   set _moderatorIndex(v) { this._a._moderatorIndex = v }
+  get _floor() { return this._a._floor }
+  set _floor(v) { this._a._floor = v }
   get _wakeupSchedulers() { return this._a._wakeupSchedulers }
   set _wakeupSchedulers(v) { this._a._wakeupSchedulers = v }
 
@@ -473,21 +476,21 @@ export class Room {
         // Another agent spoke — don't add to context, don't trigger
         return
       } else {
-        // Human message — check addressing and moderation
+        // Human message — check floor control
         const myName = this.persona.config.display_name
-        const addressed = event.addressed
-        if (addressed && addressed.includes(myName)) {
-          // Explicitly addressed — respond directly, no moderation needed
-          if (this.modality?.isModal) this.modality.stepUp('explicitly addressed')
-          console.log(`[${this.persona.config.name}] Explicitly addressed — responding`)
+        const floor = event.floor
+        if (floor && floor.includes(myName)) {
+          // On the floor — respond
+          if (this.modality?.isModal) this.modality.stepUp('has floor')
+          console.log(`[${this.persona.config.name}] Has floor — responding`)
           this._pendingRoomChannel = event.room || null
           this._processMessage(routeRoom, event.name, event.text, { _roomChannel: event.room })
-        } else if (addressed) {
-          // Someone else explicitly addressed — stay silent
-          if (this.modality?.isModal) this.modality.stepDown('not addressed')
-          console.log(`[${this.persona.config.name}] Not addressed — silent`)
+        } else if (floor) {
+          // Floor belongs to someone else — stay silent
+          if (this.modality?.isModal) this.modality.stepDown('not on floor')
+          console.log(`[${this.persona.config.name}] Not on floor (${floor.join(', ')}) — silent`)
         } else {
-          // No explicit addressing — wait for moderator's backchannel trigger
+          // No floor set — wait for moderator's backchannel trigger
           if (this.modality?.isModal) this.modality.stepDown('awaiting moderation')
           console.log(`[${this.persona.config.name}] Waiting for moderator trigger`)
         }
@@ -578,6 +581,7 @@ export class Room {
 
       const agentConfig = {
         model: orchestratorModel,
+        layer: this.modality?.mode,
         maxTurns: 10,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
@@ -704,54 +708,64 @@ export class Room {
       const presence = room === 'home' ? ` (present: ${this.participantList.join(', ')})` : ''
       this.messages.push({ role: 'user', content: `${name}${presence}: ${text}` })
 
-      // Multi-agent turn-taking: explicit addressing skips moderation,
-      // otherwise moderator orchestrates.
-      // Skip moderator election for system/backchannel-triggered messages
-      let moderator = null
-      let addressed = options._addressed || null // explicit floor control from API
+      // Multi-agent floor control.
+      // 1. Explicit addressing (@Name, Name:) updates the floor
+      // 2. If no addressing, the current floor persists (conversation continues)
+      // 3. If no floor set, moderator orchestrates
       const myName = this.persona.config.display_name
       const isMultiAgent = room === 'home' && this._moderatorPool.length > 1 && name !== 'system'
+      let addressed = options._addressed || null
+      let floor = this._floor
+      let moderator = null
 
-      if (isMultiAgent && !addressed) {
-        // Parse explicit addressing patterns: @Name, Name:, Name1, Name2:
-        addressed = this._parseAddressing(text)
-      }
+      if (isMultiAgent) {
+        if (!addressed) {
+          addressed = this._parseAddressing(text)
+        }
 
-      if (isMultiAgent && !addressed) {
-        // No explicit addressing — use moderator system
-        moderator = this._electModerator()
-        console.log(`[${this.persona.config.name}] Moderator: ${moderator} (no explicit address, pool: ${this._moderatorPool.join(', ')})`)
-      } else if (addressed) {
-        console.log(`[${this.persona.config.name}] Explicitly addressed: ${addressed.join(', ')}`)
+        if (addressed) {
+          // Explicit addressing — update the floor
+          this._floor = addressed
+          floor = addressed
+          console.log(`[${this.persona.config.name}] Floor → ${floor.join(', ')} (explicit)`)
+        } else if (floor) {
+          // No explicit addressing — floor persists from previous turn
+          console.log(`[${this.persona.config.name}] Floor: ${floor.join(', ')} (continuing)`)
+        } else {
+          // No floor set — moderator orchestrates
+          moderator = this._electModerator()
+          console.log(`[${this.persona.config.name}] Moderator: ${moderator} (no floor, pool: ${this._moderatorPool.join(', ')})`)
+        }
       }
 
       if (room === 'home' && !options._silent) {
         if (name) this.participants.set(name, Date.now())
         if (name !== 'system' && name !== 'webhook' && name !== 'wakeup') {
-          this.broadcast({ type: 'user_message', name, text, moderator, addressed })
+          this.broadcast({ type: 'user_message', name, text, moderator, floor })
         }
         this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
       }
 
-      // Modality: step up when orchestrating or explicitly addressed
+      // Modality: step up when we have the floor or are orchestrating
+      const iHaveFloor = floor ? floor.includes(myName) : !!moderator
       if (this.modality?.isModal) {
-        if (addressed ? addressed.includes(myName) : moderator) {
-          this.modality.stepUp('addressed')
-        } else if (!addressed) {
+        if (iHaveFloor) {
+          this.modality.stepUp('has floor')
+        } else if (!floor) {
           this.modality.stepUp('orchestrating')
         } else {
-          this.modality.stepDown('not addressed')
+          this.modality.stepDown('not on floor')
         }
       }
 
-      // Build orchestrator addendum — only needed when moderator system is active
-      // (explicit addressing skips moderation entirely)
+      // Build moderator addendum — only when no floor is set and moderator is active.
+      // The moderator's job: decide who gets the floor, trigger them, update floor.
       let moderatorAddendum = ''
-      if (moderator && !addressed) {
+      if (moderator && !floor) {
         const otherAgents = this._moderatorPool.filter(n => n !== myName).join(', ')
         moderatorAddendum = [
-          `\n\n## CURRENT TURN: You are the orchestrator`,
-          `Decide who should respond to the message above:`,
+          `\n\n## CURRENT TURN: You are the moderator`,
+          `No one has the floor. Decide who should respond to the message above:`,
           `- If addressed to everyone: call internal({ backchannel: "All agents: respond to ${name}'s message", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
           `- If meant for another agent: call internal({ backchannel: "[agent name]: respond to ${name}'s message", trigger: true }) to hand off, then stay silent.`,
           `- If just for you: respond normally.`,
@@ -759,9 +773,19 @@ export class Room {
         ].join('\n')
       }
 
-      // If explicitly addressed and host is NOT in the list, skip agent loop
-      if (addressed && !addressed.includes(myName)) {
-        console.log(`[${this.persona.config.name}] Not addressed — skipping response`)
+      // Inject floor context into the message so agents know who's speaking
+      if (isMultiAgent && floor) {
+        const floorNote = `[floor: ${floor.join(', ')}]`
+        // Append to the user message already pushed
+        const lastMsg = this.messages[this.messages.length - 1]
+        if (lastMsg?.role === 'user') {
+          lastMsg.content += `\n${floorNote}`
+        }
+      }
+
+      // If floor is set and host is NOT on it, skip agent loop
+      if (floor && !floor.includes(myName)) {
+        console.log(`[${this.persona.config.name}] Not on floor — skipping response`)
         return // finally block handles cleanup
       }
 
@@ -792,8 +816,10 @@ export class Room {
         orchestratorProvider = mainResolved.provider
       }
 
+      const activeLayer = this.modality?.mode
       const agentConfig = {
         model: orchestratorModel,
+        layer: activeLayer,
         maxTurns: this.persona.config.chat?.max_turns || 20,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],
@@ -828,10 +854,7 @@ export class Room {
         }
         if (this._pendingRoom === 'home') {
           this.broadcast(event)
-        } else if (event.type === 'tool_start' || event.type === 'tool_result') {
-          // Forward tool events to remote office so visitors can see what we're doing.
-          // text_delta/done are NOT forwarded — the final public text arrives via
-          // sendMessage() after the agent loop completes.
+        } else {
           const client = this.roomClients.get(this._pendingRoom)
           if (client) client.sendEvent(event, this._pendingRoomChannel)
         }
@@ -898,12 +921,12 @@ export class Room {
       const STATUS_COOLDOWN_MS = 120_000 // 2 minutes
       if (!this._lastProviderStatusAt || now - this._lastProviderStatusAt > STATUS_COOLDOWN_MS) {
         this._lastProviderStatusAt = now
-        const layer = err.layer || 'unknown'
-        const triedList = err.triedModels?.length
-          ? err.triedModels.map((m, i) => `  ${i + 1}. \`${m}\``).join('\n')
-          : '  - unknown'
+        // Only show provider-unavailable status for errors that carry model info.
+        // Errors without .layer/.triedModels are config/init errors, not provider outages.
+        if (!err.layer || !err.triedModels?.length) return
         const reason = err.isCircuitOpen ? (err.lastError || `circuit open for \`${err.url}\``) : err.message
-        const statusMsg = `**${layer} layer unavailable**\n- **Tried:**\n${triedList}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
+        const triedList = err.triedModels.map((m, i) => `  ${i + 1}. \`${m}\``).join('\n')
+        const statusMsg = `**${err.layer} layer unavailable**\n- **Tried:**\n${triedList}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
         if (this._pendingRoom === 'home') {
           this.broadcast({ type: 'error', message: statusMsg })
         } else {
@@ -984,10 +1007,10 @@ export class Room {
       const hasOrchestrator = !hasModality && this.persona.config.orchestrator != null
       let orchestratorModel, orchestratorProvider, executorModel
 
+      const currentModerator = this._moderatorPool[((this._moderatorIndex - 1) % this._moderatorPool.length + this._moderatorPool.length) % this._moderatorPool.length]
+      const isModerator = currentModerator === this.persona.config.display_name
       if (hasModality) {
         // Non-moderators step down on idle; moderator stays in cognition
-        const currentModerator = this._moderatorPool[((this._moderatorIndex - 1) % this._moderatorPool.length + this._moderatorPool.length) % this._moderatorPool.length]
-        const isModerator = currentModerator === this.persona.config.display_name
         if (!isModerator) this.modality.stepDown('idle — not moderator')
         const modalModel = isModerator ? this.modality.model : this.modality.attentionModel
         const resolved = this.registry.resolve(modalModel)
@@ -1008,8 +1031,10 @@ export class Room {
         orchestratorProvider = mainResolved.provider
       }
 
+      const idleLayer = this.modality?.mode
       const agentConfig = {
         model: orchestratorModel,
+        layer: idleLayer,
         maxTurns: 5,
         thinkingBudget: this.persona.config.chat?.thinking_budget || null,
         serverTools: this.persona.config.server_tools || [],

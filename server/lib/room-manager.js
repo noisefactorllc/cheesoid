@@ -43,6 +43,7 @@ export class RoomManager {
       _pendingContextMessages: [],
       _moderatorPool: [persona.config.display_name],
       _moderatorIndex: 0,
+      _floor: null,
       _wakeupSchedulers: [],
     }
     for (const agent of persona.config.agents || []) {
