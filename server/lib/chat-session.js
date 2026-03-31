@@ -445,14 +445,14 @@ export class Room {
           if (this.modality?.isModal) this.modality.stepUp('addressed by name')
           console.log(`[${this.persona.config.name}] Mentioned by name — responding`)
           this._pendingRoomChannel = event.room || null
-          this._processMessage(routeRoom, event.name, event.text)
+          this._processMessage(routeRoom, event.name, event.text, { _roomChannel: event.room })
         } else if (event.leader && event.leader !== myName) {
           // Not our turn — don't add to context, don't process
           console.log(`[${this.persona.config.name}] Deferring to ${event.leader}`)
         } else {
           console.log(`[${this.persona.config.name}] Taking the floor`)
           this._pendingRoomChannel = event.room || null
-          this._processMessage(routeRoom, event.name, event.text)
+          this._processMessage(routeRoom, event.name, event.text, { _roomChannel: event.room })
         }
       }
     } else if (event.type === 'assistant_message') {
@@ -636,11 +636,16 @@ export class Room {
         // Queue human messages — broadcast immediately so they appear in chat
         this.broadcast({ type: 'user_message', name, text })
         this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
-        this._messageQueue.push({ room, name, text, _roomInstance: this })
+        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
       } else {
-        this._messageQueue.push({ room, name, text, _roomInstance: this })
+        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
       }
       return
+    }
+
+    // Restore room channel from options (used when draining queued messages)
+    if (options._roomChannel !== undefined) {
+      this._pendingRoomChannel = options._roomChannel
     }
 
     this.busy = true
@@ -913,7 +918,7 @@ export class Room {
             console.error(`[${this.persona.config.name}] Queued DM processing error:`, err.message)
           })
         } else {
-          targetRoom._processMessage(next.room, next.name, next.text).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel }).catch(err => {
             console.error(`[${this.persona.config.name}] Queue processing error:`, err.message)
           })
         }
