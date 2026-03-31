@@ -683,37 +683,33 @@ export class Room {
         this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
       }
 
-      // Modality gear shift on leader election: leader steps up, others step down
+      // Host always orchestrates — always step up when there's a leader decision to make
       const myName = this.persona.config.display_name
       if (leader && this.modality?.isModal) {
-        if (leader === myName) {
-          this.modality.stepUp('elected leader')
-        } else {
-          this.modality.stepDown('not leader')
-        }
+        this.modality.stepUp('orchestrating')
       }
 
-      // If another agent is the leader for this turn, defer — don't respond
-      if (leader && leader !== myName) {
-        console.log(`[${this.persona.config.name}] Deferring to ${leader}`)
-        if (room === 'home') {
-          this.broadcast({ type: 'done', model: null, deferred: true })
-        }
-        return // skip agent loop — finally block handles cleanup
-      }
-
-      // Build leader duties addendum for the system prompt (not injected into messages)
+      // Build orchestrator addendum — Red always orchestrates, never defers.
+      // The addendum tells Red's LLM who to trigger and whether to respond.
       let leaderAddendum = ''
-      if (leader && leader === myName) {
+      if (leader) {
         const otherAgents = this._leaderPool.filter(n => n !== myName).join(', ')
-        leaderAddendum = [
-          `\n\n## CURRENT TURN: You are the leader`,
-          `Decide who should respond to the message above:`,
-          `- If addressed to everyone: call internal({ backchannel: "All agents respond", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
-          `- If meant for another agent: call internal({ backchannel: "This is for you", trigger: true }) to hand off.`,
-          `- If just for you: respond normally.`,
-          `If you skip the trigger, other agents stay silent. This is your responsibility.`,
-        ].join('\n')
+        if (leader === myName) {
+          leaderAddendum = [
+            `\n\n## CURRENT TURN: You are the orchestrator`,
+            `Decide who should respond to the message above:`,
+            `- If addressed to everyone: call internal({ backchannel: "All agents: respond to ${name}'s message", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
+            `- If meant for another agent: call internal({ backchannel: "[agent name]: respond to ${name}'s message", trigger: true }) to hand off, then stay silent.`,
+            `- If just for you: respond normally.`,
+            `If you skip the trigger, other agents stay silent. This is your responsibility.`,
+          ].join('\n')
+        } else {
+          leaderAddendum = [
+            `\n\n## CURRENT TURN: The message addresses ${leader}`,
+            `Call internal({ backchannel: "${leader}: respond to ${name}'s message", trigger: true }) to wake them.`,
+            `Do NOT respond to the message yourself — only trigger ${leader} and stay silent.`,
+          ].join('\n')
+        }
       }
 
       // Determine mode: modal (attention/cognition), hybrid (orchestrator), or direct
