@@ -297,7 +297,8 @@ export class Room {
   }
 
   getScrollback() {
-    return [...this.history]
+    const HIDDEN_NAMES = new Set(['system', 'webhook', 'wakeup'])
+    return this.history.filter(msg => !HIDDEN_NAMES.has(msg.name))
   }
 
   // Send event to all connected clients
@@ -687,7 +688,9 @@ export class Room {
 
       if (room === 'home' && !options._silent) {
         if (name) this.participants.set(name, Date.now())
-        this.broadcast({ type: 'user_message', name, text, leader })
+        if (name !== 'system' && name !== 'webhook' && name !== 'wakeup') {
+          this.broadcast({ type: 'user_message', name, text, leader })
+        }
         this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
       }
 
