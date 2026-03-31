@@ -329,17 +329,18 @@ export class Room {
    * Returns array of addressed agent names, or null if no explicit addressing.
    *
    * Patterns:
-   *   @Name or @ Name        → ["Name"]
-   *   @Name @Other            → ["Name", "Other"]
-   *   Name:                   → ["Name"] (at start of message)
-   *   Name, Other:            → ["Name", "Other"]
-   *   Name and Other:         → ["Name", "Other"]
+   *   @Name or @ Name         → ["Name"]
+   *   @Name @Other             → ["Name", "Other"]
+   *   Name: ...                → ["Name"]
+   *   Name, ...               → ["Name"] (name at very start followed by comma)
+   *   Name, Other: ...        → ["Name", "Other"]
+   *   Name and Other: ...     → ["Name", "Other"]
    */
   _parseAddressing(text) {
     const pool = this._moderatorPool
     const addressed = new Set()
 
-    // Pattern 1: @Name or @ Name
+    // Pattern 1: @Name or @ Name (anywhere in text)
     for (const agentName of pool) {
       if (new RegExp(`@\\s*${agentName}\\b`, 'i').test(text)) {
         addressed.add(agentName)
@@ -347,11 +348,12 @@ export class Room {
     }
     if (addressed.size > 0) return [...addressed]
 
-    // Pattern 2: Name: or Name, Name: at the start of the message
-    // Match "Name:" or "Name1, Name2:" or "Name1 and Name2:" at the beginning
-    const colonMatch = text.match(/^([^:]{1,60}):\s/)
-    if (colonMatch) {
-      const prefix = colonMatch[1]
+    // Pattern 2: Name at the very start of the message, followed by
+    // a delimiter (colon, comma, semicolon, dash, or newline)
+    // e.g. "Blue, can you..." or "Blue: do this" or "Red and Green, what do you think"
+    const delimMatch = text.match(/^([^:,;\-\n]{1,60})[;:,\-]\s/)
+    if (delimMatch) {
+      const prefix = delimMatch[1]
       for (const agentName of pool) {
         if (new RegExp(`\\b${agentName}\\b`, 'i').test(prefix)) {
           addressed.add(agentName)
