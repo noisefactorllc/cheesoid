@@ -1,4 +1,5 @@
 import { assemblePrompt, currentTimestamp } from './prompt-assembler.js'
+import { assembleDMNPrompt } from './dmn.js'
 import { Memory } from './memory.js'
 import { State } from './state.js'
 import { ChatLog } from './chat-log.js'
@@ -94,6 +95,7 @@ export class Room {
         _moderatorIndex: 0,
         _floor: null, // array of agent names that currently have the floor, or null
         _wakeupSchedulers: [],
+        _dmnPrompt: null, // assembled once at init if config.dmn is set
       }
       for (const a of persona.config.agents || []) {
         this._a._moderatorPool.push(a.name)
@@ -176,6 +178,8 @@ export class Room {
   set _floor(v) { this._a._floor = v }
   get _wakeupSchedulers() { return this._a._wakeupSchedulers }
   set _wakeupSchedulers(v) { this._a._wakeupSchedulers = v }
+  get _dmnPrompt() { return this._a._dmnPrompt }
+  set _dmnPrompt(v) { this._a._dmnPrompt = v }
 
   async initialize() {
     if (this.systemPrompt) return // already initialized
@@ -194,6 +198,11 @@ export class Room {
         attention: config.attention,
         cognition: config.cognition,
       })
+    }
+
+    // DMN prompt — assembled once at init if configured
+    if (config.dmn) {
+      this._dmnPrompt = await assembleDMNPrompt(dir, config)
     }
 
     this.tools = await loadTools(dir, config, this.memory, this.state, this, this.registry, this.modality)
@@ -302,6 +311,28 @@ export class Room {
   getScrollback() {
     const HIDDEN_NAMES = new Set(['system', 'webhook', 'wakeup'])
     return this.history.filter(msg => !HIDDEN_NAMES.has(msg.name))
+  }
+
+  /**
+   * Resolve DMN provider and model from config. Returns fields to spread
+   * into agentConfig. No-op when DMN is not configured.
+   */
+  _resolveDMNConfig() {
+    if (!this.persona.config.dmn || !this._dmnPrompt) {
+      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
+    }
+    try {
+      const resolved = this.registry.resolve(this.persona.config.dmn)
+      return {
+        dmnProvider: resolved.provider,
+        dmnModel: resolved.modelId,
+        dmnPrompt: this._dmnPrompt,
+        displayName: this.persona.config.display_name || this.persona.config.name,
+      }
+    } catch (err) {
+      console.log(`[${this.persona.config.name}] DMN model resolution failed: ${err.message}`)
+      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
+    }
   }
 
   // Send event to all connected clients
@@ -597,6 +628,7 @@ export class Room {
           : [],
         registry: this.registry,
         modality: null, // no gear shifting in DMs
+        ...this._resolveDMNConfig(),
       }
 
       let assistantText = ''
@@ -835,6 +867,7 @@ export class Room {
           : [],
         registry: this.registry,
         modality: hasModality ? this.modality : null,
+        ...this._resolveDMNConfig(),
       }
 
       let assistantText = ''
