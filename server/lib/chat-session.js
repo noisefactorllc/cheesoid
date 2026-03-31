@@ -660,19 +660,18 @@ export class Room {
       // Multi-agent turn-taking: check for direct address, else rotate
       // Skip leader election for system/backchannel-triggered messages
       let leader = null
+      let mentionedAgents = []
       const isMultiAgent = room === 'home' && this._leaderPool.length > 1 && name !== 'system'
       if (isMultiAgent) {
-        // If the message mentions a specific agent by name, they get the floor
+        // Find all mentioned agents
         for (const agentName of this._leaderPool) {
           if (new RegExp(`\\b${agentName}\\b`, 'i').test(text)) {
-            leader = agentName
-            break
+            mentionedAgents.push(agentName)
           }
         }
-        if (!leader) {
-          leader = this._electLeader()
-        }
-        console.log(`[${this.persona.config.name}] Turn leader: ${leader} (pool: ${this._leaderPool.join(', ')})`)
+        // First mentioned agent is the leader; if none mentioned, round-robin
+        leader = mentionedAgents[0] || this._electLeader()
+        console.log(`[${this.persona.config.name}] Turn leader: ${leader} (mentioned: ${mentionedAgents.join(', ') || 'none'}, pool: ${this._leaderPool.join(', ')})`)
       }
 
       if (room === 'home' && !options._silent) {
@@ -694,7 +693,9 @@ export class Room {
       let leaderAddendum = ''
       if (leader) {
         const otherAgents = this._leaderPool.filter(n => n !== myName).join(', ')
-        if (leader === myName) {
+        const mentionedOthers = mentionedAgents.filter(n => n !== myName)
+        if (mentionedOthers.length === 0) {
+          // No other agents mentioned — Red is the leader or round-robin picked Red
           leaderAddendum = [
             `\n\n## CURRENT TURN: You are the orchestrator`,
             `Decide who should respond to the message above:`,
@@ -704,10 +705,15 @@ export class Room {
             `If you skip the trigger, other agents stay silent. This is your responsibility.`,
           ].join('\n')
         } else {
+          // Other agent(s) mentioned — trigger them
+          const targets = mentionedOthers.join(', ')
+          const iAlsoRespond = mentionedAgents.includes(myName)
           leaderAddendum = [
-            `\n\n## CURRENT TURN: The message addresses ${leader}`,
-            `Call internal({ backchannel: "${leader}: respond to ${name}'s message", trigger: true }) to wake them.`,
-            `Do NOT respond to the message yourself — only trigger ${leader} and stay silent.`,
+            `\n\n## CURRENT TURN: The message addresses ${targets}`,
+            `Call internal({ backchannel: "${targets}: respond to ${name}'s message", trigger: true }) to wake them.`,
+            iAlsoRespond
+              ? `You were also addressed — respond AFTER triggering.`
+              : `Do NOT respond to the message yourself — only trigger and stay silent.`,
           ].join('\n')
         }
       }
