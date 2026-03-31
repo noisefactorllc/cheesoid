@@ -894,10 +894,12 @@ export class Room {
       }
     } catch (err) {
       console.error(`[${this.persona.config.name}] Error responding in ${this._pendingRoom}: ${err.message}`)
-      // Send provider-unavailable status to chat, but only once per outage episode
+      // Provider errors: log to console, broadcast as transient error to local UI only.
+      // Don't send as chat messages to remote rooms — the agent will retry and
+      // either recover (error was noise) or stay silent (users can see it's down).
       const now = Date.now()
       const STATUS_COOLDOWN_MS = 120_000 // 2 minutes
-      if (!this._lastProviderStatusAt || now - this._lastProviderStatusAt > STATUS_COOLDOWN_MS) {
+      if (this._pendingRoom === 'home' && (!this._lastProviderStatusAt || now - this._lastProviderStatusAt > STATUS_COOLDOWN_MS)) {
         this._lastProviderStatusAt = now
         const layer = err.layer || 'unknown'
         const triedList = err.triedModels?.length
@@ -905,14 +907,7 @@ export class Room {
           : '  - unknown'
         const reason = err.isCircuitOpen ? (err.lastError || `circuit open for \`${err.url}\``) : err.message
         const statusMsg = `**${layer} layer unavailable**\n- **Tried:**\n${triedList}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
-        if (this._pendingRoom === 'home') {
-          this.broadcast({ type: 'error', message: statusMsg })
-        } else {
-          const client = this.roomClients.get(this._pendingRoom)
-          if (client) {
-            client.sendMessage(statusMsg, { room: this._pendingRoomChannel }).catch(() => {})
-          }
-        }
+        this.broadcast({ type: 'error', message: statusMsg })
       }
     } finally {
       this.busy = false

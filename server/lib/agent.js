@@ -281,18 +281,26 @@ async function _nudgeIfEmpty(messages, provider, config, systemPrompt, totalUsag
   // Remove the empty assistant message to maintain valid alternation
   messages.pop()
 
-  const result = await provider.streamMessage(
-    {
-      model: config.model,
-      maxTokens: 4096,
-      system: systemPrompt,
-      messages,
-      tools: [],
-      serverTools: [],
-      thinkingBudget: null,
-    },
-    onEvent,
-  )
+  let result
+  try {
+    result = await provider.streamMessage(
+      {
+        model: config.model,
+        maxTokens: 4096,
+        system: systemPrompt,
+        messages,
+        tools: [],
+        serverTools: [],
+        thinkingBudget: null,
+      },
+      onEvent,
+    )
+  } catch (err) {
+    // Enrich with context if missing — nudge uses the orchestrator model
+    err.layer = err.layer || (config.modality ? config.modality.mode : 'cognition')
+    err.triedModels = err.triedModels || [config.model]
+    throw err
+  }
 
   totalUsage.input_tokens += result.usage.input_tokens
   totalUsage.output_tokens += result.usage.output_tokens
