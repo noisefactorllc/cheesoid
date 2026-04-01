@@ -307,6 +307,14 @@ main {
   margin-top: var(--hf-space-4);
 }
 
+#connection-status {
+  background: var(--hf-warn, #b8860b);
+  color: #fff;
+  font-size: var(--hf-size-sm);
+  text-align: center;
+  padding: var(--hf-space-1) var(--hf-space-2);
+}
+
 .system-message {
   color: var(--hf-text-dim);
   font-size: var(--hf-size-sm);

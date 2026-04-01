@@ -72,6 +72,7 @@ export class CircuitBreaker {
     ep.failures = 0
     ep.cooldown = this.initialCooldown
     ep.probing = false
+    ep.lastSuccess = Date.now()
   }
 
   recordFailure(url, errorMessage) {
@@ -87,7 +88,13 @@ export class CircuitBreaker {
       return
     }
 
-    ep.failures++
+    // Reset consecutive count if there was a recent success (intermittent, not dead)
+    if (ep.lastSuccess && Date.now() - ep.lastSuccess < this.initialCooldown) {
+      ep.failures = 1
+    } else {
+      ep.failures++
+    }
+
     if (ep.failures >= this.threshold) {
       ep.state = STATES.OPEN
       ep.openedAt = Date.now()
@@ -103,4 +110,4 @@ export class CircuitBreaker {
 }
 
 // Shared singleton — all sessions share circuit state
-export default new CircuitBreaker({ threshold: 3, initialCooldown: 30000, maxCooldown: 1800000 })
+export default new CircuitBreaker({ threshold: 5, initialCooldown: 5000, maxCooldown: 60000 })

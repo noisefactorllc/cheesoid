@@ -31,8 +31,8 @@ function replaceTimestamp(prompt) {
 
 const IDLE_THOUGHT_INTERVAL = 30 * 60 * 1000 // 30 minutes, doubles each time
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
-const MAX_HISTORY = 250
-const MAX_CONTEXT_MESSAGES = 250 // max messages in the live agent context
+const MAX_HISTORY = 75
+const MAX_CONTEXT_MESSAGES = 75 // max messages in the live agent context
 const MAX_QUEUED_WEBHOOKS = 10
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
@@ -277,6 +277,11 @@ export class Room {
       res.write(data)
     }
 
+    // Send moderator pool to agents so they know the full participant list
+    if (isAgent && this._moderatorPool.length > 1) {
+      res.write(`data: ${JSON.stringify({ type: 'moderator_pool', pool: this._moderatorPool })}\n\n`)
+    }
+
     // Start heartbeat if this is the first client
     if (this.clients.size === 1) this._startHeartbeat()
 
@@ -382,18 +387,30 @@ export class Room {
     }
     if (addressed.size > 0) return [...addressed]
 
-    // Pattern 2: Name at the very start of the message, followed by
-    // a delimiter (colon, comma, semicolon, dash, or newline)
-    // e.g. "Blue, can you..." or "Blue: do this" or "Red and Green, what do you think"
-    const delimMatch = text.match(/^([^:,;\-\n]{1,60})[;:,\-]\s/)
-    if (delimMatch) {
-      const prefix = delimMatch[1]
+    // Pattern 2: Names at the start of the message before a colon or dash
+    // e.g. "Blue: do this", "Blue, Green: quick check", "Red and Green - what do you think"
+    // First try colon/dash (strongest signal — captures full address prefix)
+    const colonMatch = text.match(/^([^:\-\n]{1,60})[:\-]\s/)
+    if (colonMatch) {
+      const prefix = colonMatch[1]
       for (const agentName of pool) {
         if (new RegExp(`\\b${agentName}\\b`, 'i').test(prefix)) {
           addressed.add(agentName)
         }
       }
       if (addressed.size > 0) return [...addressed]
+    }
+
+    // Pattern 3: Name is the first word of the message
+    // e.g. "Blue how are you", "Blue, can you", "Blue. do this", "Blue!"
+    const firstWord = text.match(/^(\w+)[\s.,!?;]/)
+    if (firstWord) {
+      for (const agentName of pool) {
+        if (agentName.toLowerCase() === firstWord[1].toLowerCase()) {
+          addressed.add(agentName)
+          return [...addressed]
+        }
+      }
     }
 
     return null
@@ -479,6 +496,13 @@ export class Room {
   }
 
   _handleRemoteEvent(event, roomConfigName) {
+    // Sync moderator pool from host
+    if (event.type === 'moderator_pool') {
+      this._moderatorPool = event.pool
+      console.log(`[${this.persona.config.name}] Moderator pool synced: ${event.pool.join(', ')}`)
+      return
+    }
+
     // Skip all host scrollback — visitor has own history from initialize()
     if (event.scrollback) return
 
@@ -532,11 +556,11 @@ export class Room {
     } else if (event.type === 'assistant_message') {
       // Host agent responded — don't add to visitor context
     } else if (event.type === 'backchannel') {
+      const myName = this.persona.config.display_name
+      // Skip if targeted to a different agent
+      if (event.target && event.target !== myName) return
       this._safeAppendMessage({ role: 'user', content: `(backchannel) ${event.name}: ${event.text}` })
       if (event.trigger) {
-        // Skip trigger if already busy — we're already responding to this
-        // conversation (e.g. mentioned by name). Queuing would cause a
-        // duplicate response when the current turn finishes.
         if (this.busy) {
           console.log(`[${this.persona.config.name}] Skipping backchannel trigger — already responding`)
           return
@@ -712,7 +736,7 @@ export class Room {
         // Queue human messages — broadcast immediately so they appear in chat
         this.broadcast({ type: 'user_message', name, text })
         this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
-        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
+        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true })
       } else {
         this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
       }
@@ -764,8 +788,11 @@ export class Room {
           floor = addressed
           console.log(`[${this.persona.config.name}] Floor → ${floor.join(', ')} (explicit)`)
         } else if (floor) {
-          // No explicit addressing — floor persists from previous turn
-          console.log(`[${this.persona.config.name}] Floor: ${floor.join(', ')} (continuing)`)
+          // No explicit addressing — floor persists, host joins as fallback
+          if (!floor.includes(myName)) {
+            floor = [...floor, myName]
+          }
+          console.log(`[${this.persona.config.name}] Floor: ${floor.join(', ')} (continuing + host)`)
         } else {
           // No floor set — moderator orchestrates
           moderator = this._electModerator()
@@ -775,7 +802,7 @@ export class Room {
 
       if (room === 'home' && !options._silent) {
         if (name) this.participants.set(name, Date.now())
-        if (name !== 'system' && name !== 'webhook' && name !== 'wakeup') {
+        if (name !== 'system' && name !== 'webhook' && name !== 'wakeup' && !options._alreadyBroadcast) {
           this.broadcast({ type: 'user_message', name, text, moderator, floor })
         }
         this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
@@ -801,8 +828,8 @@ export class Room {
         moderatorAddendum = [
           `\n\n## CURRENT TURN: You are the moderator`,
           `No one has the floor. Decide who should respond to the message above:`,
-          `- If addressed to everyone: call internal({ backchannel: "All agents: respond to ${name}'s message", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
-          `- If meant for another agent: call internal({ backchannel: "[agent name]: respond to ${name}'s message", trigger: true }) to hand off, then stay silent.`,
+          `- If addressed to everyone: call internal({ backchannel: "respond to ${name}'s message", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
+          `- If meant for a specific agent: call internal({ backchannel: "respond to ${name}'s message", trigger: true, target: "[agent name]" }) to wake only that agent, then stay silent.`,
           `- If just for you: respond normally.`,
           `If you skip the trigger, other agents stay silent. This is your responsibility.`,
         ].join('\n')
@@ -1018,7 +1045,7 @@ export class Room {
             console.error(`[${this.persona.config.name}] Queued DM processing error:`, err.message)
           })
         } else {
-          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel }).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast }).catch(err => {
             console.error(`[${this.persona.config.name}] Queue processing error:`, err.message)
           })
         }
@@ -1092,9 +1119,12 @@ export class Room {
       let idleModel = null
       let toolUseCount = 0
       const agentName = this.persona.config.display_name
-      // Relay idle thoughts to the most recently latched host room
-      const remoteClient = this._lastRemoteRoom
+      // Relay idle thoughts to the most recently latched host room, or first available
+      let remoteClient = this._lastRemoteRoom
         ? this.roomClients.get(this._lastRemoteRoom) : null
+      if (!remoteClient && this.roomClients.size > 0) {
+        remoteClient = this.roomClients.values().next().value
+      }
       const remoteChannel = this._lastRemoteRoomChannel
       const onEvent = (event) => {
         try {

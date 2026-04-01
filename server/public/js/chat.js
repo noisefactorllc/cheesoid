@@ -160,20 +160,34 @@ async function enterRoom(presenceData) {
   connectSSE()
 }
 
+let reconnectDelay = 1000
+const MAX_RECONNECT_DELAY = 30000
+
 function connectSSE() {
   if (evtSource) evtSource.close()
-  // Clear stale view cache on reconnect so fresh scrollback is used
+  // Clear stale streaming state on reconnect
   viewCache.clear()
+  assistantEl = null
+  assistantBuffer = ''
+  thinkingEl = null
+  visitorStreams.clear()
+  idleStreams.clear()
+  lastSender = null
+  currentModel = null
+
   evtSource = new EventSource(`/api/chat/stream?name=${encodeURIComponent(myName)}`)
   evtSource.onmessage = handleEvent
   evtSource.onerror = () => {
-    // Close immediately to prevent browser auto-reconnect racing our manual reconnect
     if (evtSource) evtSource.close()
     if (reconnectTimer) return
+    // Show connection lost banner
+    const banner = document.getElementById('connection-status')
+    if (banner) { banner.textContent = 'Connection lost. Reconnecting...'; banner.classList.remove('hidden') }
     reconnectTimer = setTimeout(() => {
       reconnectTimer = null
       connectSSE()
-    }, 3000)
+      reconnectDelay = Math.min(reconnectDelay * 2, MAX_RECONNECT_DELAY)
+    }, reconnectDelay)
   }
 
   input.focus()
@@ -211,6 +225,9 @@ function handleEvent(e) {
       assistantBuffer = ''
       thinkingEl = null
       idleStreams.clear()
+      // Reconnect succeeded — reset backoff and hide banner
+      reconnectDelay = 1000
+      { const banner = document.getElementById('connection-status'); if (banner) banner.classList.add('hidden') }
       for (const msg of event.messages) {
         // Filter by view: DMs to DM views, room messages to matching room views
         if (msg.dm_from || msg.dm_to) {
@@ -355,7 +372,7 @@ function handleEvent(e) {
       // Skip if the floor excludes the host
       const isDMToHost = event.to && event.to === personaLabel
       const hostOnFloor = !event.floor || event.floor.includes(personaLabel)
-      if (!event.fromAgent && (!event.to || isDMToHost) && hostOnFloor) {
+      if (!event.fromAgent && (!event.to || isDMToHost) && hostOnFloor && !assistantEl) {
         assistantEl = appendMessage('assistant', '')
         assistantBuffer = ''
         thinkingEl = document.createElement('div')
@@ -534,8 +551,8 @@ function handleEvent(e) {
         assistantBuffer = assistantBuffer.trim()
         const body = assistantEl.querySelector('.message-body')
         if (body) body.innerHTML = renderMarkdown(assistantBuffer)
-        // Remove empty ghost elements (backchannel-only responses)
-        if (!assistantBuffer.trim()) {
+        // Remove empty ghost elements (backchannel-only responses, no tools either)
+        if (!assistantBuffer.trim() && !assistantEl.querySelector('.tool-call')) {
           assistantEl.remove()
         }
       }

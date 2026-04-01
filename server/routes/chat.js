@@ -68,7 +68,7 @@ router.post('/api/chat/send', async (req, res) => {
     const { rooms } = req.app.locals
     if (rooms) rooms.routeDM(name, req.body.dm_to, message, true, req.body.model)
   } else if (req.isAgent && req.body.backchannel) {
-    room.addBackchannelMessage(name, message, { trigger: req.body.trigger })
+    room.addBackchannelMessage(name, message, { trigger: req.body.trigger, target: req.body.target })
   } else if (req.isAgent) {
     room.addAgentMessage(name, message, { source: 'room', model: req.body.model })
   } else {

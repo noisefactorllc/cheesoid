@@ -115,8 +115,10 @@ export async function _processStream(stream, onEvent) {
 export async function* _parseSSE(body) {
   const decoder = new TextDecoder()
   let buffer = ''
+  let done = false
 
   for await (const bytes of body) {
+    if (done) continue // drain remaining bytes to free connection
     buffer += decoder.decode(bytes, { stream: true })
     const lines = buffer.split('\n')
     buffer = lines.pop() // keep incomplete line in buffer
@@ -126,7 +128,7 @@ export async function* _parseSSE(body) {
       if (!trimmed || trimmed.startsWith(':')) continue
       if (!trimmed.startsWith('data: ')) continue
       const data = trimmed.slice(6)
-      if (data === '[DONE]') return
+      if (data === '[DONE]') { done = true; break }
       try {
         yield JSON.parse(data)
       } catch {
@@ -191,7 +193,10 @@ export function createOpenAICompatProvider(config) {
           }),
         })
 
-        if (!response.ok) return 'auto' // fall back to auto on error
+        if (!response.ok) {
+          await response.text().catch(() => '') // consume body to free connection
+          return 'auto'
+        }
 
         const data = await response.json()
         const text = data.choices?.[0]?.message?.content?.trim() || ''
@@ -267,6 +272,7 @@ export function createOpenAICompatProvider(config) {
         if (response && response.status === 429) {
           const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
           const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
+          await response.text().catch(() => '') // consume body to free connection
           lastErr = new Error(`OpenAI-compat rate limited (429), retrying in ${Math.round(delay / 1000)}s`)
           circuitBreaker.recordFailure(baseUrl, lastErr.message)
         } else if (response && response.status >= 500) {
@@ -293,7 +299,13 @@ export function createOpenAICompatProvider(config) {
       }
 
       const sseStream = _parseSSE(response.body)
-      return _processStream(sseStream, onEvent)
+      try {
+        return await _processStream(sseStream, onEvent)
+      } finally {
+        // Ensure the response body is fully consumed/cancelled to free the TCP connection.
+        // _parseSSE returns early on [DONE] which leaves the stream open.
+        try { await response.body.cancel() } catch {}
+      }
     },
   }
 }

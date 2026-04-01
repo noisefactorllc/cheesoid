@@ -462,10 +462,9 @@ async function callExecutorWithFallback(config, params, onEvent) {
 }
 
 function isOrchestratorRetryable(err) {
-  if (err.isCircuitOpen) return true
-  if (err.status === 529 || err.status === 503 || err.status === 404) return true
-  if (err.errorType === 'overloaded_error' || err.errorType === 'api_error') return true
-  return false
+  // Only non-retryable errors are client-side validation (the request itself is wrong)
+  if (err.status >= 400 && err.status < 500 && err.status !== 429) return false
+  return true
 }
 
 async function callOrchestratorWithFallback(config, params, onEvent) {
@@ -536,6 +535,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let rescueFailed = false
   let stepUpUsed = false // one step_up re-run per agent call
   let lastRespondedModel = null // actual model that responded (may differ from config.model after fallback)
+  const calledTools = new Set() // track tool+args for dedup across executor turns
   let dmnCompleted = false
   let dmnSaved = null
   let dmnUsage = { input_tokens: 0, output_tokens: 0 }
@@ -663,6 +663,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     let toolResults = []
     let stepUpTriggered = false
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
+      calledTools.add(`${block.name}(${JSON.stringify(block.input)})`)
       let toolResult
       try {
         toolResult = await tools.execute(block.name, block.input, { onEvent })
@@ -718,8 +719,9 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     // Hard cap of 3 turns to prevent runaway loops.
     if (executor && executorModel) {
       const resultText = toolResults.map(r => r.content).join('\n\n')
+      const alreadyCalled = calledTools.size > 0 ? `\n\nAlready called (do NOT repeat): ${[...calledTools].join(', ')}` : ''
       const executorMessages = [
-        { role: 'user', content: `Tool results:\n\n${resultText}\n\nIf a follow-up tool call is needed based on these results, call it. Otherwise respond "done".` },
+        { role: 'user', content: `Tool results:\n\n${resultText}${alreadyCalled}\n\nIf a follow-up tool call is needed based on these results, call it. Otherwise respond "done".` },
       ]
 
       const MAX_EXECUTOR_TURNS = 3
@@ -735,6 +737,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
               tools: tools.definitions,
               serverTools: [],
               thinkingBudget: null,
+              toolChoice: execTurn === 0 ? 'required' : 'auto',
             },
             (event) => {
               if (event.type === 'tool_start' || event.type === 'tool_result') {
@@ -768,6 +771,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
           executorMessages.push({ role: 'assistant', content: execContent })
           const moreResults = []
           for (const block of execToolCalls) {
+            calledTools.add(`${block.name}(${JSON.stringify(block.input)})`)
             let toolResult
             try {
               toolResult = await tools.execute(block.name, block.input)

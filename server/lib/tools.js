@@ -93,6 +93,7 @@ function buildRoomTools(room, config) {
           thought: { type: 'string', description: 'An internal thought to broadcast as idle text and record in history.' },
           backchannel: { type: 'string', description: 'A backchannel message for agent coordination.' },
           trigger: { type: 'boolean', description: 'If true, the backchannel message triggers other agents to process and respond. Use when delegating or inviting others to speak.' },
+          target: { type: 'string', description: 'Name of a specific agent to receive this backchannel. If omitted, all agents receive it.' },
         },
       },
     })
@@ -140,10 +141,10 @@ function buildRoomTools(room, config) {
           if (pendingRoom && pendingRoom !== 'home') {
             const client = room.roomClients.get(pendingRoom)
             if (client) {
-              await client.sendBackchannel(input.backchannel, { trigger: !!input.trigger })
+              await client.sendBackchannel(input.backchannel, { trigger: !!input.trigger, target: input.target || null })
             }
           } else {
-            room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel, trigger: !!input.trigger })
+            room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel, trigger: !!input.trigger, target: input.target || null })
           }
           parts.push(input.trigger ? 'Backchannel sent (triggered).' : 'Backchannel sent.')
         }
