@@ -177,7 +177,11 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       }
     }
 
-    repairToolUseGaps(messages)
+    const repairedGaps = repairToolUseGaps(messages)
+    if (repairedGaps > 0) {
+      console.log(`[agent] ${repairedGaps} interrupted tool calls detected — injecting recovery context`)
+      messages.push({ role: 'user', content: `[SYSTEM: You were interrupted mid-operation. ${repairedGaps} tool call(s) did not complete. Review current state before re-attempting any operations.]` })
+    }
 
     // DMN pass — runs once, before first LLM call
     if (!dmnCompleted && config.dmnProvider) {
@@ -367,7 +371,14 @@ async function _nudgeIfEmpty(messages, provider, config, systemPrompt, totalUsag
  * - If a user message has tool_result blocks referencing tool_use_ids not
  *   present in the preceding assistant message, remove them.
  */
+/**
+ * Repair orphaned tool_use/tool_result blocks in message history.
+ * Returns the number of orphaned tool_use blocks that were repaired
+ * (i.e. tool calls that never got results — indicates prior interruption).
+ */
 function repairToolUseGaps(messages) {
+  let repairedCount = 0
+
   for (let i = 0; i < messages.length - 1; i++) {
     const msg = messages[i]
     if (msg.role !== 'assistant' || !Array.isArray(msg.content)) continue
@@ -381,6 +392,7 @@ function repairToolUseGaps(messages) {
       // No user message follows — insert synthetic results for all tool_use blocks
       if (toolUseIds.size > 0) {
         console.log(`[hybrid] repairing ${toolUseIds.size} orphaned tool_use blocks at message ${i}`)
+        repairedCount += toolUseIds.size
         const syntheticResults = [...toolUseIds].map(id => ({
           type: 'tool_result',
           tool_use_id: id,
@@ -400,6 +412,7 @@ function repairToolUseGaps(messages) {
     const missingResults = [...toolUseIds].filter(id => !existingResultIds.has(id))
     if (missingResults.length > 0) {
       console.log(`[hybrid] repairing ${missingResults.length} orphaned tool_use blocks at message ${i}`)
+      repairedCount += missingResults.length
       next.content.push(...missingResults.map(id => ({
         type: 'tool_result',
         tool_use_id: id,
@@ -451,6 +464,8 @@ function repairToolUseGaps(messages) {
       }
     }
   }
+
+  return repairedCount
 }
 
 const EXECUTOR_SYSTEM = `You are a tool executor for an English-language business application. You receive tool results and may need to call follow-up tools.
@@ -633,7 +648,11 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
     // Safety: ensure no orphaned tool_use blocks without matching tool_results
     // (can happen if a previous turn crashed mid-execution)
-    repairToolUseGaps(messages)
+    const repairedGaps = repairToolUseGaps(messages)
+    if (repairedGaps > 0) {
+      console.log(`[hybrid] ${repairedGaps} interrupted tool calls detected — injecting recovery context`)
+      messages.push({ role: 'user', content: `[SYSTEM: You were interrupted mid-operation. ${repairedGaps} tool call(s) did not complete. Review current state before re-attempting any operations.]` })
+    }
 
     // DMN pass — runs once, before first orchestrator call in cognition mode
     if (!dmnCompleted && config.dmnProvider) {
@@ -793,26 +812,57 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       ]
 
       const MAX_EXECUTOR_TURNS = 3
+      const MAX_EXECUTOR_RETRIES = 3
+      const EXECUTOR_BACKOFF_BASE_MS = 2000
       let activeExecutorModel = executorModel // best-known executor model for event tagging
       for (let execTurn = 0; execTurn < MAX_EXECUTOR_TURNS; execTurn++) {
         try {
-          const { result: execResult, model: usedModel } = await callExecutorWithFallback(
-            config,
-            {
-              maxTokens: 4096,
-              system: EXECUTOR_SYSTEM,
-              messages: executorMessages,
-              tools: tools.definitions,
-              serverTools: [],
-              thinkingBudget: null,
-              toolChoice: execTurn === 0 ? 'required' : 'auto',
-            },
-            (event) => {
-              if (event.type === 'tool_start' || event.type === 'tool_result') {
-                onEvent({ ...event, model: activeExecutorModel, executor: true })
+          // Retry with exponential backoff before giving up on this turn
+          let execResult, usedModel, lastRetryErr
+          for (let retry = 0; retry < MAX_EXECUTOR_RETRIES; retry++) {
+            try {
+              const res = await callExecutorWithFallback(
+                config,
+                {
+                  maxTokens: 4096,
+                  system: EXECUTOR_SYSTEM,
+                  messages: executorMessages,
+                  tools: tools.definitions,
+                  serverTools: [],
+                  thinkingBudget: null,
+                  toolChoice: execTurn === 0 ? 'required' : 'auto',
+                },
+                (event) => {
+                  if (event.type === 'tool_start' || event.type === 'tool_result') {
+                    onEvent({ ...event, model: activeExecutorModel, executor: true })
+                  }
+                },
+              )
+              execResult = res.result
+              usedModel = res.model
+              break // success
+            } catch (retryErr) {
+              lastRetryErr = retryErr
+              if (retry < MAX_EXECUTOR_RETRIES - 1) {
+                const delayMs = EXECUTOR_BACKOFF_BASE_MS * Math.pow(2, retry)
+                console.log(`[hybrid] executor turn ${execTurn + 1} retry ${retry + 1}/${MAX_EXECUTOR_RETRIES} failed: ${retryErr.message} — backoff ${delayMs}ms`)
+                await new Promise(resolve => setTimeout(resolve, delayMs))
               }
-            },
-          )
+            }
+          }
+          if (!execResult) {
+            // All retries exhausted — surface error to room and bail
+            const triedList = lastRetryErr?.triedModels?.length
+              ? lastRetryErr.triedModels.map(m => `\`${m}\``).join(', ')
+              : 'unknown'
+            onEvent({
+              type: 'executor_error',
+              message: `Executor failed after ${MAX_EXECUTOR_RETRIES} retries (tried: ${triedList}): ${lastRetryErr?.message || 'unknown error'}`,
+              error: lastRetryErr,
+            })
+            console.log(`[hybrid] executor turn ${execTurn + 1} failed after ${MAX_EXECUTOR_RETRIES} retries — returning to orchestrator`)
+            break
+          }
           activeExecutorModel = usedModel // update with actual model used (may differ after fallback)
 
           executorUsage.input_tokens += execResult.usage.input_tokens
@@ -875,6 +925,11 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
           iterations++ // count against maxTurns
         } catch (err) {
           console.log(`[hybrid] executor failed: ${err.message} — returning to orchestrator`)
+          onEvent({
+            type: 'executor_error',
+            message: `Executor error: ${err.message}`,
+            error: err,
+          })
           break
         }
       }
