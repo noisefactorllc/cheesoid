@@ -580,6 +580,77 @@ export class Room {
   }
 
   /**
+   * Post-response DMN review loop. After the agent speaks, the DMN reviews
+   * the response and can trigger up to 2 correction turns.
+   *
+   * Returns the cumulative correction text (empty string if no corrections).
+   * The critique is never broadcast — it's the agent's subconscious.
+   */
+  async _runPostResponseReview(assistantText, agentConfig, prompt, onEvent) {
+    const { dmnProvider, dmnModel, dmnReviewPrompt, displayName } = agentConfig
+
+    if (!dmnProvider || !dmnReviewPrompt || !assistantText?.trim()) return ''
+
+    const MAX_REVIEW_PASSES = 2
+    const agentName = displayName || this.persona.config.display_name || this.persona.config.name
+    let correctionText = ''
+
+    for (let pass = 0; pass < MAX_REVIEW_PASSES; pass++) {
+      // Broadcast thinking indicator
+      this.broadcast({ type: 'idle_text_delta', text: 'Thinking...', name: agentName })
+      this.broadcast({ type: 'idle_done', name: agentName })
+
+      const textToReview = correctionText || assistantText
+      const { verdict, usage } = await runDMNReview(
+        dmnReviewPrompt, this.messages, textToReview, dmnProvider, dmnModel,
+      )
+      console.log(`[dmn-review] pass ${pass + 1}: verdict=${verdict === 'pass' ? 'PASS' : 'CRITIQUE'} (${usage.input_tokens} in / ${usage.output_tokens} out)`)
+
+      if (verdict === 'pass') return correctionText
+
+      // Critique — inject transient correction prompt and run another agent turn
+      console.log(`[dmn-review] critique: ${verdict}`)
+      const correctionPrompt = `[system: Your previous response needs adjustment. Internal review: ${verdict}\nTake a corrective turn — clarify, expand, or fix what you just said. Be natural, don't reference this review process.]`
+      this.messages.push({ role: 'user', content: correctionPrompt })
+
+      const hasOrchestrator = !!this.persona.config.orchestrator
+      const hasModality = this.modality?.isModal
+      const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
+
+      // Build a correction-specific config — no DMN on the correction turn itself
+      const correctionConfig = {
+        ...agentConfig,
+        dmnProvider: null,
+        dmnPrompt: null,
+        maxTurns: 10,
+      }
+
+      let turnText = ''
+      const correctionOnEvent = (event) => {
+        if (event.type === 'text_delta') turnText += event.text
+        onEvent(event) // stream to chat normally
+      }
+
+      const result = await agentFn(prompt, this.messages, this.tools, correctionConfig, correctionOnEvent)
+      this.messages = result.messages
+
+      // Remove the transient correction prompt from history
+      // It's the user message right before the agent's correction response
+      const correctionIdx = this.messages.findIndex(
+        m => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('[system: Your previous response needs adjustment.')
+      )
+      if (correctionIdx !== -1) {
+        this.messages.splice(correctionIdx, 1)
+      }
+
+      correctionText = turnText.trim()
+      if (!correctionText) return correctionText // no text produced, stop
+    }
+
+    return correctionText
+  }
+
+  /**
    * Safely append a context message to the conversation. If the agent is busy
    * (mid-tool-execution), queue it — pushing directly into messages[] would
    * insert a user message between tool_use and tool_result, which the API rejects.
@@ -959,6 +1030,17 @@ export class Room {
       // Trim context to prevent unbounded growth
       if (this.messages.length > MAX_CONTEXT_MESSAGES) {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
+      }
+
+      // DMN post-response review — cognition-driven home room chat only
+      const isCognitionDriven = hasModality ? this.modality?.mode === 'cognition' : true
+      if (this._pendingRoom === 'home' && isCognitionDriven && agentConfig.dmnReviewPrompt) {
+        const additionalText = await this._runPostResponseReview(
+          assistantText, agentConfig, prompt, onEvent,
+        )
+        if (additionalText) {
+          assistantText += '\n' + additionalText
+        }
       }
 
       // Route response — freeform text is always public
