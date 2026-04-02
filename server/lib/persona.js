@@ -147,7 +147,7 @@ function normalizeTierLists(config) {
     return list.length ? list : undefined
   }
 
-  config.model = normalize(config.model, config.fallback_models)
+  config.model = normalize(config.execution || config.model, config.fallback_models)
   config.cognition = normalize(config.cognition, config.cognition_fallback_models)
   config.attention = normalize(config.attention)
   config.reasoner = normalize(config.reasoner, config.reasoner_fallback_models)

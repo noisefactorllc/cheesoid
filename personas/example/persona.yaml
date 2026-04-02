@@ -13,7 +13,7 @@ providers:
     api_key: ${OPENAI_API_KEY}
     reasoning_effort: high
 
-model: some-fast-model:my-provider
+execution: some-fast-model:my-provider
 
 orchestrator: gpt-5.4:openai
 
