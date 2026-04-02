@@ -936,9 +936,15 @@ export class Room {
         }
       }
 
-      // If floor is set and host is NOT on it, skip agent loop
+      // Skip agent loop when:
+      // 1. Floor is set and host is NOT on it
+      // 2. Moderator is elected and it's NOT the host (host waits for trigger like everyone else)
       if (floor && !floor.includes(myName)) {
         console.log(`[${this.persona.config.name}] Not on floor — skipping response`)
+        return // finally block handles cleanup
+      }
+      if (moderator && moderator !== myName) {
+        console.log(`[${this.persona.config.name}] Not moderator (${moderator} is) — skipping response`)
         return // finally block handles cleanup
       }
 

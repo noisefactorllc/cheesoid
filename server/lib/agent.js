@@ -804,18 +804,30 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     // The cheap executor processes tool results and can call follow-up tools.
     // It sees only results + tool definitions — no persona, no history.
     // Hard cap of 3 turns to prevent runaway loops.
-    if (executor && executorModel) {
-      const resultText = toolResults.map(r => r.content).join('\n\n')
-      const alreadyCalled = calledTools.size > 0 ? `\n\nAlready called (do NOT repeat): ${[...calledTools].join(', ')}` : ''
-      const executorMessages = [
-        { role: 'user', content: `Tool results:\n\n${resultText}${alreadyCalled}\n\nIf a follow-up tool call is needed based on these results, call it. Otherwise respond "done".` },
-      ]
+    // Filter out voice-driven tools — these need the orchestrator's quality.
+    // The executor only gets mechanical tools (bash, reads, lookups, API calls).
+    const ORCHESTRATOR_ONLY_TOOLS = new Set([
+      'write_memory', 'append_memory', 'write_shared',
+      'send_chat_message', 'send_mail', 'internal',
+    ])
+    const executorTools = tools.definitions.filter(t => !ORCHESTRATOR_ONLY_TOOLS.has(t.name))
 
-      const MAX_EXECUTOR_TURNS = 3
+    if (executor && executorModel && executorTools.length > 0) {
+
+      // Latest results start as the orchestrator's tool results
+      let latestResultText = toolResults.map(r => r.content).join('\n\n')
+
+      const MAX_EXECUTOR_TURNS = 1
       const MAX_EXECUTOR_RETRIES = 3
       const EXECUTOR_BACKOFF_BASE_MS = 2000
       let activeExecutorModel = executorModel // best-known executor model for event tagging
       for (let execTurn = 0; execTurn < MAX_EXECUTOR_TURNS; execTurn++) {
+        // Fresh context each turn — only latest results + already-called list.
+        // Prevents context accumulation that triggers prose mode in open weight models.
+        const alreadyCalled = calledTools.size > 0 ? `\n\nAlready called (do NOT repeat): ${[...calledTools].join(', ')}` : ''
+        const executorMessages = [
+          { role: 'user', content: `Tool results:\n\n${latestResultText}${alreadyCalled}\n\nIf a follow-up tool call is needed based on these results, call it. Otherwise respond "done".` },
+        ]
         try {
           // Retry with exponential backoff before giving up on this turn
           let execResult, usedModel, lastRetryErr
@@ -824,13 +836,13 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
               const res = await callExecutorWithFallback(
                 config,
                 {
-                  maxTokens: 4096,
+                  maxTokens: 3000,
                   system: EXECUTOR_SYSTEM,
                   messages: executorMessages,
-                  tools: tools.definitions,
+                  tools: executorTools,
                   serverTools: [],
                   thinkingBudget: null,
-                  toolChoice: execTurn === 0 ? 'required' : 'auto',
+                  toolChoice: 'required',
                 },
                 (event) => {
                   if (event.type === 'tool_start' || event.type === 'tool_result') {
@@ -895,7 +907,6 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
           }
 
           // Execute the tools the executor requested
-          executorMessages.push({ role: 'assistant', content: execContent })
           const moreResults = []
           for (const block of execToolCalls) {
             calledTools.add(`${block.name}(${JSON.stringify(block.input)})`)
@@ -912,7 +923,8 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
               content: JSON.stringify(toolResult),
             })
           }
-          executorMessages.push({ role: 'user', content: moreResults })
+          // Update latest results for next turn's fresh context
+          latestResultText = moreResults.map(r => r.content).join('\n\n')
 
           // Append executor tool results as text to orchestrator's tool results
           // (can't use tool_result format — orchestrator never emitted these IDs)
