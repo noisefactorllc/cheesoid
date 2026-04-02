@@ -1,5 +1,5 @@
 import { assemblePrompt, currentTimestamp } from './prompt-assembler.js'
-import { assembleDMNPrompt } from './dmn.js'
+import { assembleDMNPrompt, assembleDMNReviewPrompt, runDMNReview } from './dmn.js'
 import { Memory } from './memory.js'
 import { State } from './state.js'
 import { ToolJournal } from './tool-journal.js'
@@ -97,6 +97,7 @@ export class Room {
         _floor: null, // array of agent names that currently have the floor, or null
         _wakeupSchedulers: [],
         _dmnPrompt: null, // assembled once at init if config.dmn is set
+        _dmnReviewPrompt: null,
       }
       for (const a of persona.config.agents || []) {
         this._a._moderatorPool.push(a.name)
@@ -171,6 +172,8 @@ export class Room {
   set _wakeupSchedulers(v) { this._a._wakeupSchedulers = v }
   get _dmnPrompt() { return this._a._dmnPrompt }
   set _dmnPrompt(v) { this._a._dmnPrompt = v }
+  get _dmnReviewPrompt() { return this._a._dmnReviewPrompt }
+  set _dmnReviewPrompt(v) { this._a._dmnReviewPrompt = v }
 
   async initialize() {
     if (this.systemPrompt) return // already initialized
@@ -195,6 +198,7 @@ export class Room {
     // DMN prompt — assembled once at init if configured
     if (config.dmn) {
       this._dmnPrompt = await assembleDMNPrompt(dir, config)
+      this._dmnReviewPrompt = await assembleDMNReviewPrompt(dir, config)
     }
 
     this.tools = await loadTools(dir, config, this.memory, this.state, this, this.registry, this.modality)
@@ -316,7 +320,7 @@ export class Room {
    */
   _resolveDMNConfig() {
     if (!this.persona.config.dmn || !this._dmnPrompt) {
-      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
+      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, dmnReviewPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
     }
     try {
       const resolved = this.registry.resolve(this.persona.config.dmn)
@@ -324,11 +328,12 @@ export class Room {
         dmnProvider: resolved.provider,
         dmnModel: resolved.modelId,
         dmnPrompt: this._dmnPrompt,
+        dmnReviewPrompt: this._dmnReviewPrompt,
         displayName: this.persona.config.display_name || this.persona.config.name,
       }
     } catch (err) {
       console.log(`[${this.persona.config.name}] DMN model resolution failed: ${err.message}`)
-      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
+      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, dmnReviewPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
     }
   }
 
