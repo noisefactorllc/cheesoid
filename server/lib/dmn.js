@@ -75,9 +75,11 @@ Evaluate:
 - AWARENESS: Does your response show you understood the actual intent, not just the literal words?
 - COHERENCE: Does your response make sense in context? Any non-sequiturs or hallucinated references?
 
-If the response passes all checks, respond with exactly: PASS
+You MUST call one of two tools to deliver your verdict:
+- Call \`pass\` if the response passes all checks.
+- Call \`critique\` with a specific reason if any check fails.
 
-If any check fails, respond with a brief, specific critique (2-3 sentences). Name the problem and what the correction should address. Do not rewrite the response yourself.`)
+Do not produce text output. Use the tools.`)
 
   return parts.join('\n\n')
 }
@@ -130,9 +132,31 @@ export async function runDMNPass(dmnPrompt, messages, provider, model) {
 
 const DMN_REVIEW_MAX_TOKENS = 512
 
+const DMN_REVIEW_TOOLS = [
+  {
+    name: 'pass',
+    description: 'The response passes all checks. No correction needed.',
+    input_schema: { type: 'object', properties: {} },
+  },
+  {
+    name: 'critique',
+    description: 'The response fails one or more checks and needs correction.',
+    input_schema: {
+      type: 'object',
+      properties: {
+        reason: { type: 'string', description: 'Brief, specific critique (2-3 sentences). Name the problem and what the correction should address.' },
+      },
+      required: ['reason'],
+    },
+  },
+]
+
 /**
  * Execute the DMN post-response review. Evaluates the agent's response
  * against conversation context. Returns { verdict: 'pass' | string, usage }.
+ *
+ * The DMN model MUST call either `pass` or `critique` tool — verdict is
+ * extracted from the tool call, not from text output.
  *
  * On failure, returns 'pass' — same resilience as runDMNPass.
  */
@@ -150,22 +174,25 @@ export async function runDMNReview(reviewPrompt, messages, assistantText, provid
         maxTokens: DMN_REVIEW_MAX_TOKENS,
         system,
         messages: [{ role: 'user', content: `== YOUR RESPONSE ==\n${assistantText}` }],
-        tools: [],
+        tools: DMN_REVIEW_TOOLS,
         serverTools: [],
         thinkingBudget: null,
+        toolChoice: 'required',
       },
       () => {},
     )
 
-    const textBlock = result.contentBlocks.find(b => b.type === 'text')
-    const raw = textBlock?.text?.trim() || ''
-
-    if (!raw || raw.toLowerCase() === 'pass') {
+    const toolUse = result.contentBlocks.find(b => b.type === 'tool_use')
+    if (!toolUse || toolUse.name === 'pass') {
       return { verdict: 'pass', usage: result.usage }
     }
-    return { verdict: raw, usage: result.usage }
+    if (toolUse.name === 'critique') {
+      return { verdict: toolUse.input.reason || 'unspecified critique', usage: result.usage }
+    }
+    // Unknown tool — treat as pass
+    return { verdict: 'pass', usage: result.usage }
   } catch (err) {
-    console.log(`[dmn-review] pass failed: ${err.message} — treating as pass`)
+    console.log(`[dmn-review] review failed: ${err.message} — treating as pass`)
     return { verdict: 'pass', usage: { input_tokens: 0, output_tokens: 0 } }
   }
 }

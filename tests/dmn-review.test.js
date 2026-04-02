@@ -32,9 +32,9 @@ describe('DMN Review Integration', () => {
     assert.ok(prompt.includes('SRE agent'))
 
     const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: 'PASS' }],
-      stopReason: 'end_turn',
-      usage: { input_tokens: 200, output_tokens: 5 },
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'pass', input: {} }],
+      stopReason: 'tool_use',
+      usage: { input_tokens: 200, output_tokens: 15 },
     })
 
     const messages = [
@@ -52,8 +52,8 @@ describe('DMN Review Integration', () => {
     const prompt = await assembleDMNReviewPrompt(dir, { display_name: 'EHSRE', name: 'ehsre' })
 
     const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: 'RESPONSIVENESS: Agent described what it could do instead of doing it. Should have called the bash tool to check disk usage.' }],
-      stopReason: 'end_turn',
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'critique', input: { reason: 'RESPONSIVENESS: Agent described what it could do instead of doing it. Should have called the bash tool to check disk usage.' } }],
+      stopReason: 'tool_use',
       usage: { input_tokens: 200, output_tokens: 30 },
     })
 
@@ -79,9 +79,9 @@ describe('DMN Review Integration', () => {
 
   it('context is included in review system prompt', async () => {
     const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: 'PASS' }],
-      stopReason: 'end_turn',
-      usage: { input_tokens: 100, output_tokens: 5 },
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'pass', input: {} }],
+      stopReason: 'tool_use',
+      usage: { input_tokens: 100, output_tokens: 10 },
     })
 
     const messages = [

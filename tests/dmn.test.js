@@ -228,7 +228,8 @@ describe('assembleDMNReviewPrompt', () => {
     assert.ok(prompt.includes('You are Brad from Monetization'))
     assert.ok(prompt.includes('RESPONSIVENESS'))
     assert.ok(prompt.includes('COMPLETENESS'))
-    assert.ok(prompt.includes('PASS'))
+    assert.ok(prompt.includes('`pass`'))
+    assert.ok(prompt.includes('`critique`'))
   })
 
   it('works without SOUL.md', async () => {
@@ -242,11 +243,11 @@ describe('assembleDMNReviewPrompt', () => {
 })
 
 describe('runDMNReview', () => {
-  it('returns pass verdict when DMN says PASS', async () => {
+  it('returns pass verdict when DMN calls pass tool', async () => {
     const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: 'PASS' }],
-      stopReason: 'end_turn',
-      usage: { input_tokens: 150, output_tokens: 5 },
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'pass', input: {} }],
+      stopReason: 'tool_use',
+      usage: { input_tokens: 150, output_tokens: 15 },
     })
 
     const messages = [
@@ -260,23 +261,10 @@ describe('runDMNReview', () => {
     assert.equal(usage.input_tokens, 150)
   })
 
-  it('returns pass verdict for case-insensitive PASS', async () => {
+  it('returns critique when DMN calls critique tool', async () => {
     const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: '  pass  ' }],
-      stopReason: 'end_turn',
-      usage: { input_tokens: 100, output_tokens: 5 },
-    })
-
-    const messages = [{ role: 'user', content: 'alice: hi' }]
-    const { verdict } = await runDMNReview('prompt', messages, 'Hello!', provider, 'haiku')
-
-    assert.equal(verdict, 'pass')
-  })
-
-  it('returns critique as verdict when DMN flags an issue', async () => {
-    const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: 'RESPONSIVENESS: The agent talked about deploying instead of actually doing it. Should run the deploy command.' }],
-      stopReason: 'end_turn',
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'critique', input: { reason: 'RESPONSIVENESS: Talked about deploying instead of doing it.' } }],
+      stopReason: 'tool_use',
       usage: { input_tokens: 200, output_tokens: 30 },
     })
 
@@ -291,11 +279,11 @@ describe('runDMNReview', () => {
     assert.ok(verdict.includes('RESPONSIVENESS'))
   })
 
-  it('sends assistant text and context to provider correctly', async () => {
+  it('sends tools and toolChoice=required to provider', async () => {
     const provider = makeProvider({
-      contentBlocks: [{ type: 'text', text: 'PASS' }],
-      stopReason: 'end_turn',
-      usage: { input_tokens: 100, output_tokens: 5 },
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'pass', input: {} }],
+      stopReason: 'tool_use',
+      usage: { input_tokens: 100, output_tokens: 10 },
     })
 
     const messages = [
@@ -308,8 +296,11 @@ describe('runDMNReview', () => {
     const call = provider.streamMessage.mock.calls[0]
     const params = call.arguments[0]
     assert.equal(params.model, 'haiku')
+    assert.equal(params.toolChoice, 'required')
+    assert.equal(params.tools.length, 2)
+    assert.equal(params.tools[0].name, 'pass')
+    assert.equal(params.tools[1].name, 'critique')
     assert.ok(params.system.includes('review prompt'))
-    assert.equal(params.messages.length, 1)
     assert.ok(params.messages[0].content.includes('Status is green.'))
   })
 
@@ -324,16 +315,29 @@ describe('runDMNReview', () => {
     assert.equal(verdict, 'pass')
   })
 
-  it('returns pass when response has no text block', async () => {
+  it('returns pass when no tool_use block in response', async () => {
     const provider = makeProvider({
-      contentBlocks: [],
+      contentBlocks: [{ type: 'text', text: 'looks good' }],
       stopReason: 'end_turn',
-      usage: { input_tokens: 100, output_tokens: 0 },
+      usage: { input_tokens: 100, output_tokens: 10 },
     })
 
     const messages = [{ role: 'user', content: 'alice: hi' }]
     const { verdict } = await runDMNReview('prompt', messages, 'Hello!', provider, 'haiku')
 
     assert.equal(verdict, 'pass')
+  })
+
+  it('returns unspecified critique when reason is empty', async () => {
+    const provider = makeProvider({
+      contentBlocks: [{ type: 'tool_use', id: 't1', name: 'critique', input: {} }],
+      stopReason: 'tool_use',
+      usage: { input_tokens: 100, output_tokens: 10 },
+    })
+
+    const messages = [{ role: 'user', content: 'alice: hi' }]
+    const { verdict } = await runDMNReview('prompt', messages, 'Hello!', provider, 'haiku')
+
+    assert.equal(verdict, 'unspecified critique')
   })
 })
