@@ -2,6 +2,7 @@ import { assemblePrompt, currentTimestamp } from './prompt-assembler.js'
 import { assembleDMNPrompt } from './dmn.js'
 import { Memory } from './memory.js'
 import { State } from './state.js'
+import { ToolJournal } from './tool-journal.js'
 import { ChatLog } from './chat-log.js'
 import { loadTools } from './tools.js'
 import { runAgent, runHybridAgent } from './agent.js'
@@ -178,8 +179,9 @@ export class Room {
     this.memory = new Memory(dir, config.memory?.dir || 'memory/')
     this.state = new State(dir)
     this.chatLog = new ChatLog(dir, 'history')
+    this.toolJournal = new ToolJournal(dir, config.memory?.dir || 'memory/')
     await this.state.load()
-    this.systemPrompt = await assemblePrompt(dir, config, plugins)
+    this.systemPrompt = await assemblePrompt(dir, config, plugins, { toolJournal: this.toolJournal })
     this.registry = new ProviderRegistry(config)
 
     // Modal mode: attention/cognition gear shifting
@@ -566,6 +568,12 @@ export class Room {
     }
   }
 
+  /** Record a tool_result event to the persistent journal (fire-and-forget). */
+  _recordToolUse(event) {
+    if (event.type !== 'tool_result' || !this.toolJournal) return
+    this.toolJournal.record(event.name, event.input, event.result).catch(() => {})
+  }
+
   /**
    * Safely append a context message to the conversation. If the agent is busy
    * (mid-tool-execution), queue it — pushing directly into messages[] would
@@ -651,12 +659,13 @@ export class Room {
       const activeIsClaude = orchestratorModel.startsWith('claude')
       const basePrompt = activeIsClaude
         ? this.systemPrompt
-        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false })
+        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
       const prompt = replaceTimestamp(basePrompt)
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, (event) => {
         if (event.type === 'text_delta') assistantText += event.text
         else if (event.type === 'done' && event.model) assistantModel = event.model
+        this._recordToolUse(event)
       })
       this.messages = result.messages
       // Trim context to prevent unbounded growth
@@ -906,6 +915,7 @@ export class Room {
         if ((event.type === 'tool_start' || event.type === 'tool_result') && !event.model) {
           event.model = activeModel
         }
+        this._recordToolUse(event)
         if (this._pendingRoom === 'home') {
           this.broadcast(event)
         } else {
@@ -927,7 +937,7 @@ export class Room {
       const activeIsClaude = orchestratorModel.startsWith('claude')
       const basePrompt = activeIsClaude
         ? this.systemPrompt
-        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false })
+        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
       let prompt = replaceTimestamp(basePrompt)
       // Append moderator duties to system prompt — NOT to messages (prevents echo leak)
       if (moderatorAddendum) {
@@ -1132,6 +1142,7 @@ export class Room {
           } else if (event.type === 'tool_result') {
             this.broadcast({ ...event, idle: true })
           }
+          this._recordToolUse(event)
         } catch (err) {
           console.error(`[${this.persona.config.name}] Idle broadcast error:`, err.message)
         }
@@ -1140,7 +1151,7 @@ export class Room {
       const activeIsClaude = orchestratorModel.startsWith('claude')
       const basePrompt = activeIsClaude
         ? this.systemPrompt
-        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false })
+        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
       const prompt = replaceTimestamp(basePrompt)
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, idleMessages, this.tools, agentConfig, onEvent)

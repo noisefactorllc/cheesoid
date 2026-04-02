@@ -117,7 +117,7 @@ export function currentTimestamp() {
  * For openai-compat: returns an array of {role: 'system', content} objects
  * representing a 4-layer hierarchy for multi-system-message delivery.
  */
-export async function assemblePrompt(personaDir, config, plugins = [], { isClaude = true } = {}) {
+export async function assemblePrompt(personaDir, config, plugins = [], { isClaude = true, toolJournal = null } = {}) {
   const isOpenAICompat = !isClaude || config.provider === 'openai-compat'
   const isHybrid = !!config.orchestrator
   const isModal = !!(config.cognition?.length && config.attention?.length)
@@ -193,6 +193,12 @@ export async function assemblePrompt(personaDir, config, plugins = [], { isClaud
   for (const filename of autoRead) {
     const content = await readSafe(join(personaDir, memoryDir, filename))
     if (content) contextSections.push(content)
+  }
+
+  // Tool journal — recent tool use summaries for cross-session awareness
+  if (toolJournal) {
+    const journalBlock = await toolJournal.getContextBlock()
+    if (journalBlock) contextSections.push(journalBlock)
   }
 
   // --- Assemble by provider ---
