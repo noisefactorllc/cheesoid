@@ -400,6 +400,28 @@ function handleEvent(e) {
       // Indicator already shown from user_message — nothing extra needed
       break
 
+    case 'reviewing': {
+      // Post-response DMN review — show thinking indicator on the current assistant message
+      const reviewTarget = event.visiting ? visitorStreams.get(event.name)?.element : assistantEl
+      if (reviewTarget) {
+        const dots = document.createElement('div')
+        dots.className = 'thinking-indicator reviewing-indicator'
+        dots.innerHTML = '<span>thinking</span><div class="thinking-dots"><span></span><span></span><span></span></div>'
+        reviewTarget.appendChild(dots)
+      }
+      break
+    }
+
+    case 'reviewing_done': {
+      // Clear the review thinking indicator
+      const reviewDoneTarget = event.visiting ? visitorStreams.get(event.name)?.element : assistantEl
+      if (reviewDoneTarget) {
+        const indicator = reviewDoneTarget.querySelector('.reviewing-indicator')
+        if (indicator) indicator.remove()
+      }
+      break
+    }
+
     case 'text_delta':
       if (event.visiting) {
         const agentName = event.agentName

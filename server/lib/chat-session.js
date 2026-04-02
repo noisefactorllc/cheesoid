@@ -596,9 +596,8 @@ export class Room {
     let correctionText = ''
 
     for (let pass = 0; pass < MAX_REVIEW_PASSES; pass++) {
-      // Broadcast thinking indicator
-      this.broadcast({ type: 'idle_text_delta', text: 'Thinking...', name: agentName })
-      this.broadcast({ type: 'idle_done', name: agentName })
+      // Show thinking indicator via UI affordance
+      this.broadcast({ type: 'reviewing', name: agentName })
 
       const textToReview = correctionText || assistantText
       const { verdict, usage } = await runDMNReview(
@@ -606,7 +605,10 @@ export class Room {
       )
       console.log(`[dmn-review] pass ${pass + 1}: verdict=${verdict === 'pass' ? 'PASS' : 'CRITIQUE'} (${usage.input_tokens} in / ${usage.output_tokens} out)`)
 
-      if (verdict === 'pass') return correctionText
+      if (verdict === 'pass') {
+        this.broadcast({ type: 'reviewing_done', name: agentName })
+        return correctionText
+      }
 
       // Critique — inject transient correction prompt and run another agent turn
       console.log(`[dmn-review] critique: ${verdict}`)
@@ -644,9 +646,13 @@ export class Room {
       }
 
       correctionText = turnText.trim()
-      if (!correctionText) return correctionText // no text produced, stop
+      if (!correctionText) {
+        this.broadcast({ type: 'reviewing_done', name: agentName })
+        return correctionText // no text produced, stop
+      }
     }
 
+    this.broadcast({ type: 'reviewing_done', name: agentName })
     return correctionText
   }
 
@@ -1032,9 +1038,9 @@ export class Room {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
 
-      // DMN post-response review — cognition-driven home room chat only
+      // DMN post-response review — cognition-driven chat only
       const isCognitionDriven = hasModality ? this.modality?.mode === 'cognition' : true
-      if (this._pendingRoom === 'home' && isCognitionDriven && agentConfig.dmnReviewPrompt) {
+      if (isCognitionDriven && agentConfig.dmnReviewPrompt) {
         const additionalText = await this._runPostResponseReview(
           assistantText, agentConfig, prompt, onEvent,
         )
