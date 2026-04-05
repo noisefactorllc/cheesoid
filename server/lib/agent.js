@@ -1,5 +1,4 @@
 import { CircuitOpenError } from './circuit-breaker.js'
-import { runDMNPass } from './dmn.js'
 
 /**
  * Heuristic intent classifier — determines tool vs text without an API call.
@@ -96,47 +95,6 @@ function getLastUserText(messages) {
 }
 
 /**
- * Check whether a DMN assessment is coherent prose. Rejects output that's
- * structured as JSON objects or action/tool lists — injecting that into the
- * orchestrator's user context primes the orchestrator to emit the same
- * format in its own text response, which leaks tool-shaped JSON into chat.
- */
-function isDMNAssessmentUsable(assessment) {
-  if (!assessment || typeof assessment !== 'string') return false
-  const trimmed = assessment.trim()
-  if (!trimmed) return false
-  // Reject if the whole thing is a JSON object/array
-  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return false
-  // Reject if it contains action-call or tool-call shaped JSON blocks
-  if (/\{\s*"(action|tool|name|function)"\s*:/.test(trimmed)) return false
-  return true
-}
-
-/**
- * Apply DMN enrichment to the last text user message.
- * Returns save state for restoration, or null if no suitable message found
- * or the assessment is not usable prose.
- */
-function applyDMNEnrichment(messages, assessment, displayName) {
-  if (!isDMNAssessmentUsable(assessment)) return null
-  for (let i = messages.length - 1; i >= 0; i--) {
-    if (messages[i].role === 'user' && typeof messages[i].content === 'string') {
-      const raw = messages[i].content
-      messages[i].content = `[${displayName}'s read]\n${assessment}\n\n[message]\n${raw}`
-      return { index: i, rawContent: raw }
-    }
-  }
-  return null
-}
-
-/**
- * Restore the original user message after DMN enrichment.
- */
-function restoreDMNEnrichment(messages, saved) {
-  if (saved) messages[saved.index].content = saved.rawContent
-}
-
-/**
  * Run the agent loop. Calls onEvent with SSE events as it goes.
  * Delegates streaming to the provider (Anthropic, OpenAI-compat, etc.).
  * Handles tool execution and message assembly.
@@ -153,11 +111,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   let rescueCount = 0
   let totalToolTurns = 0
   let rescueFailed = false
-  let dmnCompleted = false
-  let dmnSaved = null
-  let dmnUsage = { input_tokens: 0, output_tokens: 0 }
 
-  try {
   while (iterations < maxTurns) {
     // Intent routing for providers that support it (open models).
     let toolChoice = undefined
@@ -200,23 +154,6 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     if (repairedGaps > 0) {
       console.log(`[agent] ${repairedGaps} interrupted tool calls detected — injecting recovery context`)
       messages.push({ role: 'user', content: `[SYSTEM: You were interrupted mid-operation. ${repairedGaps} tool call(s) did not complete. Review current state before re-attempting any operations.]` })
-    }
-
-    // DMN pass — runs once, before first LLM call
-    if (!dmnCompleted && config.dmnProvider) {
-      const dmn = await runDMNPass(
-        config.dmnPrompt, messages, config.dmnProvider, config.dmnModel,
-      )
-      dmnUsage = dmn.usage
-      if (dmn.assessment) {
-        dmnSaved = applyDMNEnrichment(messages, dmn.assessment, config.displayName)
-        if (dmnSaved) {
-          console.log(`[dmn] assessment applied (${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out):\n${dmn.assessment}`)
-        } else {
-          console.log(`[dmn] assessment rejected (non-prose format, ${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out)`)
-        }
-      }
-      dmnCompleted = true
     }
 
     let result
@@ -328,12 +265,8 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   // with tools disabled so it summarizes in its own voice.
   await _nudgeIfEmpty(messages, provider, config, systemPrompt, totalUsage, onEvent)
 
-  onEvent({ type: 'done', model: config.model, usage: { input_tokens: totalUsage.input_tokens + reasonerUsage.input_tokens + dmnUsage.input_tokens, output_tokens: totalUsage.output_tokens + reasonerUsage.output_tokens + dmnUsage.output_tokens } })
+  onEvent({ type: 'done', model: config.model, usage: { input_tokens: totalUsage.input_tokens + reasonerUsage.input_tokens, output_tokens: totalUsage.output_tokens + reasonerUsage.output_tokens } })
   return { messages, usage: totalUsage }
-  } finally {
-    // Restore raw message — DMN enrichment is transient (must run even on error)
-    restoreDMNEnrichment(messages, dmnSaved)
-  }
 }
 
 /**
@@ -632,11 +565,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let lastRespondedModel = null // actual model that responded (may differ from config.model after fallback)
   const calledTools = new Set() // track tool+args for dedup across executor turns
   const metrics = { models: {}, totalLatencyMs: 0, fallbackCount: 0, duplicateToolCalls: 0, startTime: Date.now() }
-  let dmnCompleted = false
-  let dmnSaved = null
-  let dmnUsage = { input_tokens: 0, output_tokens: 0 }
 
-  try {
   while (iterations < maxTurns) {
     // Intent routing — applies when orchestrator is openai-compat
     let toolChoice = undefined
@@ -675,26 +604,6 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     if (repairedGaps > 0) {
       console.log(`[hybrid] ${repairedGaps} interrupted tool calls detected — injecting recovery context`)
       messages.push({ role: 'user', content: `[SYSTEM: You were interrupted mid-operation. ${repairedGaps} tool call(s) did not complete. Review current state before re-attempting any operations.]` })
-    }
-
-    // DMN pass — runs once, before first orchestrator call in cognition mode
-    if (!dmnCompleted && config.dmnProvider) {
-      const isCognition = config.modality ? config.modality.mode === 'cognition' : true
-      if (isCognition) {
-        const dmn = await runDMNPass(
-          config.dmnPrompt, messages, config.dmnProvider, config.dmnModel,
-        )
-        dmnUsage = dmn.usage
-        if (dmn.assessment) {
-          dmnSaved = applyDMNEnrichment(messages, dmn.assessment, config.displayName)
-          if (dmnSaved) {
-            console.log(`[dmn] assessment applied (${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out):\n${dmn.assessment}`)
-          } else {
-            console.log(`[dmn] assessment rejected (non-prose format, ${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out)`)
-          }
-        }
-        dmnCompleted = true
-      }
     }
 
     // Orchestrator call — full context
@@ -999,12 +908,8 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     const p95Latency = m.latency_ms.length ? Math.round(m.latency_ms.sort((a, b) => a - b)[Math.floor(m.latency_ms.length * 0.95)]) : 0
     return `${model}: ${m.calls} calls, ${m.tokens_in}/${m.tokens_out} tok, avg ${avgLatency}ms, p95 ${p95Latency}ms${m.fallbacks ? `, ${m.fallbacks} fallback` : ''}`
   }).join(' | ')
-  console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | executor: ${executorUsage.input_tokens} in / ${executorUsage.output_tokens} out | reasoner: ${reasonerUsage.input_tokens} in / ${reasonerUsage.output_tokens} out | dmn: ${dmnUsage.input_tokens} in / ${dmnUsage.output_tokens} out | tools: ${totalToolTurns} | total: ${metrics.totalLatencyMs}ms | fallbacks: ${metrics.fallbackCount}`)
+  console.log(`[hybrid] orchestrator: ${totalUsage.input_tokens} in / ${totalUsage.output_tokens} out | executor: ${executorUsage.input_tokens} in / ${executorUsage.output_tokens} out | reasoner: ${reasonerUsage.input_tokens} in / ${reasonerUsage.output_tokens} out | tools: ${totalToolTurns} | total: ${metrics.totalLatencyMs}ms | fallbacks: ${metrics.fallbackCount}`)
   console.log(`[hybrid] models: ${modelSummary}`)
-  onEvent({ type: 'done', model: lastRespondedModel, usage: { input_tokens: totalUsage.input_tokens + executorUsage.input_tokens + reasonerUsage.input_tokens + dmnUsage.input_tokens, output_tokens: totalUsage.output_tokens + executorUsage.output_tokens + reasonerUsage.output_tokens + dmnUsage.output_tokens } })
+  onEvent({ type: 'done', model: lastRespondedModel, usage: { input_tokens: totalUsage.input_tokens + executorUsage.input_tokens + reasonerUsage.input_tokens, output_tokens: totalUsage.output_tokens + executorUsage.output_tokens + reasonerUsage.output_tokens } })
   return { messages, usage: totalUsage }
-  } finally {
-    // Restore raw message — DMN enrichment is transient (must run even on error)
-    restoreDMNEnrichment(messages, dmnSaved)
-  }
 }
