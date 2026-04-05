@@ -70,14 +70,29 @@ router.post('/api/chat/send', async (req, res) => {
   } else if (req.isAgent && req.body.backchannel) {
     room.addBackchannelMessage(name, message, { trigger: req.body.trigger, target: req.body.target })
   } else if (req.isAgent) {
-    room.addAgentMessage(name, message, { source: 'room', model: req.body.model })
+    room.addAgentMessage(name, message, { source: 'room', model: req.body.model, replyTo: req.body.replyTo })
   } else {
     const sendOpts = {}
     if (req.body.addressed) sendOpts._addressed = req.body.addressed
+    if (req.body.replyTo) sendOpts._replyTo = req.body.replyTo
     room.sendMessage(name, message, sendOpts).catch(err => {
       console.error('sendMessage error:', err.message)
     })
   }
+})
+
+// Add or remove a reaction on a message
+router.post('/api/chat/react', (req, res) => {
+  const { messageId, emoji, action } = req.body
+  const name = req.userName || req.body.name
+  if (!messageId || !emoji || !name) return res.status(400).json({ error: 'messageId, emoji, and name required' })
+  if (action && action !== 'add' && action !== 'remove') return res.status(400).json({ error: 'action must be add or remove' })
+
+  const room = resolveRoom(req, req.body.room)
+  if (!room) return res.status(404).json({ error: 'room not found' })
+
+  room.addReaction(name, messageId, emoji, action || 'add')
+  res.json({ status: 'ok' })
 })
 
 // Relay streaming events from visiting agents

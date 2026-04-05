@@ -1,5 +1,6 @@
 import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
+import { randomUUID } from 'node:crypto'
 import { buildSharedWorkspaceTools } from './shared-workspace.js'
 
 /**
@@ -81,6 +82,30 @@ function buildRoomTools(room, config) {
         required: ['query'],
       },
     },
+    {
+      name: 'reply_to_message',
+      description: 'Reply to a specific message by its ID, creating a visible thread reference. Use replies ONLY for thread revival — when returning to a topic that has scrolled away or responding to a message that is not the most recent. Do NOT reply to the latest message; just respond normally. The reply appears as a normal chat message with a visual link to the original.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string', description: 'The 8-character message ID of the message to reply to. Message IDs appear in brackets right after the sender name in your context, e.g. "Alex [a1b2c3d4]: hello" — the ID is a1b2c3d4. Copy it exactly. Do not guess or make one up.' },
+          text: { type: 'string', description: 'Your reply text.' },
+        },
+        required: ['messageId', 'text'],
+      },
+    },
+    {
+      name: 'react_to_message',
+      description: 'CALL THIS TOOL TO REACT TO A MESSAGE. This is the ONLY way to add an emoji reaction. Reactions appear as pill badges below a message (like Slack/Discord reactions), NOT as chat text. If a user asks you to react, you MUST call this tool — do NOT type the emoji in your text response; that is a chat message, not a reaction. After calling this tool, END YOUR TURN WITH ZERO TEXT OUTPUT — no emoji, no "done", no "reaction added", no acknowledgment of any kind. The reaction itself is the complete response. React sparingly and tactically. Prefer reacting when other participants have already reacted to a message — you are joining a moment, not starting one. Do not react to your own messages. Do not react to every message. One reaction per message maximum. Choose emojis that add signal, not noise.',
+      input_schema: {
+        type: 'object',
+        properties: {
+          messageId: { type: 'string', description: 'The 8-character message ID of the message to react to. Message IDs appear in brackets right after the sender name in your context, e.g. "Alex [a1b2c3d4]: hello" — the ID is a1b2c3d4. Copy it exactly. Do not guess or make one up.' },
+          emoji: { type: 'string', description: 'A single emoji character (e.g. 👍, ❤️, 😂, 🔥, 👀, 💯).' },
+        },
+        required: ['messageId', 'emoji'],
+      },
+    },
   ]
 
   if (hasMultiAgent) {
@@ -101,11 +126,56 @@ function buildRoomTools(room, config) {
 
   const toolNames = new Set(definitions.map(d => d.name))
 
+  // Short message ID generator — 8 hex chars, reliable for LLMs to echo.
+  const shortMsgId = () => randomUUID().replace(/-/g, '').slice(0, 8)
+
+  // Validate that a messageId was actually seen in the agent's context.
+  // We scan room.messages (which both hosts and visitors push to with
+  // [id] tags) rather than room.history (which visitors don't populate
+  // for host-room messages). Returns true if the ID was seen, false if
+  // it looks like a hallucination.
+  function isKnownMessageId(messageId) {
+    if (!messageId) return false
+    const pattern = `[${messageId}]`
+    if (!room.messages) return true // fallback: accept if no context available
+    for (const m of room.messages) {
+      if (typeof m.content === 'string' && m.content.includes(pattern)) return true
+      // Some message content is an array (e.g. content blocks). Check text blocks.
+      if (Array.isArray(m.content)) {
+        for (const block of m.content) {
+          if (block?.type === 'text' && typeof block.text === 'string' && block.text.includes(pattern)) return true
+        }
+      }
+    }
+    return false
+  }
+
+  // Find recent valid message IDs to help agents recover from bad IDs.
+  function recentMessageIds(limit = 5) {
+    const ids = []
+    const pattern = /\[([a-f0-9]{8})\]/g
+    if (!room.messages) return ids
+    for (let i = room.messages.length - 1; i >= 0 && ids.length < limit; i--) {
+      const content = room.messages[i].content
+      const text = typeof content === 'string'
+        ? content
+        : Array.isArray(content) ? content.filter(b => b?.type === 'text').map(b => b.text).join(' ') : ''
+      if (!text) continue
+      let match
+      while ((match = pattern.exec(text)) !== null) {
+        if (!ids.includes(match[1])) ids.push(match[1])
+        if (ids.length >= limit) break
+      }
+    }
+    return ids
+  }
+
   async function execute(name, input) {
     switch (name) {
       case 'send_chat_message': {
-        room.broadcast({ type: 'assistant_message', text: input.text })
-        room.recordHistory({ type: 'assistant_message', text: input.text })
+        const chatMsgId = shortMsgId()
+        room.broadcast({ type: 'assistant_message', text: input.text, id: chatMsgId })
+        room.recordHistory({ type: 'assistant_message', text: input.text, id: chatMsgId, room: room.roomName })
         // Do NOT push to room.messages here — the agent loop manages its own
         // message array. Pushing an assistant message mid-tool-execution corrupts
         // the tool_use/tool_result sequence and causes API 400 errors.
@@ -150,6 +220,67 @@ function buildRoomTools(room, config) {
         }
 
         return { output: parts.join('\n') }
+      }
+      case 'reply_to_message': {
+        if (!input.messageId || !input.text) {
+          return { output: 'Both messageId and text are required.', is_error: true }
+        }
+        if (!isKnownMessageId(input.messageId)) {
+          const recent = recentMessageIds()
+          const hint = recent.length > 0 ? ` Recent valid message IDs: ${recent.join(', ')}.` : ''
+          return { output: `messageId "${input.messageId}" not found in recent context. Message IDs appear as [id] next to sender names.${hint}`, is_error: true }
+        }
+        // Visitor path: relay to host so the reply lands in the actual room
+        const pendingRoom = room._pendingRoom
+        if (pendingRoom && pendingRoom !== 'home') {
+          const client = room.roomClients.get(pendingRoom)
+          if (client) {
+            await client.sendMessage(input.text, { replyTo: input.messageId, room: room._pendingRoomChannel })
+            return { output: `Reply sent (referencing message ${input.messageId}).` }
+          }
+          return { output: 'Cannot reach host room to deliver reply.', is_error: true }
+        }
+        const replyId = shortMsgId()
+        const event = { type: 'assistant_message', text: input.text, id: replyId, replyTo: input.messageId }
+        room.broadcast(event)
+        room.recordHistory({ ...event, room: room.roomName })
+        return { output: `Reply sent (referencing message ${input.messageId}).` }
+      }
+      case 'react_to_message': {
+        const agentName = room.persona.config.display_name
+        console.log(`[${agentName}] react_to_message called: messageId=${input.messageId}, emoji=${input.emoji}`)
+        if (!input.messageId || !input.emoji) {
+          console.log(`[${agentName}] react_to_message rejected: missing required input`)
+          return { output: 'Both messageId and emoji are required.', is_error: true }
+        }
+        if (!isKnownMessageId(input.messageId)) {
+          const recent = recentMessageIds()
+          const hint = recent.length > 0 ? ` Recent valid message IDs: ${recent.join(', ')}.` : ''
+          console.log(`[${agentName}] react_to_message rejected: unknown messageId. Recent valid: ${recent.join(', ')}`)
+          return { output: `messageId "${input.messageId}" not found in recent context. Message IDs appear as [id] next to sender names.${hint}`, is_error: true }
+        }
+        // Tool success output deliberately excludes the emoji character —
+        // open-weights models pattern-match on recent context and will echo
+        // the emoji as chat text if it appears in the tool result. The
+        // message also forbids any text follow-up: the reaction is the
+        // complete response to the request.
+        const successOutput = 'Reaction delivered. The reaction is already visible to everyone as a pill badge. Your turn is complete. Produce NO text response — no emoji, no acknowledgment, no "done", no narration. End the turn now with zero text output.'
+        // Visitor path: relay to host room so the reaction reaches the actual
+        // message. Local addReaction only broadcasts to visitor's own clients.
+        const pendingRoom = room._pendingRoom
+        if (pendingRoom && pendingRoom !== 'home') {
+          const client = room.roomClients.get(pendingRoom)
+          if (client) {
+            await client.sendReaction(input.messageId, input.emoji, 'add')
+            console.log(`[${agentName}] react_to_message relayed to ${pendingRoom}`)
+            return { output: successOutput }
+          }
+          console.log(`[${agentName}] react_to_message: no room client for ${pendingRoom}`)
+          return { output: 'Cannot reach host room to deliver reaction.', is_error: true }
+        }
+        room.addReaction(agentName, input.messageId, input.emoji, 'add')
+        console.log(`[${agentName}] react_to_message succeeded`)
+        return { output: successOutput }
       }
       default:
         return { output: `Unknown room tool: ${name}`, is_error: true }

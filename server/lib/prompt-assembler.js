@@ -51,7 +51,9 @@ You have tools available via function calling. You MUST use them correctly:
 
 const TAIL_REINFORCEMENT = `REMINDERS: Use tools via function calling — never narrate tool use in text. Do not fabricate data — verify through tools. Do not take destructive actions without confirmation. Stay in character.
 
-CRITICAL — Inside voice vs. outside voice: You have two voices. Your OUTSIDE voice is your text response — shared dialogue that everyone in the room reads. Your INSIDE voice is \`internal({ thought: "..." })\` — private mental narrative that nobody sees. NEVER leak your inside voice into your outside voice. No reasoning, no meta-commentary, no "I need to step up here", no "Let me think about this", no "I should respond." If it's part of your mental narrative, it goes in \`internal\`. If it's shared dialogue, it goes in your text response. These are completely separate channels — treat them that way.`
+CRITICAL — Inside voice vs. outside voice: You have two voices. Your OUTSIDE voice is your text response — shared dialogue that everyone in the room reads. Your INSIDE voice is \`internal({ thought: "..." })\` — private mental narrative that nobody sees. NEVER leak your inside voice into your outside voice. No reasoning, no meta-commentary, no "I need to step up here", no "Let me think about this", no "I should respond." If it's part of your mental narrative, it goes in \`internal\`. If it's shared dialogue, it goes in your text response. These are completely separate channels — treat them that way.
+
+CRITICAL — Reactions are TOOL CALLS, not text: If someone asks you to react to a message, or if you want to react to a message, you MUST call the \`react_to_message\` tool with the messageId and emoji. Typing an emoji ("👍", "🎉", etc.) in your text response is NOT a reaction — it is a chat message containing emoji characters. These are different things. When asked "please react", call \`react_to_message\`; do NOT type the emoji in your text response. NEVER send a chat message whose content is just emoji. NEVER both call the tool and also type the emoji. After calling \`react_to_message\`, END YOUR TURN WITH ZERO TEXT OUTPUT — no emoji, no "done", no "reaction added", no acknowledgment of any kind. The reaction itself is the complete response. Do not narrate it, do not confirm it, do not echo it. Silence.`
 
 const REASONER_GUIDANCE = `## Deep Reasoning
 You have access to \`deep_think\` for problems requiring careful multi-step reasoning or complex analysis. Use it when a question would benefit from extended deliberation — don't use it for simple lookups or straightforward responses. Pass a self-contained prompt with all necessary context.`
@@ -173,6 +175,36 @@ export async function assemblePrompt(personaDir, config, plugins = [], { isClaud
   if (config.agents && config.agents.length > 0) {
     operationalSections.push(TURN_TAKING)
   }
+
+  const SOCIAL_TOOLS = [
+    `## Replies and Reactions`,
+    ``,
+    `"React" and "reply" have specific technical meanings in this system. They are NOT the same as mentioning an emoji in a message or quoting someone in your response.`,
+    ``,
+    `### Reactions`,
+    ``,
+    `A REACTION is an emoji badge attached to a specific message, like Slack or Discord reactions. It appears below the referenced message as a small pill (e.g. 👍 3). The only way to create a reaction is to call the \`react_to_message\` tool.`,
+    ``,
+    `**Typing an emoji in your chat text is NOT a reaction.** It is just a character in a message. If you type "👍" as your response, users see a chat message containing "👍" — they do not see a reaction badge attached to anything.`,
+    ``,
+    `Rules:`,
+    `- When asked to react, call \`react_to_message\` with the messageId and emoji. After the tool call, END YOUR TURN WITH ZERO TEXT OUTPUT. No emoji, no "done", no "reaction added", no acknowledgment of any kind. The reaction itself is the complete response.`,
+    `- NEVER send a chat message whose entire content is just emoji(s). If you want to signal approval/celebration/etc., use \`react_to_message\`.`,
+    `- NEVER describe or acknowledge your reactions in chat ("I reacted with 👍", "Reaction added", "Done"). The reaction itself is the signal; acknowledging it is noise.`,
+    `- NEVER both call \`react_to_message\` and also type the emoji in your text response. That duplicates the signal and violates the rules.`,
+    `- React sparingly. Reactions carry more weight when they are rare. Prefer reacting when others are already reacting — you are joining a moment, not starting one.`,
+    `- Do not react to your own messages. One reaction per message maximum.`,
+    ``,
+    `### Replies`,
+    ``,
+    `A REPLY is a message with a visible thread link back to an earlier message. The only way to create a reply is to call the \`reply_to_message\` tool. A normal response to the most recent message is NOT a reply — it is just a message.`,
+    ``,
+    `Rules:`,
+    `- Use \`reply_to_message\` ONLY for thread revival — returning to a topic that has scrolled away. For normal responses to the latest message, just respond normally without the reply tool.`,
+    `- Replies add clarity by linking back to earlier context. Do not use them for every response.`,
+  ].join('\n')
+
+  operationalSections.push(SOCIAL_TOOLS)
 
   // Plugin skills
   for (const plugin of plugins) {

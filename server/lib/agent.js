@@ -96,10 +96,29 @@ function getLastUserText(messages) {
 }
 
 /**
+ * Check whether a DMN assessment is coherent prose. Rejects output that's
+ * structured as JSON objects or action/tool lists — injecting that into the
+ * orchestrator's user context primes the orchestrator to emit the same
+ * format in its own text response, which leaks tool-shaped JSON into chat.
+ */
+function isDMNAssessmentUsable(assessment) {
+  if (!assessment || typeof assessment !== 'string') return false
+  const trimmed = assessment.trim()
+  if (!trimmed) return false
+  // Reject if the whole thing is a JSON object/array
+  if (trimmed.startsWith('{') || trimmed.startsWith('[')) return false
+  // Reject if it contains action-call or tool-call shaped JSON blocks
+  if (/\{\s*"(action|tool|name|function)"\s*:/.test(trimmed)) return false
+  return true
+}
+
+/**
  * Apply DMN enrichment to the last text user message.
- * Returns save state for restoration, or null if no suitable message found.
+ * Returns save state for restoration, or null if no suitable message found
+ * or the assessment is not usable prose.
  */
 function applyDMNEnrichment(messages, assessment, displayName) {
+  if (!isDMNAssessmentUsable(assessment)) return null
   for (let i = messages.length - 1; i >= 0; i--) {
     if (messages[i].role === 'user' && typeof messages[i].content === 'string') {
       const raw = messages[i].content
@@ -191,7 +210,11 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       dmnUsage = dmn.usage
       if (dmn.assessment) {
         dmnSaved = applyDMNEnrichment(messages, dmn.assessment, config.displayName)
-        console.log(`[dmn] assessment applied (${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out):\n${dmn.assessment}`)
+        if (dmnSaved) {
+          console.log(`[dmn] assessment applied (${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out):\n${dmn.assessment}`)
+        } else {
+          console.log(`[dmn] assessment rejected (non-prose format, ${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out)`)
+        }
       }
       dmnCompleted = true
     }
@@ -664,7 +687,11 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
         dmnUsage = dmn.usage
         if (dmn.assessment) {
           dmnSaved = applyDMNEnrichment(messages, dmn.assessment, config.displayName)
-          console.log(`[dmn] assessment applied (${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out):\n${dmn.assessment}`)
+          if (dmnSaved) {
+            console.log(`[dmn] assessment applied (${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out):\n${dmn.assessment}`)
+          } else {
+            console.log(`[dmn] assessment rejected (non-prose format, ${dmn.usage.input_tokens} in / ${dmn.usage.output_tokens} out)`)
+          }
         }
         dmnCompleted = true
       }
@@ -749,6 +776,10 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     // Execute tools directly
     let toolResults = []
     let stepUpTriggered = false
+    const orchestratorToolNames = assistantContent.filter(b => b.type === 'tool_use').map(b => b.name)
+    if (orchestratorToolNames.length > 0) {
+      console.log(`[hybrid] orchestrator tools: ${orchestratorToolNames.join(', ')}`)
+    }
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
       calledTools.add(`${block.name}(${JSON.stringify(block.input)})`)
       let toolResult
@@ -809,6 +840,10 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     const ORCHESTRATOR_ONLY_TOOLS = new Set([
       'write_memory', 'append_memory', 'write_shared',
       'send_chat_message', 'send_mail', 'internal',
+      // react_to_message and reply_to_message need messageId from user
+      // context, which the executor never sees (executor context is only
+      // tool results). Keep them on the orchestrator.
+      'react_to_message', 'reply_to_message',
     ])
     const executorTools = tools.definitions.filter(t => !ORCHESTRATOR_ONLY_TOOLS.has(t.name))
 

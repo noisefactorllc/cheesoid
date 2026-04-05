@@ -563,3 +563,194 @@ main {
   margin: 0;
   padding: 0 var(--hf-space-2);
 }
+
+/* Message hover toolbar */
+.message-toolbar {
+  position: absolute;
+  top: -12px;
+  right: var(--hf-space-4);
+  display: none;
+  gap: 2px;
+  background: var(--hf-color-3);
+  border: 1px solid var(--hf-color-4);
+  border-radius: var(--hf-radius-md);
+  padding: 2px;
+  z-index: 10;
+}
+
+.message:hover .message-toolbar {
+  display: flex;
+}
+
+.toolbar-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--hf-radius-sm);
+  font-size: var(--hf-size-sm);
+  color: var(--hf-text-muted);
+  line-height: 1;
+}
+
+.toolbar-btn:hover {
+  background: var(--hf-color-4);
+  color: var(--hf-text-normal);
+}
+
+/* Reply banner above input */
+.reply-banner {
+  display: flex;
+  align-items: center;
+  gap: var(--hf-space-2);
+  padding: var(--hf-space-1) var(--hf-space-3);
+  background: var(--hf-color-2);
+  border-left: 3px solid var(--hf-accent);
+  font-size: var(--hf-size-sm);
+  color: var(--hf-text-muted);
+}
+
+.reply-banner.hidden {
+  display: none;
+}
+
+.reply-banner-text {
+  flex: 1;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reply-banner-close {
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--hf-text-muted);
+  font-size: var(--hf-size-sm);
+  padding: 2px 4px;
+}
+
+.reply-banner-close:hover {
+  color: var(--hf-text-normal);
+}
+
+/* Reply header on messages */
+.reply-header {
+  display: flex;
+  gap: var(--hf-space-1);
+  padding: 2px 0;
+  margin-bottom: 2px;
+  border-left: 2px solid var(--hf-text-muted);
+  padding-left: var(--hf-space-2);
+  font-size: var(--hf-size-xs);
+  color: var(--hf-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.reply-header-name {
+  font-weight: var(--hf-weight-semibold);
+}
+
+.reply-header-snippet {
+  opacity: 0.7;
+}
+
+.reply-header-linked {
+  cursor: pointer;
+}
+
+/* Highlight effect when scrolling to referenced message */
+.message {
+  transition: background 0.3s ease;
+}
+
+.reply-highlight {
+  background: color-mix(in srgb, var(--hf-accent) 15%, transparent) !important;
+}
+
+/* Emoji picker */
+.emoji-picker {
+  position: fixed;
+  background: var(--hf-color-2);
+  border: 1px solid var(--hf-color-4);
+  border-radius: var(--hf-radius-lg);
+  padding: var(--hf-space-2);
+  z-index: 100;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  max-width: 280px;
+}
+
+.emoji-picker-quick {
+  display: flex;
+  gap: 2px;
+  padding-bottom: var(--hf-space-1);
+}
+
+.emoji-picker-divider {
+  border: none;
+  border-top: 1px solid var(--hf-color-4);
+  margin: var(--hf-space-1) 0;
+}
+
+.emoji-picker-grid {
+  display: grid;
+  grid-template-columns: repeat(7, 1fr);
+  gap: 2px;
+}
+
+.emoji-pick-btn {
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 4px;
+  border-radius: var(--hf-radius-sm);
+  font-size: 18px;
+  line-height: 1;
+}
+
+.emoji-pick-btn:hover {
+  background: var(--hf-color-4);
+}
+
+/* Reaction pills */
+.reactions-container {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  padding: 2px 0 2px 0;
+}
+
+.reaction-pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--hf-color-2);
+  border: 1px solid var(--hf-color-4);
+  border-radius: var(--hf-radius-full);
+  padding: 1px 8px;
+  cursor: pointer;
+  font-size: var(--hf-size-xs);
+  color: var(--hf-text-muted);
+  line-height: 1.4;
+}
+
+.reaction-pill:hover {
+  background: var(--hf-color-3);
+  border-color: var(--hf-text-muted);
+}
+
+.reaction-pill.reaction-mine {
+  border-color: var(--hf-accent);
+  background: color-mix(in srgb, var(--hf-accent) 10%, var(--hf-color-2));
+}
+
+.reaction-emoji {
+  font-size: 14px;
+}
+
+.reaction-count {
+  font-size: var(--hf-size-xs);
+  font-weight: var(--hf-weight-semibold);
+}

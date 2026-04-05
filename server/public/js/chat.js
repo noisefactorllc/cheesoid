@@ -25,6 +25,85 @@ let reconnectTimer = null
 let currentModel = null
 const visitorStreams = new Map() // agentName → { element, buffer }
 
+let replyToId = null
+let replyToName = null
+
+const QUICK_EMOJIS = ['👍', '❤️', '😂', '🔥', '👀', '💯']
+const ALL_EMOJIS = [
+  ...QUICK_EMOJIS,
+  '😍', '🙏', '👏', '🎉', '😮', '😢', '😡', '🤔', '🤯',
+  '💀', '✅', '❌', '⭐', '💡', '🚀', '🎯', '💪', '🫡',
+  '👎', '😅', '🥳', '😎', '🤝', '💜', '🧡', '💚', '🩵',
+  '⚡', '🌟', '🔧', '📌', '🎵', '☕', '🍕', '🐛',
+]
+
+let activeEmojiPicker = null
+
+function showEmojiPicker(msgId, anchorEl) {
+  closeEmojiPicker()
+  const picker = document.createElement('div')
+  picker.className = 'emoji-picker'
+
+  const quickRow = document.createElement('div')
+  quickRow.className = 'emoji-picker-quick'
+  for (const emoji of QUICK_EMOJIS) {
+    const btn = document.createElement('button')
+    btn.className = 'emoji-pick-btn'
+    btn.textContent = emoji
+    btn.addEventListener('click', () => {
+      sendReaction(msgId, emoji)
+      closeEmojiPicker()
+    })
+    quickRow.appendChild(btn)
+  }
+  picker.appendChild(quickRow)
+
+  const divider = document.createElement('hr')
+  divider.className = 'emoji-picker-divider'
+  picker.appendChild(divider)
+
+  const grid = document.createElement('div')
+  grid.className = 'emoji-picker-grid'
+  for (const emoji of ALL_EMOJIS) {
+    if (QUICK_EMOJIS.includes(emoji)) continue
+    const btn = document.createElement('button')
+    btn.className = 'emoji-pick-btn'
+    btn.textContent = emoji
+    btn.addEventListener('click', () => {
+      sendReaction(msgId, emoji)
+      closeEmojiPicker()
+    })
+    grid.appendChild(btn)
+  }
+  picker.appendChild(grid)
+
+  // Position near the anchor
+  const rect = anchorEl.getBoundingClientRect()
+  picker.style.top = `${rect.bottom + 4}px`
+  picker.style.right = `${window.innerWidth - rect.right}px`
+  document.body.appendChild(picker)
+  activeEmojiPicker = picker
+
+  // Close on click outside (deferred so the initiating click doesn't close it)
+  setTimeout(() => {
+    document.addEventListener('click', closeEmojiPickerOnOutsideClick)
+  }, 0)
+}
+
+function closeEmojiPicker() {
+  if (activeEmojiPicker) {
+    activeEmojiPicker.remove()
+    activeEmojiPicker = null
+    document.removeEventListener('click', closeEmojiPickerOnOutsideClick)
+  }
+}
+
+function closeEmojiPickerOnOutsideClick(e) {
+  if (activeEmojiPicker && !activeEmojiPicker.contains(e.target) && !e.target.closest('.react-btn')) {
+    closeEmojiPicker()
+  }
+}
+
 let hubMode = false
 let hostedRooms = []
 let currentView = null  // '#general', 'dm:username', or null (legacy)
@@ -247,11 +326,12 @@ function handleEvent(e) {
           if (currentView !== hostedRooms[0]) continue
         }
         if (msg.type === 'user_message') {
-          appendMessage('user', msg.text, msg.name, msg.timestamp, false, msg.model)
+          const el = appendMessage('user', msg.text, msg.name, msg.timestamp, false, msg.model, msg.id)
+          if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
         } else if (msg.type === 'assistant_message') {
           if (msg.name) {
             // Visiting agent message with optional tool summary
-            const el = appendMessage('assistant', '', msg.name, msg.timestamp, true, msg.model)
+            const el = appendMessage('assistant', '', msg.name, msg.timestamp, true, msg.model, msg.id)
             el.classList.add('visitor-message')
             el.style.borderLeftColor = nameColor(msg.name)
             const body = el.querySelector('.message-body')
@@ -263,10 +343,12 @@ function handleEvent(e) {
               content += renderMarkdown(msg.text)
               body.innerHTML = content
             }
+            if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
           } else {
-            const el = appendMessage('assistant', '', null, msg.timestamp, false, msg.model)
+            const el = appendMessage('assistant', '', null, msg.timestamp, false, msg.model, msg.id)
             const body = el.querySelector('.message-body')
             if (body) body.innerHTML = renderMarkdown(msg.text)
+            if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
           }
         } else if (msg.type === 'idle_thought' || msg.type === 'system') {
           const el = document.createElement('div')
@@ -282,6 +364,12 @@ function handleEvent(e) {
           el.innerHTML = metaHtml + renderMarkdown(msg.text)
           messages.appendChild(el)
           lastSender = null
+        }
+      }
+      // Replay reactions after all messages are rendered
+      for (const msg of event.messages) {
+        if (msg.type === 'reaction') {
+          updateReactionPills(msg.messageId, msg.emoji, msg.name, msg.action)
         }
       }
       // DM welcome header — always shown at top of DM views
@@ -315,6 +403,12 @@ function handleEvent(e) {
       // message replaces the tool-use placeholder
       if (event.fromAgent && visitorStreams.has(event.name)) {
         const vs = visitorStreams.get(event.name)
+        if (event.id) {
+          vs.element.dataset.messageId = event.id
+          if (!vs.element.querySelector('.message-toolbar')) {
+            vs.element.appendChild(createToolbar(event.id))
+          }
+        }
         const body = vs.element.querySelector('.message-body')
         if (body) body.innerHTML = renderMarkdown(event.text)
         // Attach model to the visitor message and its tool calls
@@ -366,7 +460,8 @@ function handleEvent(e) {
           appendMessage('assistant', event.text, null, null, false, event.model)
         }
       } else {
-        appendMessage('user', event.text, event.name || event.from, null, event.fromAgent, event.model)
+        const msgEl = appendMessage('user', event.text, event.name || event.from, null, event.fromAgent, event.model, event.id)
+        if (event.replyTo) renderReplyHeader(msgEl, event.replyTo)
       }
       // Show thinking indicator for room messages and DMs to the host agent
       // Skip if the floor excludes the host or moderator is another agent
@@ -397,39 +492,19 @@ function handleEvent(e) {
       }
       break
 
+    case 'assistant_message_id':
+      if (assistantEl) {
+        assistantEl.dataset.messageId = event.id
+        // Only add toolbar if not already present (guard against SSE reconnect double-render)
+        if (!assistantEl.querySelector('.message-toolbar')) {
+          assistantEl.appendChild(createToolbar(event.id))
+        }
+      }
+      break
+
     case 'thinking_delta':
       // Indicator already shown from user_message — nothing extra needed
       break
-
-    case 'reviewing': {
-      // Post-response DMN review — show standalone thinking indicator
-      const reviewAgent = event.visiting ? (event.agentName || event.name) : '_host'
-      // Remove any existing review indicator for this agent first
-      const existing = messages.querySelector(`.reviewing-message[data-review-agent="${reviewAgent}"]`)
-      if (existing) existing.remove()
-      const reviewEl = document.createElement('div')
-      reviewEl.className = 'message assistant-message reviewing-message'
-      reviewEl.dataset.reviewAgent = reviewAgent
-      if (event.visiting) {
-        reviewEl.classList.add('visitor-message')
-        reviewEl.style.borderLeftColor = nameColor(reviewAgent)
-      }
-      const reviewDots = document.createElement('div')
-      reviewDots.className = 'thinking-indicator'
-      reviewDots.innerHTML = '<span>thinking</span><div class="thinking-dots"><span></span><span></span><span></span></div>'
-      reviewEl.appendChild(reviewDots)
-      messages.appendChild(reviewEl)
-      scrollToBottom()
-      break
-    }
-
-    case 'reviewing_done': {
-      // Clear the review thinking indicator for this specific agent
-      const doneAgent = event.visiting ? (event.agentName || event.name) : '_host'
-      const indicator = messages.querySelector(`.reviewing-message[data-review-agent="${doneAgent}"]`)
-      if (indicator) indicator.remove()
-      break
-    }
 
     case 'text_delta':
       if (event.visiting) {
@@ -447,11 +522,8 @@ function handleEvent(e) {
         if (vBody) vBody.innerHTML = renderMarkdown(vs.buffer)
         scrollToBottom()
       } else {
-        // Create assistant element if none exists (e.g. correction turn after done)
+        // Create assistant element if none exists
         if (!assistantEl) {
-          // Remove reviewing indicator for host agent
-          const reviewMsg = messages.querySelector('.reviewing-message[data-review-agent="_host"]')
-          if (reviewMsg) reviewMsg.remove()
           assistantEl = appendMessage('assistant', '')
           assistantBuffer = ''
         }
@@ -656,6 +728,10 @@ function handleEvent(e) {
       break
     }
 
+    case 'reaction':
+      updateReactionPills(event.messageId, event.emoji, event.name, event.action)
+      break
+
     case 'backchannel':
       // Backchannel is agent-only coordination — hidden from human users
       break
@@ -741,6 +817,11 @@ function switchView(view) {
   assistantEl = null
   assistantBuffer = ''
   thinkingEl = null
+  replyToId = null
+  replyToName = null
+  if (typeof replyBanner !== 'undefined' && replyBanner) {
+    replyBanner.classList.add('hidden')
+  }
 
   // Update active states in sidebar
   for (const li of document.querySelectorAll('.room-item')) {
@@ -871,6 +952,73 @@ input.addEventListener('keydown', (e) => {
 
 sendBtn.addEventListener('click', send)
 
+// Reply banner — inserted above the input area
+const replyBanner = document.createElement('div')
+replyBanner.className = 'reply-banner hidden'
+const replyBannerText = document.createElement('span')
+replyBannerText.className = 'reply-banner-text'
+const replyBannerClose = document.createElement('button')
+replyBannerClose.className = 'reply-banner-close'
+replyBannerClose.title = 'Cancel reply'
+replyBannerClose.textContent = '✕'
+replyBanner.appendChild(replyBannerText)
+replyBanner.appendChild(replyBannerClose)
+const inputArea = document.getElementById('input-area')
+inputArea.parentElement.insertBefore(replyBanner, inputArea)
+
+replyBannerClose.addEventListener('click', () => {
+  replyToId = null
+  replyToName = null
+  replyBanner.classList.add('hidden')
+})
+
+messages.addEventListener('click', (e) => {
+  const reactBtn = e.target.closest('.react-btn')
+  if (reactBtn) {
+    e.stopPropagation()
+    showEmojiPicker(reactBtn.dataset.msgId, reactBtn)
+    return
+  }
+
+  const pill = e.target.closest('.reaction-pill')
+  if (pill) {
+    const msgEl = pill.closest('.message')
+    const messageId = msgEl?.dataset.messageId
+    const emoji = pill.dataset.emoji
+    if (!messageId || !emoji) return
+    const names = JSON.parse(pill.dataset.names || '[]')
+    const act = names.includes(myName) ? 'remove' : 'add'
+    sendReaction(messageId, emoji, act)
+    return
+  }
+
+  const replyHeader = e.target.closest('.reply-header-linked')
+  if (replyHeader) {
+    const targetId = replyHeader.dataset.replyTarget
+    const target = document.querySelector(`[data-message-id="${targetId}"]`)
+    if (target) {
+      target.classList.add('reply-highlight')
+      target.scrollIntoView({ behavior: 'smooth', block: 'center' })
+      setTimeout(() => target.classList.remove('reply-highlight'), 2000)
+    }
+    return
+  }
+
+  const replyBtn = e.target.closest('.reply-btn')
+  if (replyBtn) {
+    const msgEl = replyBtn.closest('.message')
+    const msgId = replyBtn.dataset.msgId
+    const senderEl = msgEl.querySelector('.sender-name')
+    const bodyEl = msgEl.querySelector('.message-body')
+    replyToId = msgId
+    replyToName = senderEl ? senderEl.textContent : 'someone'
+    const snippet = bodyEl ? bodyEl.textContent.slice(0, 100) : ''
+    replyBannerText.textContent = `Replying to ${replyToName}: ${snippet}`
+    replyBanner.classList.remove('hidden')
+    input.focus()
+  }
+})
+
 async function send() {
   const text = input.value.trim()
   if (!text || sending) return
@@ -884,6 +1032,12 @@ async function send() {
 
   try {
     const body = { message: text, name: myName }
+    if (replyToId) {
+      body.replyTo = replyToId
+      replyToId = null
+      replyToName = null
+      replyBanner.classList.add('hidden')
+    }
     if (hubMode && currentView) {
       if (currentView.startsWith('dm:')) {
         body.to = currentView.replace('dm:', '')
@@ -908,6 +1062,22 @@ async function send() {
   input.focus()
 }
 
+async function sendReaction(messageId, emoji, action = 'add') {
+  try {
+    const body = { messageId, emoji, action, name: myName }
+    if (hubMode && currentView && !currentView.startsWith('dm:')) {
+      body.room = currentView
+    }
+    await fetch('/api/chat/react', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  } catch (err) {
+    console.error('Reaction failed:', err)
+  }
+}
+
 function formatTime(timestamp) {
   if (timestamp == null) return ''
   const d = new Date(timestamp)
@@ -918,9 +1088,28 @@ function formatTime(timestamp) {
   return `${h12}:${m} ${ampm}`
 }
 
-function appendMessage(role, text, name, timestamp, fromAgent = false, model = null) {
+function createToolbar(msgId) {
+  const toolbar = document.createElement('div')
+  toolbar.className = 'message-toolbar'
+  const replyBtn = document.createElement('button')
+  replyBtn.className = 'toolbar-btn reply-btn'
+  replyBtn.title = 'Reply'
+  replyBtn.dataset.msgId = msgId
+  replyBtn.textContent = '↩'
+  const reactBtn = document.createElement('button')
+  reactBtn.className = 'toolbar-btn react-btn'
+  reactBtn.title = 'React'
+  reactBtn.dataset.msgId = msgId
+  reactBtn.textContent = '☺'
+  toolbar.appendChild(replyBtn)
+  toolbar.appendChild(reactBtn)
+  return toolbar
+}
+
+function appendMessage(role, text, name, timestamp, fromAgent = false, model = null, messageId = null) {
   const el = document.createElement('div')
   el.className = 'message'
+  if (messageId) el.dataset.messageId = messageId
   if (fromAgent) el.classList.add('agent-message')
 
   const senderKey = role === 'user' ? (name || 'anon') : (fromAgent && name ? `visitor:${name}` : '__assistant__')
@@ -1007,9 +1196,112 @@ function appendMessage(role, text, name, timestamp, fromAgent = false, model = n
   body.innerHTML = renderMarkdown(text)
   el.appendChild(body)
 
+  // Hover toolbar (reply + react)
+  if (messageId) {
+    el.appendChild(createToolbar(messageId))
+  }
+
   messages.appendChild(el)
   scrollToBottom()
   return el
+}
+
+function renderReplyHeader(el, replyTo) {
+  if (el.querySelector('.reply-header')) return
+  const originalEl = document.querySelector(`[data-message-id="${replyTo}"]`)
+  const header = document.createElement('div')
+  header.className = 'reply-header'
+
+  if (originalEl) {
+    const senderEl = originalEl.querySelector('.sender-name')
+    const bodyEl = originalEl.querySelector('.message-body')
+    const name = senderEl ? senderEl.textContent : 'someone'
+    const snippet = bodyEl ? bodyEl.textContent.slice(0, 100) : ''
+    const nameSpan = document.createElement('span')
+    nameSpan.className = 'reply-header-name'
+    nameSpan.textContent = name
+    const snippetSpan = document.createElement('span')
+    snippetSpan.className = 'reply-header-snippet'
+    snippetSpan.textContent = snippet
+    header.appendChild(nameSpan)
+    header.appendChild(document.createTextNode(' '))
+    header.appendChild(snippetSpan)
+    header.dataset.replyTarget = replyTo
+    header.classList.add('reply-header-linked')
+  } else {
+    const nameSpan = document.createElement('span')
+    nameSpan.className = 'reply-header-name'
+    nameSpan.textContent = 'replying to a message'
+    header.appendChild(nameSpan)
+  }
+
+  // Insert before the message body
+  const body = el.querySelector('.message-body')
+  if (body) el.insertBefore(header, body)
+}
+
+function updateReactionPills(messageId, emoji, name, action) {
+  const msgEl = document.querySelector(`[data-message-id="${messageId}"]`)
+  if (!msgEl) return
+
+  let container = msgEl.querySelector('.reactions-container')
+  if (!container) {
+    container = document.createElement('div')
+    container.className = 'reactions-container'
+    msgEl.appendChild(container)
+  }
+
+  // Find existing pill for this emoji
+  const pills = container.querySelectorAll('.reaction-pill')
+  let pill = null
+  for (const p of pills) {
+    if (p.dataset.emoji === emoji) { pill = p; break }
+  }
+
+  if (action === 'add') {
+    if (!pill) {
+      pill = document.createElement('button')
+      pill.className = 'reaction-pill'
+      pill.dataset.emoji = emoji
+      pill.dataset.names = JSON.stringify([name])
+      const emojiSpan = document.createElement('span')
+      emojiSpan.className = 'reaction-emoji'
+      emojiSpan.textContent = emoji
+      const countSpan = document.createElement('span')
+      countSpan.className = 'reaction-count'
+      countSpan.textContent = '1'
+      pill.appendChild(emojiSpan)
+      pill.appendChild(countSpan)
+      pill.title = name
+      container.appendChild(pill)
+    } else {
+      const names = JSON.parse(pill.dataset.names || '[]')
+      if (!names.includes(name)) {
+        names.push(name)
+        pill.dataset.names = JSON.stringify(names)
+        pill.querySelector('.reaction-count').textContent = String(names.length)
+        pill.title = names.join(', ')
+      }
+    }
+    if (pill) {
+      const names = JSON.parse(pill.dataset.names || '[]')
+      pill.classList.toggle('reaction-mine', names.includes(myName))
+    }
+  } else if (action === 'remove') {
+    if (pill) {
+      const existingNames = JSON.parse(pill.dataset.names || '[]')
+      const names = existingNames.filter(n => n !== name)
+      if (names.length === 0) {
+        pill.remove()
+        if (container.children.length === 0) container.remove()
+      } else {
+        pill.dataset.names = JSON.stringify(names)
+        pill.querySelector('.reaction-count').textContent = String(names.length)
+        pill.title = names.join(', ')
+        pill.classList.toggle('reaction-mine', names.includes(myName))
+      }
+    }
+  }
 }
 
 function getToolContainer(parentEl) {

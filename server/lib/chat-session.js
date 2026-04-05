@@ -1,5 +1,14 @@
+import { randomUUID } from 'node:crypto'
 import { assemblePrompt, currentTimestamp } from './prompt-assembler.js'
-import { assembleDMNPrompt, assembleDMNReviewPrompt, runDMNReview } from './dmn.js'
+
+// Short 8-char hex message IDs — full UUIDs are too long for LLMs to reliably
+// echo back when calling reply_to_message or react_to_message. 8 hex chars
+// gives 4 billion possible values, more than enough uniqueness in a 75-message
+// scrollback window.
+function shortMsgId() {
+  return randomUUID().replace(/-/g, '').slice(0, 8)
+}
+import { assembleDMNPrompt } from './dmn.js'
 import { Memory } from './memory.js'
 import { State } from './state.js'
 import { ToolJournal } from './tool-journal.js'
@@ -97,7 +106,6 @@ export class Room {
         _floor: null, // array of agent names that currently have the floor, or null
         _wakeupSchedulers: [],
         _dmnPrompt: null, // assembled once at init if config.dmn is set
-        _dmnReviewPrompt: null,
       }
       for (const a of persona.config.agents || []) {
         this._a._moderatorPool.push(a.name)
@@ -172,8 +180,6 @@ export class Room {
   set _wakeupSchedulers(v) { this._a._wakeupSchedulers = v }
   get _dmnPrompt() { return this._a._dmnPrompt }
   set _dmnPrompt(v) { this._a._dmnPrompt = v }
-  get _dmnReviewPrompt() { return this._a._dmnReviewPrompt }
-  set _dmnReviewPrompt(v) { this._a._dmnReviewPrompt = v }
 
   async initialize() {
     if (this.systemPrompt) return // already initialized
@@ -198,7 +204,6 @@ export class Room {
     // DMN prompt — assembled once at init if configured
     if (config.dmn) {
       this._dmnPrompt = await assembleDMNPrompt(dir, config)
-      this._dmnReviewPrompt = await assembleDMNReviewPrompt(dir, config)
     }
 
     this.tools = await loadTools(dir, config, this.memory, this.state, this, this.registry, this.modality)
@@ -320,7 +325,7 @@ export class Room {
    */
   _resolveDMNConfig() {
     if (!this.persona.config.dmn || !this._dmnPrompt) {
-      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, dmnReviewPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
+      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
     }
     try {
       const resolved = this.registry.resolve(this.persona.config.dmn)
@@ -328,12 +333,11 @@ export class Room {
         dmnProvider: resolved.provider,
         dmnModel: resolved.modelId,
         dmnPrompt: this._dmnPrompt,
-        dmnReviewPrompt: this._dmnReviewPrompt,
         displayName: this.persona.config.display_name || this.persona.config.name,
       }
     } catch (err) {
       console.log(`[${this.persona.config.name}] DMN model resolution failed: ${err.message}`)
-      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, dmnReviewPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
+      return { dmnProvider: null, dmnModel: null, dmnPrompt: null, displayName: this.persona.config.display_name || this.persona.config.name }
     }
   }
 
@@ -425,11 +429,16 @@ export class Room {
     return domain ? `@${domain}` : ''
   }
 
-  addAgentMessage(name, text, { source = 'user', model } = {}) {
-    this._safeAppendMessage({ role: 'user', content: `${name}: ${text}` })
-    this.broadcast({ type: 'user_message', name, text, fromAgent: true, model })
-    const histEntry = { type: 'user_message', name, text, room: this.roomName }
+  addAgentMessage(name, text, { source = 'user', model, replyTo } = {}) {
+    const msgId = shortMsgId()
+    const idTag = replyTo ? ` [${msgId}] (replying to ${replyTo})` : ` [${msgId}]`
+    this._safeAppendMessage({ role: 'user', content: `${name}${idTag}: ${text}` })
+    const event = { type: 'user_message', name, text, fromAgent: true, model, id: msgId }
+    if (replyTo) event.replyTo = replyTo
+    this.broadcast(event)
+    const histEntry = { type: 'user_message', name, text, room: this.roomName, id: msgId }
     if (model) histEntry.model = model
+    if (replyTo) histEntry.replyTo = replyTo
     this.recordHistory(histEntry)
     this.lastActivity = Date.now()
     this._clearIdleTimer()
@@ -438,6 +447,12 @@ export class Room {
       this._idleInterval = IDLE_THOUGHT_INTERVAL // reset backoff on direct interaction only
     }
     this._startIdleTimer()
+  }
+
+  addReaction(name, messageId, emoji, action = 'add') {
+    const event = { type: 'reaction', messageId, emoji, name, action }
+    this.broadcast(event)
+    this.recordHistory(event)
   }
 
   addBackchannelMessage(name, text, options = {}) {
@@ -535,7 +550,8 @@ export class Room {
         const myName = this.persona.config.display_name
         const floor = event.floor
         // Always add human messages to context so we know what's being discussed
-        this._safeAppendMessage({ role: 'user', content: `${event.name}: ${event.text}` })
+        const idTag = event.id ? ` [${event.id}]` : ''
+        this._safeAppendMessage({ role: 'user', content: `${event.name}${idTag}: ${event.text}` })
 
         if (floor && floor.includes(myName)) {
           // On the floor — respond
@@ -567,6 +583,13 @@ export class Room {
         }
         this._processMessage(routeRoom, 'system', `(backchannel from ${event.name}) ${event.text} — respond to the conversation above.`, { _silent: true })
       }
+    } else if (event.type === 'reaction') {
+      // Relay reaction events so visitor UIs see them + persist for scrollback
+      this.broadcast(event)
+      this.recordHistory(event)
+    } else if (event.type === 'assistant_message_id') {
+      // Relay so visitor UIs can tag assistant messages
+      this.broadcast(event)
     } else if (event.type === 'idle_text_delta' || event.type === 'idle_done' || event.type === 'idle_thought') {
       // Suppress own idle events bounced back from the host — we already
       // broadcast them locally in _idleThought's onEvent callback.
@@ -580,93 +603,6 @@ export class Room {
   _recordToolUse(event) {
     if (event.type !== 'tool_result' || !this.toolJournal) return
     this.toolJournal.record(event.name, event.input, event.result).catch(() => {})
-  }
-
-  /**
-   * Post-response DMN review loop. After the agent speaks, the DMN reviews
-   * the response and can trigger up to 2 correction turns.
-   *
-   * Returns the cumulative correction text (empty string if no corrections).
-   * The critique is never broadcast — it's the agent's subconscious.
-   */
-  async _runPostResponseReview(assistantText, agentConfig, prompt, onEvent) {
-    const { dmnProvider, dmnModel, dmnReviewPrompt, displayName } = agentConfig
-
-    if (!dmnProvider || !dmnReviewPrompt || !assistantText?.trim()) return ''
-
-    const MAX_REVIEW_PASSES = 2
-    const agentName = displayName || this.persona.config.display_name || this.persona.config.name
-    let correctionText = ''
-
-    // Route events through room client for visitor agents, local broadcast for host
-    const emitEvent = (event) => {
-      if (this._pendingRoom === 'home') {
-        this.broadcast(event)
-      } else {
-        const client = this.roomClients.get(this._pendingRoom)
-        if (client) client.sendEvent(event, this._pendingRoomChannel)
-      }
-    }
-
-    for (let pass = 0; pass < MAX_REVIEW_PASSES; pass++) {
-      // Show thinking indicator via UI affordance
-      emitEvent({ type: 'reviewing', name: agentName })
-
-      const textToReview = correctionText || assistantText
-      const { verdict, usage } = await runDMNReview(
-        dmnReviewPrompt, this.messages, textToReview, dmnProvider, dmnModel,
-      )
-      console.log(`[dmn-review] pass ${pass + 1}: verdict=${verdict === 'pass' ? 'PASS' : 'CRITIQUE'} (${usage.input_tokens} in / ${usage.output_tokens} out)`)
-
-      if (verdict === 'pass') {
-        emitEvent({ type: 'reviewing_done', name: agentName })
-        return correctionText
-      }
-
-      // Critique — inject transient correction prompt and run another agent turn
-      console.log(`[dmn-review] critique: ${verdict}`)
-      const correctionPrompt = `[system: Your previous response needs adjustment. Internal review: ${verdict}\nTake a corrective turn — clarify, expand, or fix what you just said. Be natural, don't reference this review process.]`
-      this.messages.push({ role: 'user', content: correctionPrompt })
-
-      const hasOrchestrator = !!this.persona.config.orchestrator
-      const hasModality = this.modality?.isModal
-      const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
-
-      // Build a correction-specific config — no DMN on the correction turn itself
-      const correctionConfig = {
-        ...agentConfig,
-        dmnProvider: null,
-        dmnPrompt: null,
-        maxTurns: 10,
-      }
-
-      let turnText = ''
-      const correctionOnEvent = (event) => {
-        if (event.type === 'text_delta') turnText += event.text
-        onEvent(event) // stream to chat normally
-      }
-
-      const result = await agentFn(prompt, this.messages, this.tools, correctionConfig, correctionOnEvent)
-      this.messages = result.messages
-
-      // Remove the transient correction prompt from history
-      // It's the user message right before the agent's correction response
-      const correctionIdx = this.messages.findIndex(
-        m => m.role === 'user' && typeof m.content === 'string' && m.content.startsWith('[system: Your previous response needs adjustment.')
-      )
-      if (correctionIdx !== -1) {
-        this.messages.splice(correctionIdx, 1)
-      }
-
-      correctionText = turnText.trim()
-      if (!correctionText) {
-        emitEvent({ type: 'reviewing_done', name: agentName })
-        return correctionText // no text produced, stop
-      }
-    }
-
-    this.broadcast({ type: 'reviewing_done', name: agentName })
-    return correctionText
   }
 
   /**
@@ -828,9 +764,11 @@ export class Room {
         this._messageQueue.push({ room, name, text })
       } else if (room === 'home' && name !== 'system') {
         // Queue human messages — broadcast immediately so they appear in chat
-        this.broadcast({ type: 'user_message', name, text })
-        this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
-        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true })
+        const queuedReplyTo = options._replyTo || null
+        const queuedMessageId = shortMsgId()
+        this.broadcast({ type: 'user_message', name, text, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }) })
+        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }) })
+        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true, _replyTo: queuedReplyTo, _messageId: queuedMessageId })
       } else {
         this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
       }
@@ -859,7 +797,11 @@ export class Room {
       if (!this.systemPrompt) await this.initialize()
 
       const presence = room === 'home' ? ` (present: ${this.participantList.join(', ')})` : ''
-      this.messages.push({ role: 'user', content: `${name}${presence}: ${text}` })
+      const messageId = options._messageId || ((room === 'home' && !options._silent && name !== 'system' && name !== 'webhook' && name !== 'wakeup') ? shortMsgId() : null)
+      const idTag = messageId ? ` [${messageId}]` : ''
+      const replyTo = options._replyTo || null
+      const replyTag = replyTo ? ` (replying to ${replyTo})` : ''
+      this.messages.push({ role: 'user', content: `${name}${idTag}${presence}${replyTag}: ${text}` })
 
       // Multi-agent floor control.
       // 1. Explicit addressing (@Name, Name:) updates the floor
@@ -897,9 +839,9 @@ export class Room {
       if (room === 'home' && !options._silent) {
         if (name) this.participants.set(name, Date.now())
         if (name !== 'system' && name !== 'webhook' && name !== 'wakeup' && !options._alreadyBroadcast) {
-          this.broadcast({ type: 'user_message', name, text, moderator, floor })
+          this.broadcast({ type: 'user_message', name, text, moderator, floor, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }) })
         }
-        this.recordHistory({ type: 'user_message', name, text, room: this.roomName })
+        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }) })
       }
 
       // Modality: step up when we have the floor or are orchestrating
@@ -1072,23 +1014,15 @@ export class Room {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
 
-      // DMN post-response review — cognition-driven chat only
-      const isCognitionDriven = hasModality ? this.modality?.mode === 'cognition' : true
-      if (isCognitionDriven && agentConfig.dmnReviewPrompt) {
-        const additionalText = await this._runPostResponseReview(
-          assistantText, agentConfig, prompt, onEvent,
-        )
-        if (additionalText) {
-          assistantText += '\n' + additionalText
-        }
-      }
-
       // Route response — freeform text is always public
       if (this._pendingRoom === 'home') {
         if (assistantText.trim()) {
-          const histEntry = { type: 'assistant_message', text: assistantText.trim(), room: this.roomName }
+          const assistantMsgId = shortMsgId()
+          const histEntry = { type: 'assistant_message', text: assistantText.trim(), room: this.roomName, id: assistantMsgId }
           if (assistantModel) histEntry.model = assistantModel
           this.recordHistory(histEntry)
+          // Broadcast the ID so frontend can track it (text was already streamed via text_delta)
+          this.broadcast({ type: 'assistant_message_id', id: assistantMsgId })
         }
         this._autoNudgeMentionedAgents(assistantText)
       } else {
@@ -1172,7 +1106,7 @@ export class Room {
             console.error(`[${this.persona.config.name}] Queued DM processing error:`, err.message)
           })
         } else {
-          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast }).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast, _replyTo: next._replyTo, _messageId: next._messageId }).catch(err => {
             console.error(`[${this.persona.config.name}] Queue processing error:`, err.message)
           })
         }
@@ -1300,8 +1234,10 @@ export class Room {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
       if (idleText) {
-        const histEntry = { type: 'idle_thought', text: idleText, name: agentName }
+        const idleId = shortMsgId()
+        const histEntry = { type: 'idle_thought', text: idleText, name: agentName, id: idleId }
         if (idleModel) histEntry.model = idleModel
+        this.broadcast(histEntry)
         this.recordHistory(histEntry)
         if (remoteClient) remoteClient.sendEvent(histEntry, remoteChannel)
       }

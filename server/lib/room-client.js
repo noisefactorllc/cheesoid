@@ -91,6 +91,35 @@ export class RoomClient {
     return this._post({ message: text, name: this.agentName, ...options })
   }
 
+  async sendReaction(messageId, emoji, action = 'add') {
+    const reactUrl = new URL('/api/chat/react', this.url)
+    const body = JSON.stringify({ name: this.agentName, messageId, emoji, action })
+    const mod = this._isHttps ? https : http
+    return new Promise((resolve) => {
+      const req = mod.request(reactUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${this.secret}`,
+        },
+      }, (res) => {
+        let data = ''
+        res.on('data', (chunk) => { data += chunk })
+        res.on('end', () => {
+          try { resolve(JSON.parse(data)) }
+          catch { resolve({ raw: data }) }
+        })
+      })
+      req.on('error', (err) => {
+        const msg = err.message || err.code || 'unknown error'
+        console.error(`[RoomClient:${this.roomName}] Reaction relay error: ${msg}`)
+        resolve({ error: msg })
+      })
+      req.write(body)
+      req.end()
+    })
+  }
+
   async sendDMResponse(to, text, model) {
     const payload = { message: text, name: this.agentName, dm_to: to }
     if (model) payload.model = model
