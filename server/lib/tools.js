@@ -88,7 +88,7 @@ function buildRoomTools(room, config) {
       input_schema: {
         type: 'object',
         properties: {
-          messageId: { type: 'string', description: 'The 8-character message ID of the message to reply to. Message IDs appear in brackets right after the sender name in your context, e.g. "Alex [a1b2c3d4]: hello" — the ID is a1b2c3d4. Copy it exactly. Do not guess or make one up.' },
+          messageId: { type: 'string', description: 'The 8-character message ID of the message to reply to. Message IDs appear in brackets right after the sender name in your context, e.g. "Alice [a1b2c3d4]: hello" — the ID is a1b2c3d4. Copy it exactly. Do not guess or make one up.' },
           text: { type: 'string', description: 'Your reply text.' },
         },
         required: ['messageId', 'text'],
@@ -100,7 +100,7 @@ function buildRoomTools(room, config) {
       input_schema: {
         type: 'object',
         properties: {
-          messageId: { type: 'string', description: 'The 8-character message ID of the message to react to. Message IDs appear in brackets right after the sender name in your context, e.g. "Alex [a1b2c3d4]: hello" — the ID is a1b2c3d4. Copy it exactly. Do not guess or make one up.' },
+          messageId: { type: 'string', description: 'The 8-character message ID of the message to react to. Message IDs appear in brackets right after the sender name in your context, e.g. "Alice [a1b2c3d4]: hello" — the ID is a1b2c3d4. Copy it exactly. Do not guess or make one up.' },
           emoji: { type: 'string', description: 'A single emoji character (e.g. 👍, ❤️, 😂, 🔥, 👀, 💯).' },
         },
         required: ['messageId', 'emoji'],
