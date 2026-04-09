@@ -320,6 +320,31 @@ export class Room {
   }
 
   /**
+   * Flush a single orchestrator turn's text to history immediately, before any
+   * downstream tool calls execute. Called from the agent loop's onEvent when an
+   * assistant_text_turn event is received.
+   *
+   * Regression context: a stalled tool (e.g. deep_think hanging on a reasoner
+   * call) used to swallow all streamed text because history was only committed
+   * after the full orchestrator loop returned. Per-turn flushing decouples text
+   * persistence from tool completion so a user refreshing mid-stall still sees
+   * everything the agent has said so far.
+   *
+   * Non-home rooms (remote DM relay to another agent) still batch at loop-end,
+   * because the receiving agent expects a single coherent message, not a burst
+   * of per-turn partials.
+   */
+  _handleAssistantTextTurn(text, model) {
+    if (!text || !text.trim()) return
+    if (this._pendingRoom !== 'home') return
+    const assistantMsgId = shortMsgId()
+    const histEntry = { type: 'assistant_message', text: text.trim(), room: this.roomName, id: assistantMsgId }
+    if (model) histEntry.model = model
+    this.recordHistory(histEntry)
+    this.broadcast({ type: 'assistant_message_id', id: assistantMsgId })
+  }
+
+  /**
    * RAFT-like moderator election. Returns the current moderator name and advances
    * the index. If the elected moderator is busy, cycles through the pool once
    * to find an available agent. Returns null if all are busy (shouldn't happen
@@ -935,6 +960,13 @@ export class Room {
         if (event.type === 'done' && event.model) {
           assistantModel = event.model
         }
+        // Per-turn text flush: the agent loop emits assistant_text_turn after each
+        // orchestrator turn that produced text, BEFORE tool execution. This gives
+        // us a commit point independent of downstream tool outcomes — a stalled
+        // deep_think can no longer swallow already-spoken text.
+        if (event.type === 'assistant_text_turn') {
+          this._handleAssistantTextTurn(event.text, event.model || activeModel)
+        }
         // Tag tool events with the model that actually initiated them
         // (executor events already have model from the hybrid loop wrapper)
         if ((event.type === 'tool_start' || event.type === 'tool_result') && !event.model) {
@@ -983,14 +1015,9 @@ export class Room {
 
       // Route response — freeform text is always public
       if (this._pendingRoom === 'home') {
-        if (assistantText.trim()) {
-          const assistantMsgId = shortMsgId()
-          const histEntry = { type: 'assistant_message', text: assistantText.trim(), room: this.roomName, id: assistantMsgId }
-          if (assistantModel) histEntry.model = assistantModel
-          this.recordHistory(histEntry)
-          // Broadcast the ID so frontend can track it (text was already streamed via text_delta)
-          this.broadcast({ type: 'assistant_message_id', id: assistantMsgId })
-        }
+        // Text was already flushed per-turn via _handleAssistantTextTurn (called
+        // from onEvent above). No post-loop history write needed; the accumulator
+        // is kept only for autoNudge's @mention scan.
         this._autoNudgeMentionedAgents(assistantText)
       } else {
         const client = this.roomClients.get(this._pendingRoom)

@@ -460,4 +460,62 @@ describe('runHybridAgent', () => {
     assert.equal(deadProvider.streamMessage.mock.callCount(), 1)
     assert.equal(goodProvider.streamMessage.mock.callCount(), 1)
   })
+
+  it('emits assistant_text_turn event after each turn that produces text, before tool execution', async () => {
+    // Regression: brad produced 1527 tokens of text + called deep_think in the same turn.
+    // deep_think stalled for 16 minutes. The text was streamed via text_delta but never
+    // persisted to history because chat-session.js only writes history after the full
+    // orchestrator loop returns. Fix: emit a standalone assistant_text_turn event at each
+    // turn boundary so chat-session.js can flush text to history immediately, independent
+    // of whether downstream tools complete.
+    const provider = makeProvider({
+      responses: [
+        {
+          // Turn 1: text + tool_use together (the brad case)
+          contentBlocks: [
+            { type: 'text', text: 'Got it, working on it now.' },
+            { type: 'tool_use', id: 'toolu_1', name: 'bash', input: { command: 'ls' } },
+          ],
+          stopReason: 'tool_use',
+          usage: { input_tokens: 100, output_tokens: 30 },
+        },
+        {
+          // Turn 2: tool_use only, no text — must NOT emit assistant_text_turn
+          contentBlocks: [
+            { type: 'tool_use', id: 'toolu_2', name: 'bash', input: { command: 'pwd' } },
+          ],
+          stopReason: 'tool_use',
+          usage: { input_tokens: 150, output_tokens: 20 },
+        },
+        {
+          // Turn 3: final text, no tool — must emit assistant_text_turn
+          contentBlocks: [{ type: 'text', text: 'All done!' }],
+          stopReason: 'end_turn',
+          usage: { input_tokens: 200, output_tokens: 10 },
+        },
+      ],
+    })
+    const tools = makeTools([{ name: 'bash', description: 'Run a command' }])
+    const config = { provider, model: 'claude-sonnet-4-6' }
+    const { events, onEvent } = collectEvents()
+
+    await runHybridAgent('system', [{ role: 'user', content: 'list files' }], tools, config, onEvent)
+
+    // One event per turn that had non-empty text (turns 1 and 3 — not turn 2)
+    const textTurnEvents = events.filter(e => e.type === 'assistant_text_turn')
+    assert.equal(textTurnEvents.length, 2, 'expected assistant_text_turn for turns 1 and 3 only')
+    assert.equal(textTurnEvents[0].text, 'Got it, working on it now.')
+    assert.equal(textTurnEvents[1].text, 'All done!')
+
+    // Turn 1's text_turn must be emitted BEFORE any tool_result — this is the core guarantee:
+    // if a tool hangs indefinitely, the preceding text has already been flushed downstream.
+    const firstTextTurnIdx = events.findIndex(e => e.type === 'assistant_text_turn')
+    const firstToolResultIdx = events.findIndex(e => e.type === 'tool_result')
+    assert.ok(firstTextTurnIdx >= 0, 'assistant_text_turn must be emitted')
+    assert.ok(firstToolResultIdx >= 0, 'tool_result must be emitted')
+    assert.ok(
+      firstTextTurnIdx < firstToolResultIdx,
+      `assistant_text_turn must come before tool_result (text_turn at ${firstTextTurnIdx}, tool_result at ${firstToolResultIdx})`,
+    )
+  })
 })

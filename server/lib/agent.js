@@ -676,6 +676,19 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     const cleanedAssistant = assistantContent.filter(b => b.type !== 'thinking')
     messages.push({ role: 'assistant', content: cleanedAssistant })
 
+    // Emit this turn's text as a standalone event so downstream listeners
+    // (chat-session) can persist to history incrementally, independent of
+    // whether subsequent tool execution hangs, errors, or completes. Without
+    // this, a stalled tool (e.g. deep_think mid-stream) would delay text
+    // persistence until the entire orchestrator loop returns.
+    const turnText = cleanedAssistant
+      .filter(b => b.type === 'text' && b.text?.trim())
+      .map(b => b.text)
+      .join('\n')
+    if (turnText) {
+      onEvent({ type: 'assistant_text_turn', text: turnText, model: actualModel })
+    }
+
     // No tool use — orchestrator is done
     if (stopReason !== 'tool_use') {
       consecutiveToolCalls = 0
