@@ -24,6 +24,10 @@ let sending = false
 let reconnectTimer = null
 let currentModel = null
 const visitorStreams = new Map() // agentName → { element, buffer }
+// FIFO queue of tool chips awaiting tool_result (tools run sequentially in the
+// orchestrator loop, so order matches). Each entry is a DOM element with a
+// running ticker; finalized on tool_result or cleared on done.
+const runningTools = []
 
 let replyToId = null
 let replyToName = null
@@ -564,7 +568,11 @@ function handleEvent(e) {
         }
         appendTool(vs.element, `Using tool: ${event.name}...`, false, event.model)
       } else if (assistantEl && !event.idle) {
-        appendTool(assistantEl, `Using tool: ${event.name}...`, false, event.model)
+        // Render a running-state chip with live elapsed timer. The chip stays
+        // visually in-flight until tool_result arrives — critical affordance
+        // for long-running tools like deep_think.
+        const chipEl = appendRunningTool(assistantEl, event.name, event.model)
+        runningTools.push(chipEl)
       }
       break
 
@@ -582,7 +590,16 @@ function handleEvent(e) {
           }
         }
       } else if (assistantEl && !event.idle) {
-        appendTool(assistantEl, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`, false, event.model)
+        // Finalize the matching running-state chip in place (FIFO, since tools
+        // execute sequentially). Fall back to a fresh chip if no match —
+        // shouldn't happen in normal flow but protects against dropped events.
+        const chipEl = runningTools.shift()
+        const resultText = `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`
+        if (chipEl) {
+          finalizeRunningTool(chipEl, resultText)
+        } else {
+          appendTool(assistantEl, resultText, false, event.model)
+        }
         // Re-show thinking indicator after tool result — agent is processing
         if (!thinkingEl) {
           thinkingEl = document.createElement('div')
@@ -617,6 +634,9 @@ function handleEvent(e) {
         thinkingEl.remove()
         thinkingEl = null
       }
+      // Clear any orphaned running tool timers (shouldn't happen in normal flow
+      // where each tool_start pairs with a tool_result, but prevents timer leaks)
+      clearRunningTools()
       currentModel = event.model || null
       if (assistantEl) {
         // Add model to message meta
@@ -1351,6 +1371,89 @@ function appendTool(parentEl, text, isError = false, model = null) {
   details.appendChild(el)
   updateToolSummary(details)
   scrollToBottom()
+}
+
+// Render a tool chip in "running" state with a live elapsed-time ticker.
+// Transitioned to final state via finalizeRunningTool when tool_result arrives.
+// This is the UI affordance for long-running tools like deep_think — users can
+// see the tool is still in flight and how long it's been going, so silence no
+// longer looks like a crash.
+function appendRunningTool(parentEl, toolName, model = null) {
+  const details = getToolContainer(parentEl)
+  const el = document.createElement('div')
+  el.className = 'tool-call running'
+  el.dataset.startTime = String(Date.now())
+
+  const time = document.createElement('span')
+  time.className = 'message-time'
+  time.textContent = formatTime(Date.now())
+  el.appendChild(time)
+
+  const effectiveModel = model || currentModel
+  if (effectiveModel) {
+    const modelSpan = document.createElement('span')
+    modelSpan.className = 'message-model'
+    modelSpan.textContent = effectiveModel
+    el.appendChild(modelSpan)
+    el.classList.add('has-model')
+  }
+
+  const label = document.createElement('span')
+  label.className = 'tool-label'
+  label.textContent = ` running ${toolName}… `
+  el.appendChild(label)
+
+  const elapsedEl = document.createElement('span')
+  elapsedEl.className = 'tool-elapsed'
+  elapsedEl.textContent = '0s'
+  el.appendChild(elapsedEl)
+
+  const tick = () => {
+    const sec = Math.floor((Date.now() - Number(el.dataset.startTime)) / 1000)
+    elapsedEl.textContent = formatElapsed(sec)
+  }
+  const intervalId = setInterval(tick, 1000)
+  el.dataset.intervalId = String(intervalId)
+
+  details.appendChild(el)
+  updateToolSummary(details)
+  scrollToBottom()
+  return el
+}
+
+function finalizeRunningTool(el, resultText) {
+  if (!el) return
+  const intervalId = Number(el.dataset.intervalId)
+  if (intervalId) clearInterval(intervalId)
+  delete el.dataset.intervalId
+
+  // Freeze the elapsed time at its final value
+  const startTime = Number(el.dataset.startTime)
+  if (startTime) {
+    const finalSec = Math.floor((Date.now() - startTime) / 1000)
+    const elapsedEl = el.querySelector('.tool-elapsed')
+    if (elapsedEl) elapsedEl.textContent = formatElapsed(finalSec)
+  }
+
+  el.classList.remove('running')
+  const label = el.querySelector('.tool-label')
+  if (label) label.textContent = ` ${resultText} `
+}
+
+function clearRunningTools() {
+  while (runningTools.length > 0) {
+    const el = runningTools.shift()
+    const intervalId = Number(el.dataset.intervalId)
+    if (intervalId) clearInterval(intervalId)
+    delete el.dataset.intervalId
+  }
+}
+
+function formatElapsed(sec) {
+  if (sec < 60) return `${sec}s`
+  const m = Math.floor(sec / 60)
+  const s = sec % 60
+  return s === 0 ? `${m}m` : `${m}m${s}s`
 }
 
 function scrollToBottom() {

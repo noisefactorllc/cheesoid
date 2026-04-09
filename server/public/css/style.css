@@ -348,6 +348,34 @@ main {
   margin: 2px 0;
 }
 
+/* Running state: animated pulse marker + live elapsed-time display.
+   Applied to a tool chip from tool_start until tool_result lands. Critical
+   affordance for slow tools (e.g. deep_think) — user can see brad is still
+   in flight rather than wondering if he crashed. */
+.tool-call.running {
+  color: var(--hf-text-normal);
+  font-style: normal;
+}
+
+.tool-call.running::before {
+  content: '';
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  margin: 0 6px 0 2px;
+  border-radius: var(--hf-radius-full);
+  background: var(--hf-accent, var(--hf-text-dim));
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+  vertical-align: middle;
+}
+
+.tool-elapsed {
+  margin-left: 6px;
+  opacity: 0.7;
+  font-variant-numeric: tabular-nums;
+  font-style: normal;
+}
+
 /* Thinking indicator */
 .thinking-indicator {
   display: flex;
