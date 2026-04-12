@@ -198,6 +198,7 @@ export function createOpenAICompatProvider(config) {
           return 'auto'
         }
 
+        circuitBreaker.recordSuccess(baseUrl)
         const data = await response.json()
         const text = data.choices?.[0]?.message?.content?.trim() || ''
         try {
