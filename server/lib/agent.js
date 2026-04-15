@@ -487,12 +487,6 @@ async function callExecutorWithFallback(config, params, onEvent) {
   throw finalErr
 }
 
-function isOrchestratorRetryable(err) {
-  // Only non-retryable errors are client-side validation (the request itself is wrong)
-  if (err.status >= 400 && err.status < 500 && err.status !== 429) return false
-  return true
-}
-
 async function callOrchestratorWithFallback(config, params, onEvent) {
   const triedModels = [params.model]
   const layer = config.layer
@@ -501,7 +495,11 @@ async function callOrchestratorWithFallback(config, params, onEvent) {
     const result = await config.provider.streamMessage(params, onEvent)
     return { ...result, actualModel: params.model, _latencyMs: Date.now() - t0 }
   } catch (err) {
-    if (!isOrchestratorRetryable(err) || !config.orchestratorFallbackModels?.length) {
+    // Always attempt the fallback chain. Fallbacks typically cross providers
+    // (e.g. anthropic → openai), so per-provider errors — billing (400 credit
+    // balance), auth (401/403), rate limits (429), overload (529), server
+    // errors — all warrant trying the backup.
+    if (!config.orchestratorFallbackModels?.length) {
       err.layer = err.layer || layer
       err.triedModels = triedModels
       throw err

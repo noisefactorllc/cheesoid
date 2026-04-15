@@ -237,6 +237,93 @@ describe('runHybridAgent', () => {
     assert.ok(events.find(e => e.type === 'done'))
   })
 
+  it('falls back on 400 provider errors (credit balance, auth, etc.)', async () => {
+    // Regression: a 400 from Anthropic ("credit balance too low") used to be
+    // classified non-retryable and bypass the fallback chain, taking the
+    // cognition layer offline. Fallbacks cross providers, so per-provider
+    // 4xx errors must still try the backup.
+    const failingOrchestrator = {
+      streamMessage: mock.fn(async () => {
+        const err = new Error('Your credit balance is too low to access the Anthropic API.')
+        err.status = 400
+        throw err
+      }),
+    }
+    const workingOrchestrator = makeProvider({
+      responses: [{
+        contentBlocks: [{ type: 'text', text: 'Fallback response.' }],
+        stopReason: 'end_turn',
+        usage: { input_tokens: 100, output_tokens: 20 },
+      }],
+    })
+
+    const mockRegistry = {
+      resolve(modelString) {
+        if (modelString === 'gpt-5.4:openai') return { modelId: 'gpt-5.4', provider: workingOrchestrator }
+        return { modelId: modelString, provider: failingOrchestrator }
+      },
+    }
+
+    const tools = makeTools([])
+    const config = {
+      provider: failingOrchestrator,
+      model: 'claude-sonnet-4-6',
+      orchestratorFallbackModels: ['gpt-5.4:openai'],
+      registry: mockRegistry,
+    }
+    const { events, onEvent } = collectEvents()
+
+    const result = await runHybridAgent('system', [{ role: 'user', content: 'hi' }], tools, config, onEvent)
+
+    assert.equal(failingOrchestrator.streamMessage.mock.callCount(), 1)
+    assert.ok(workingOrchestrator.streamMessage.mock.callCount() >= 1)
+    assert.ok(events.find(e => e.type === 'model_fallback' && e.to === 'gpt-5.4'))
+    assert.ok(events.find(e => e.type === 'done'))
+  })
+
+  it('surfaces layered error with full triedModels list when entire fallback chain fails', async () => {
+    const primary = {
+      streamMessage: mock.fn(async () => {
+        const err = new Error('credit balance too low')
+        err.status = 400
+        throw err
+      }),
+    }
+    const backup = {
+      streamMessage: mock.fn(async () => {
+        const err = new Error('openai also unhappy')
+        err.status = 500
+        throw err
+      }),
+    }
+
+    const mockRegistry = {
+      resolve(modelString) {
+        if (modelString === 'gpt-5.4:openai') return { modelId: 'gpt-5.4', provider: backup }
+        return { modelId: modelString, provider: primary }
+      },
+    }
+
+    const tools = makeTools([])
+    const config = {
+      provider: primary,
+      model: 'claude-sonnet-4-6',
+      layer: 'cognition',
+      orchestratorFallbackModels: ['gpt-5.4:openai'],
+      registry: mockRegistry,
+    }
+    const { onEvent } = collectEvents()
+
+    await assert.rejects(
+      runHybridAgent('system', [{ role: 'user', content: 'hi' }], tools, config, onEvent),
+      (err) => {
+        assert.equal(err.layer, 'cognition')
+        assert.deepEqual(err.triedModels, ['claude-sonnet-4-6', 'gpt-5.4'])
+        return true
+      },
+    )
+  })
+
   it('tracks reasoner usage separately when deep_think is called', async () => {
     const provider = makeProvider({
       responses: [
