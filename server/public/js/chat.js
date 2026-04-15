@@ -585,7 +585,7 @@ function handleEvent(e) {
       if (event.visiting) {
         const vs = visitorStreams.get(event.agentName)
         if (vs) {
-          appendTool(vs.element, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`, false, event.model)
+          appendTool(vs.element, `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`, !!(event.result && event.result.is_error), event.model)
           // Re-show thinking indicator for visitor
           if (!vs.thinkingEl) {
             vs.thinkingEl = document.createElement('div')
@@ -599,11 +599,12 @@ function handleEvent(e) {
         // execute sequentially). Fall back to a fresh chip if no match —
         // shouldn't happen in normal flow but protects against dropped events.
         const chipEl = runningTools.shift()
+        const isError = !!(event.result && event.result.is_error)
         const resultText = `${event.name}: ${truncate(JSON.stringify(event.result), 200)}`
         if (chipEl) {
-          finalizeRunningTool(chipEl, resultText)
+          finalizeRunningTool(chipEl, resultText, isError)
         } else {
-          appendTool(assistantEl, resultText, false, event.model)
+          appendTool(assistantEl, resultText, isError, event.model)
         }
         // Re-show thinking indicator after tool result — agent is processing
         if (!thinkingEl) {
@@ -1429,7 +1430,7 @@ function appendRunningTool(parentEl, toolName, model = null) {
   return el
 }
 
-function finalizeRunningTool(el, resultText) {
+function finalizeRunningTool(el, resultText, isError = false) {
   if (!el) return
   const intervalId = Number(el.dataset.intervalId)
   if (intervalId) clearInterval(intervalId)
@@ -1444,6 +1445,7 @@ function finalizeRunningTool(el, resultText) {
   }
 
   el.classList.remove('running')
+  if (isError) el.classList.add('error')
   const label = el.querySelector('.tool-label')
   if (label) label.textContent = ` ${resultText} `
 }

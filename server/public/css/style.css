@@ -389,6 +389,25 @@ main {
   vertical-align: middle;
 }
 
+/* Error state: tool returned is_error=true. Visually distinct from a
+   normal completion so failures aren't silently buried in the tool chip
+   stack. */
+.tool-call.error {
+  color: var(--hf-danger, #d04242);
+  font-style: normal;
+}
+.tool-call.error::before {
+  content: '⚠';
+  display: inline-block;
+  margin: 0 6px 0 2px;
+  color: var(--hf-danger, #d04242);
+  vertical-align: middle;
+}
+.tool-call.error .tool-label,
+.tool-call.error .message-time {
+  color: inherit;
+}
+
 .tool-elapsed {
   margin-left: 6px;
   opacity: 0.7;
