@@ -40,8 +40,8 @@ function replaceTimestamp(prompt) {
 
 const IDLE_THOUGHT_INTERVAL = 60 * 60 * 1000 // 60 minutes, doubles each time
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
-export const MAX_HISTORY = 75
-const MAX_CONTEXT_MESSAGES = 75 // max messages in the live agent context
+export const MAX_HISTORY = 40
+const MAX_CONTEXT_MESSAGES = 40 // max messages in the live agent context
 const MAX_QUEUED_WEBHOOKS = 10
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
