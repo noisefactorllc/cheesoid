@@ -203,6 +203,19 @@ function buildRoomTools(room, config) {
           }
         }
 
+        // Code-level block: one trigger per turn. After the first successful
+        // trigger, subsequent calls are a no-op — models (gemini-2.5-pro in
+        // particular) sometimes loop internal({trigger:true}) several times
+        // in one turn. The first call wakes the recipients; the second+
+        // would just re-wake the same recipients.
+        if (input.trigger && room._triggersFiredThisTurn >= 1) {
+          return {
+            output: 'Already triggered once this turn. Respond with text now.',
+            is_error: true,
+            _endTurn: true,
+          }
+        }
+
         const parts = []
 
         if (input.thought) {
@@ -213,7 +226,6 @@ function buildRoomTools(room, config) {
           parts.push(`Thought: ${input.thought}`)
         }
 
-        let endTurn = false
         if (input.backchannel) {
           const pendingRoom = room._pendingRoom
           if (pendingRoom && pendingRoom !== 'home') {
@@ -225,21 +237,17 @@ function buildRoomTools(room, config) {
             room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel, trigger: !!input.trigger, target: input.target || null })
           }
           if (input.trigger) {
-            // Trigger broadcasts wake other agents. After firing once, this
-            // agent's job in the turn is done — any further internal calls
-            // would just re-wake the same recipients (cascade). Force the
-            // orchestrator loop to end via _endTurn so models that don't
-            // respect the prompt-level "STOP" instruction can't re-fire.
-            parts.push('Backchannel sent (triggered). Turn ended.')
-            endTurn = true
+            // Track that a trigger fired this turn. Subsequent internal
+            // calls with trigger:true are blocked above. But the agent can
+            // still speak its own brief reply in this turn.
+            room._triggersFiredThisTurn = (room._triggersFiredThisTurn || 0) + 1
+            parts.push('Backchannel sent (triggered). Do not trigger again; respond with your own brief text if appropriate, then end the turn.')
           } else {
             parts.push('Backchannel sent.')
           }
         }
 
-        const result = { output: parts.join('\n') }
-        if (endTurn) result._endTurn = true
-        return result
+        return { output: parts.join('\n') }
       }
       case 'reply_to_message': {
         if (!input.messageId || !input.text) {

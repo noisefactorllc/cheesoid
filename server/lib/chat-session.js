@@ -780,6 +780,7 @@ export class Room {
 
     this.busy = true
     this._backchannelTrigger = !!options._backchannelTrigger
+    this._triggersFiredThisTurn = 0
     this.lastActivity = Date.now()
     this._clearIdleTimer()
     if (room === 'home') {

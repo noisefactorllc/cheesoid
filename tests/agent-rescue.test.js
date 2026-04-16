@@ -38,6 +38,43 @@ describe('_rescueNarratedToolCall', () => {
     assert.ok(result.input.command)
   })
 
+  it('rescues XML-wrapped JSON tool call (haiku fallback)', () => {
+    const TOOLS = [{ name: 'internal', description: 'inside voice' }]
+    const result = _rescueNarratedToolCall(
+      '<internal>{"backchannel":"all agents respond","trigger":true}</internal>\n\nHi.',
+      TOOLS,
+    )
+    assert.equal(result.type, 'tool_use')
+    assert.equal(result.name, 'internal')
+    assert.deepEqual(result.input, { backchannel: 'all agents respond', trigger: true })
+  })
+
+  it('rescues XML-parameter tool call (Claude XML-tool-use fallback)', () => {
+    const TOOLS = [{ name: 'internal', description: 'inside voice' }]
+    const input = `<internal>
+<parameter name="thought">
+Let me think about this.
+</parameter>
+<parameter name="trigger">true</parameter>
+</internal>
+
+Noted.`
+    const result = _rescueNarratedToolCall(input, TOOLS)
+    assert.equal(result.type, 'tool_use')
+    assert.equal(result.name, 'internal')
+    assert.equal(result.input.trigger, true)
+    assert.ok(result.input.thought.includes('Let me think about this.'))
+  })
+
+  it('coerces XML-parameter booleans and numbers', () => {
+    const TOOLS = [{ name: 'x', description: '' }]
+    const result = _rescueNarratedToolCall(
+      '<x><parameter name="flag">true</parameter><parameter name="n">42</parameter><parameter name="s">hello</parameter></x>',
+      TOOLS,
+    )
+    assert.deepEqual(result.input, { flag: true, n: 42, s: 'hello' })
+  })
+
   it('returns null for unknown tool name', () => {
     const result = _rescueNarratedToolCall(
       '{"name":"delete_everything","arguments":{}}',

@@ -34,7 +34,7 @@ export function _rescueNarratedToolCall(text, toolDefs) {
   const trimmed = text.trim()
   const validNames = new Set(toolDefs.map(t => t.name))
 
-  // Strategy 0: XML-style tag wrapping JSON args, e.g.
+  // Strategy 0a: XML-style tag wrapping JSON args, e.g.
   //   <internal>{"backchannel": "...", "trigger": true}</internal>
   // Haiku falls back to this when it should have used function-calling.
   for (const name of validNames) {
@@ -52,6 +52,40 @@ export function _rescueNarratedToolCall(text, toolDefs) {
           }
         }
       } catch { /* fall through */ }
+    }
+  }
+
+  // Strategy 0b: XML-parameter style (Claude's alternative tool-use fallback):
+  //   <internal>
+  //     <parameter name="thought">...</parameter>
+  //     <parameter name="trigger">true</parameter>
+  //   </internal>
+  // Parse each parameter element into the args object.
+  for (const name of validNames) {
+    const re = new RegExp(`<${name}>([\\s\\S]*?)</${name}>`, 'i')
+    const m = trimmed.match(re)
+    if (m) {
+      const inner = m[1]
+      const paramRe = /<parameter\s+name="([^"]+)">([\s\S]*?)<\/parameter>/g
+      const args = {}
+      let match
+      while ((match = paramRe.exec(inner)) !== null) {
+        const pname = match[1]
+        let pval = match[2].trim()
+        // coerce booleans and numbers when unambiguous
+        if (pval === 'true') args[pname] = true
+        else if (pval === 'false') args[pname] = false
+        else if (/^-?\d+(\.\d+)?$/.test(pval)) args[pname] = Number(pval)
+        else args[pname] = pval
+      }
+      if (Object.keys(args).length > 0) {
+        return {
+          type: 'tool_use',
+          id: `toolu_rescued_${Date.now()}`,
+          name,
+          input: args,
+        }
+      }
     }
   }
 
