@@ -843,16 +843,21 @@ export class Room {
       }
 
       // Modality: step up when we have the floor or are orchestrating
-      const iHaveFloor = floor ? floor.includes(myName) : !!moderator
+      const iHaveFloor = floor ? floor.includes(myName) : false
       if (this.modality?.isModal) {
         if (options._silent) {
           // Silent messages are backchannel triggers — always step up.
-          // This runs AFTER floor logic so it can't be overridden by stepDown.
           this.modality.stepUp('backchannel trigger')
         } else if (iHaveFloor) {
           this.modality.stepUp('has floor')
-        } else if (!floor) {
-          this.modality.stepUp('orchestrating')
+        } else if (moderator) {
+          // Moderator is routing, not engaging. Stay in attention mode —
+          // the cheap model reads the message, decides who it's for, and
+          // either calls internal({trigger}) to delegate or step_up to
+          // engage itself. Stepping up pre-emptively put gemini-pro in
+          // the routing seat, where it ignored tool instructions and
+          // dumped text to chat instead of routing.
+          this.modality.stepDown('moderating — triage in attention')
         } else {
           this.modality.stepDown('not on floor')
         }
