@@ -30,18 +30,18 @@ export async function loadTools(personaDir, config, memory, state, room, registr
 
   async function execute(name, input, options) {
     if (memoryTools.handles(name)) {
-      return memoryTools.execute(name, input)
+      return memoryTools.execute(name, input, options)
     }
     if (sharedTools.handles(name)) {
-      return sharedTools.execute(name, input)
+      return sharedTools.execute(name, input, options)
     }
     if (roomTools.handles(name)) {
-      return roomTools.execute(name, input)
+      return roomTools.execute(name, input, options)
     }
     if (modalityTools.handles(name)) {
-      return modalityTools.execute(name, input)
+      return modalityTools.execute(name, input, options)
     }
-    return personaTools.execute(name, input)
+    return personaTools.execute(name, input, options)
   }
 
   return {
@@ -166,7 +166,7 @@ function buildRoomTools(room, config) {
     return ids
   }
 
-  async function execute(name, input) {
+  async function execute(name, input, options) {
     switch (name) {
       case 'send_chat_message': {
         const chatMsgId = shortMsgId()
@@ -223,9 +223,12 @@ function buildRoomTools(room, config) {
 
         if (input.thought) {
           const agentName = room.persona.config.display_name
-          room.broadcast({ type: 'idle_text_delta', text: input.thought, name: agentName })
-          room.broadcast({ type: 'idle_done', name: agentName })
-          room.recordHistory({ type: 'idle_thought', text: input.thought, name: agentName })
+          const activeModel = options?.model || null
+          room.broadcast({ type: 'idle_text_delta', text: input.thought, name: agentName, model: activeModel })
+          room.broadcast({ type: 'idle_done', name: agentName, model: activeModel })
+          const entry = { type: 'idle_thought', text: input.thought, name: agentName }
+          if (activeModel) entry.model = activeModel
+          room.recordHistory(entry)
           parts.push(`Thought: ${input.thought}`)
         }
 

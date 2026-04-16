@@ -78,6 +78,8 @@ export function stripChatNarration(text) {
   }
   // Triple-backtick fenced tool_code blocks
   cleaned = cleaned.replace(/```(?:tool_code|python)?\s*(?:print|def |import )[\s\S]*?```/g, '')
+  // Pseudo-function-call syntax: call:toolname({...}) or toolname({...})
+  cleaned = cleaned.replace(/(?:call:)?\w+\(\s*\{[\s\S]*?\}\s*\)/g, '')
   return cleaned.trim()
 }
 
@@ -385,6 +387,31 @@ export class Room {
   _handleAssistantTextTurn(text, model) {
     if (!text || !text.trim()) return
     if (this._pendingRoom !== 'home') return
+
+    // Extract narrated reasoning before stripping. If the model wrapped
+    // thoughts in <thinking>, <execute_protocol>, <internal>, etc. rather
+    // than using function calling, the thought content should be preserved
+    // as an idle_thought (visible in collapsed UI) even though it's stripped
+    // from the chat broadcast. Without this, narration-wrapped reasoning
+    // vanishes entirely when the rescue doesn't fire (e.g. <execute_protocol>
+    // or bare <thinking> which aren't tool names).
+    const narrationRe = /<(?:thinking|execute_protocol|internal|inner_voice|reasoning)\b[^>]*>([\s\S]*?)<\/(?:thinking|execute_protocol|internal|inner_voice|reasoning)>/gi
+    let match
+    const narrationParts = []
+    while ((match = narrationRe.exec(text)) !== null) {
+      const inner = match[1].replace(/<\w+[^>]*>[\s\S]*?<\/\w+>/g, '').trim()
+      if (inner) narrationParts.push(inner)
+    }
+    if (narrationParts.length > 0) {
+      const agentName = this.persona.config.display_name
+      const thoughtText = narrationParts.join('\n\n')
+      const thoughtId = shortMsgId()
+      const thoughtEntry = { type: 'idle_thought', text: thoughtText, name: agentName, id: thoughtId }
+      if (model) thoughtEntry.model = model
+      this.broadcast(thoughtEntry)
+      this.recordHistory(thoughtEntry)
+    }
+
     const cleaned = stripChatNarration(text)
     if (!cleaned) return
     const assistantMsgId = shortMsgId()
@@ -447,12 +474,24 @@ export class Room {
     }
 
     // Pattern 3: Name is the first word of the message
-    // e.g. "Blue how are you", "Blue, can you", "Blue. do this", "Blue!"
+    // e.g. "Blue how are you", "Blue, can you", "Blue and Green, each say ready"
+    // When the first word is a pool name, scan ahead for linked names
+    // connected by "and", commas, or adjacent mentions before the main clause.
     const firstWord = text.match(/^(\w+)[\s.,!?;]/)
     if (firstWord) {
       for (const agentName of pool) {
         if (agentName.toLowerCase() === firstWord[1].toLowerCase()) {
           addressed.add(agentName)
+          // Scan the leading address clause for additional names
+          const clauseMatch = text.match(/^([^.!?\n]{1,80}?)(?:,\s*(?:each|every|all|please|can|could|do|say|give|what|how|tell|show)\b|$)/i)
+          if (clauseMatch) {
+            const clause = clauseMatch[1]
+            for (const other of pool) {
+              if (new RegExp(`\\b${other}\\b`, 'i').test(clause)) {
+                addressed.add(other)
+              }
+            }
+          }
           return [...addressed]
         }
       }
@@ -1194,6 +1233,33 @@ export class Room {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
 
+      // Delegation-check recovery: the host was asked to scan the user's
+      // message for additional agents beyond the parser's floor pick. If the
+      // host narrated its analysis as text instead of calling internal(target),
+      // _triggerTargetsThisTurn is empty and the additional agent stays silent.
+      // Recover by checking whether the host's response text mentions non-floor
+      // agent names. This reads the HOST's own output, not the user's message.
+      if (isHostDelegationCheck && this._triggerTargetsThisTurn.size === 0) {
+        const lastAssistant = this.messages.findLast(m => m.role === 'assistant')
+        const hostText = lastAssistant?.content
+          ?.filter(b => b.type === 'text')
+          ?.map(b => b.text)
+          ?.join(' ') || ''
+        const otherAgents = this._moderatorPool.filter(n => n !== myName && !floor.includes(n))
+        for (const agent of otherAgents) {
+          if (hostText.toLowerCase().includes(agent.toLowerCase())) {
+            console.log(`[${this.persona.config.name}] Delegation-check recovery: triggering ${agent} (mentioned in host text but no tool call)`)
+            this.broadcast({
+              type: 'backchannel',
+              name: myName,
+              text: `Respond to the most recent user message.`,
+              trigger: true,
+              target: agent,
+            })
+          }
+        }
+      }
+
       // Route response — freeform text is always public
       if (this._pendingRoom === 'home') {
         // Text was already flushed per-turn via _handleAssistantTextTurn (called
@@ -1202,10 +1268,10 @@ export class Room {
         this._autoNudgeMentionedAgents(assistantText)
       } else {
         const client = this.roomClients.get(this._pendingRoom)
-        if (client && assistantText.trim()) {
-          // Include the host's room name so the response routes to the correct channel
-          await client.sendMessage(assistantText.trim(), { model: assistantModel, room: this._pendingRoomChannel })
-        } else if (options._backchannelTrigger && !assistantText.trim()) {
+        const visitorText = stripChatNarration(assistantText)
+        if (client && visitorText) {
+          await client.sendMessage(visitorText, { model: assistantModel, room: this._pendingRoomChannel })
+        } else if (options._backchannelTrigger && !visitorText) {
           // Visitor was triggered but produced no visible text (model called
           // internal instead of speaking, or produced empty output). Log it
           // so the silence is visible rather than a mystery to the user.
@@ -1213,8 +1279,8 @@ export class Room {
         }
         // Record remote interactions in own history for continuity across restarts
         this.recordHistory({ type: 'user_message', name, text })
-        if (assistantText.trim()) {
-          const histEntry = { type: 'assistant_message', text: assistantText.trim() }
+        if (visitorText) {
+          const histEntry = { type: 'assistant_message', text: visitorText }
           if (assistantModel) histEntry.model = assistantModel
           this.recordHistory(histEntry)
         }
@@ -1353,6 +1419,10 @@ export class Room {
           : [],
         registry: this.registry,
         modality: null, // idle thoughts don't get gear-shifting
+        // Mark this run as an idle turn. Rescue keeps pure-thought narration
+        // as a journal entry rather than routing it to chat — during chat
+        // turns the same narration would be surfaced as the chat response.
+        isIdle: true,
       }
 
       // Wrap events as idle thoughts for the UI — broadcast errors must not
@@ -1415,12 +1485,21 @@ export class Room {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
       if (idleText) {
-        const idleId = shortMsgId()
-        const histEntry = { type: 'idle_thought', text: idleText, name: agentName, id: idleId }
-        if (idleModel) histEntry.model = idleModel
-        this.broadcast(histEntry)
-        this.recordHistory(histEntry)
-        if (remoteClient) remoteClient.sendEvent(histEntry, remoteChannel)
+        // Strip narration artifacts (<internal>...</internal>, XML-parameter
+        // wrappers, JSON thought blobs). Models narrate tool calls during
+        // idle, and the whole blob used to end up as a private idle_thought
+        // with the chat-intent prose trapped inside. We want:
+        //  - narration stripped
+        //  - whatever clean prose remains recorded as the idle_thought
+        const cleaned = stripChatNarration(idleText)
+        if (cleaned) {
+          const idleId = shortMsgId()
+          const histEntry = { type: 'idle_thought', text: cleaned, name: agentName, id: idleId }
+          if (idleModel) histEntry.model = idleModel
+          this.broadcast(histEntry)
+          this.recordHistory(histEntry)
+          if (remoteClient) remoteClient.sendEvent(histEntry, remoteChannel)
+        }
       }
 
       if (this.state) {

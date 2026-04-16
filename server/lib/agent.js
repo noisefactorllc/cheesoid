@@ -1,6 +1,36 @@
 import { CircuitOpenError } from './circuit-breaker.js'
 
 /**
+ * Strip narration wrappers (<internal>, <thinking>, <execute_protocol>,
+ * <tool_code>, <parameter>, etc.) and return the remaining visible prose.
+ * Mirrors stripChatNarration in chat-session.js; duplicated here to avoid
+ * a circular import (chat-session imports agent).
+ */
+const NARRATION_TAGS = ['internal', 'thinking', 'execute_protocol', 'tool_code', 'parameter', 'inner_voice', 'reasoning']
+function _stripNarrationForCheck(text) {
+  let cleaned = text
+  for (const tag of NARRATION_TAGS) {
+    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>`, 'gi'), '')
+  }
+  for (const tag of NARRATION_TAGS) {
+    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*$`, 'i'), '')
+  }
+  for (const tag of NARRATION_TAGS) {
+    cleaned = cleaned.replace(new RegExp(`</${tag}>`, 'gi'), '')
+  }
+  // Pseudo-function-call syntax: call:toolname({...}) or toolname({...})
+  cleaned = cleaned.replace(/(?:call:)?\w+\(\s*\{[\s\S]*?\}\s*\)/g, '')
+  // Leading JSON reasoning blobs
+  const jsonBlobRe = /^\s*\{\s*"(?:thought|backchannel|reasoning|inner_voice|analysis|inside_voice)"\s*:[\s\S]*?\}\s*(?=(?:\{\s*"|[^{]|$))/
+  for (let i = 0; i < 20; i++) {
+    const before = cleaned
+    cleaned = cleaned.replace(jsonBlobRe, '')
+    if (cleaned === before) break
+  }
+  return cleaned.trim()
+}
+
+/**
  * Heuristic intent classifier — determines tool vs text without an API call.
  * Returns 'required', 'none', or 'uncertain' (needs LLM classification).
  */
@@ -166,8 +196,10 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   let rescueCount = 0
   let totalToolTurns = 0
   let rescueFailed = false
+  let narrationCorrectionFired = false
 
   while (iterations < maxTurns) {
+    let needsNarrationCorrection = false
     // Intent routing for providers that support it (open models).
     let toolChoice = undefined
     if (provider.supportsIntentRouting && tools.definitions.length > 0) {
@@ -245,7 +277,10 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       if (textBlock) {
         const rescued = _rescueNarratedToolCall(textBlock.text, tools.definitions)
         if (rescued) {
-          // Strip the narrated call from the text, keep any remaining text
+          // Strip the narrated XML from text, keep any remaining chat prose.
+          // The rescue executes the tool call (e.g. internal.thought records
+          // idle_thought — visible in collapsed UI). Clean prose survives as
+          // a text block and reaches chat via assistant_text_turn.
           const cleanedText = textBlock.text
             .replace(/<\w+>[\s\S]*?<\/\w+>/g, '')
             .trim()
@@ -283,6 +318,36 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     const cleanedContent = assistantContent.filter(b => b.type !== 'thinking')
     messages.push({ role: 'assistant', content: cleanedContent })
 
+    // Narration-correction trigger: if this was a chat-response turn and the
+    // model produced text blocks that contain ONLY narration wrappers
+    // (<internal>, <execute_protocol>, <thinking>, <tool_code>, etc.) with
+    // nothing visible after stripping, there's no chat reply. The user would
+    // see silence. Inject a correction and force one retry.
+    //
+    // Skip when: idle turn (journaling is fine), already corrected once,
+    // a tool was rescued (coordination was the point), or any clean prose
+    // remains (model produced real chat alongside narration).
+    if (!config.isIdle && !narrationCorrectionFired && stopReason !== 'tool_use') {
+      const allText = cleanedContent
+        .filter(b => b.type === 'text' && b.text)
+        .map(b => b.text)
+        .join('\n')
+      if (allText && !_stripNarrationForCheck(allText)) {
+        needsNarrationCorrection = true
+        console.log(`[intent-router] all-narration response — will request retry with plain chat text`)
+      }
+    }
+
+    if (needsNarrationCorrection && !narrationCorrectionFired) {
+      narrationCorrectionFired = true
+      messages.push({
+        role: 'user',
+        content: '[system: Your previous response was private reasoning wrapped in <internal>/<parameter> XML. That is not a chat reply — the user cannot see private reasoning. Respond now with a plain chat message that directly addresses the user. Do not wrap your reply in <internal>, <parameter>, <thinking>, <execute_protocol>, or any other tag. Write the reply as normal chat text.]',
+      })
+      iterations++
+      continue
+    }
+
     // If no tool use, we're done
     if (stopReason !== 'tool_use') {
       consecutiveToolCalls = 0
@@ -296,7 +361,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
       let result
       try {
-        result = await tools.execute(block.name, block.input, { onEvent })
+        result = await tools.execute(block.name, block.input, { onEvent, model: config.model })
       } catch (err) {
         result = { output: `Tool error: ${err.message}`, is_error: true }
       }
@@ -624,6 +689,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let rescueCount = 0
   let totalToolTurns = 0
   let rescueFailed = false
+  let narrationCorrectionFired = false
   let stepUpUsed = false // one step_up re-run per agent call
   let endTurnByTool = false // a tool requested hard-stop (e.g. internal trigger)
   let lastRespondedModel = null // actual model that responded (may differ from config.model after fallback)
@@ -631,6 +697,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   const metrics = { models: {}, totalLatencyMs: 0, fallbackCount: 0, duplicateToolCalls: 0, startTime: Date.now() }
 
   while (iterations < maxTurns) {
+    let needsNarrationCorrection = false
     // Intent routing — applies when orchestrator is openai-compat
     let toolChoice = undefined
     if (orchestrator.supportsIntentRouting && tools.definitions.length > 0) {
@@ -717,7 +784,10 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       if (textBlock) {
         const rescued = _rescueNarratedToolCall(textBlock.text, tools.definitions)
         if (rescued) {
-          // Strip narrated XML from the text; keep any remaining visible prose.
+          // Strip narrated XML from text, keep any remaining chat prose.
+          // The rescue executes the tool call (e.g. internal.thought records
+          // idle_thought — visible in collapsed UI). Clean prose survives as
+          // a text block and reaches chat via assistant_text_turn.
           const cleanedText = textBlock.text
             .replace(/<\w+>[\s\S]*?<\/\w+>/g, '')
             .trim()
@@ -766,6 +836,31 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       onEvent({ type: 'assistant_text_turn', text: turnText, model: actualModel })
     }
 
+    // Narration-correction trigger: if this was a chat-response turn and the
+    // model produced text blocks that contain ONLY narration wrappers
+    // (<internal>, <execute_protocol>, <thinking>, <tool_code>, etc.) with
+    // nothing visible after stripping, there's no chat reply. Inject a
+    // correction and force one retry.
+    //
+    // Skip when: idle turn (journaling is fine), already corrected once,
+    // a tool was rescued (coordination was the point), or clean prose remains.
+    if (!config.isIdle && !narrationCorrectionFired && stopReason !== 'tool_use') {
+      if (turnText && !_stripNarrationForCheck(turnText)) {
+        needsNarrationCorrection = true
+        console.log(`[hybrid] all-narration response — will request retry with plain chat text`)
+      }
+    }
+
+    if (needsNarrationCorrection && !narrationCorrectionFired) {
+      narrationCorrectionFired = true
+      messages.push({
+        role: 'user',
+        content: '[system: Your previous response was private reasoning wrapped in <internal>/<parameter> XML. That is not a chat reply — the user cannot see private reasoning. Respond now with a plain chat message that directly addresses the user. Do not wrap your reply in <internal>, <parameter>, <thinking>, <execute_protocol>, or any other tag. Write the reply as normal chat text.]',
+      })
+      iterations++
+      continue
+    }
+
     // No tool use — orchestrator is done
     if (stopReason !== 'tool_use') {
       consecutiveToolCalls = 0
@@ -776,6 +871,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     let toolResults = []
     let stepUpTriggered = false
     let endTurnRequested = false
+    let endTurnWasError = false
     const orchestratorToolNames = assistantContent.filter(b => b.type === 'tool_use').map(b => b.name)
     if (orchestratorToolNames.length > 0) {
       console.log(`[hybrid] orchestrator tools: ${orchestratorToolNames.join(', ')}`)
@@ -784,12 +880,15 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       calledTools.add(`${block.name}(${JSON.stringify(block.input)})`)
       let toolResult
       try {
-        toolResult = await tools.execute(block.name, block.input, { onEvent })
+        toolResult = await tools.execute(block.name, block.input, { onEvent, model: actualModel || config.model })
       } catch (err) {
         toolResult = { output: `Tool error: ${err.message}`, is_error: true }
       }
       if (toolResult._stepUp) stepUpTriggered = true
-      if (toolResult._endTurn) endTurnRequested = true
+      if (toolResult._endTurn) {
+        endTurnRequested = true
+        if (toolResult.is_error) endTurnWasError = true
+      }
       if (toolResult._usage) {
         reasonerUsage.input_tokens += toolResult._usage.input_tokens
         reasonerUsage.output_tokens += toolResult._usage.output_tokens
@@ -1003,7 +1102,9 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     // loop here regardless of whether the model wants to keep going.
     if (endTurnRequested) {
       console.log(`[hybrid] tool requested end-of-turn — breaking orchestrator loop`)
-      endTurnByTool = true
+      // When endTurn comes from an error (e.g. re-trigger blocked), the model
+      // still needs to produce text. Let the post-loop nudge fire.
+      if (!endTurnWasError) endTurnByTool = true
       break
     }
   }

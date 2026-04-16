@@ -71,7 +71,7 @@ async function streamOnce(client, params, onEvent) {
 
 export function createAnthropicProvider(_config) {
   return {
-    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget }, onEvent) {
+    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }, onEvent) {
       const client = getClient()
       let activeModel = model
 
@@ -87,6 +87,10 @@ export function createAnthropicProvider(_config) {
         messages,
         tools: [...tools, ...(serverTools || [])],
         stream: true,
+      }
+
+      if (toolChoice && params.tools.length > 0) {
+        params.tool_choice = { type: toolChoice }
       }
 
       if (thinkingBudget && isOpusModel(activeModel)) {
