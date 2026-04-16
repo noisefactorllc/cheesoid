@@ -705,13 +705,26 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     const hasText = contentBlocks.some(b => b.type === 'text' && b.text)
     console.log(`[hybrid] orchestrator turn ${iterations + 1}: ${usage.input_tokens} in / ${usage.output_tokens} out | tools=${toolUseCount} text=${hasText} stop=${stopReason}`)
 
-    // Rescue narrated tool calls (openai-compat orchestrator only)
-    if (stopReason !== 'tool_use' && orchestrator.supportsIntentRouting && toolChoice !== 'none' && !rescueFailed) {
+    // Rescue narrated tool calls — fires for ANY orchestrator (haiku
+    // narrates as XML-parameter when it slips out of function-calling
+    // discipline; open-weight models narrate as plain JSON; gemini-pro
+    // sometimes wraps in code fences). Previously gated on
+    // `orchestrator.supportsIntentRouting`, which excluded Anthropic
+    // entirely and let haiku's narrated calls leak straight to chat.
+    // Also fires on mixed responses (real tool_use + narrated text).
+    if (toolChoice !== 'none' && !rescueFailed) {
       const textBlock = contentBlocks.find(b => b.type === 'text')
       if (textBlock) {
         const rescued = _rescueNarratedToolCall(textBlock.text, tools.definitions)
         if (rescued) {
+          // Strip narrated XML from the text; keep any remaining visible prose.
+          const cleanedText = textBlock.text
+            .replace(/<\w+>[\s\S]*?<\/\w+>/g, '')
+            .trim()
           contentBlocks = contentBlocks.filter(b => b !== textBlock)
+          if (cleanedText) {
+            contentBlocks.push({ type: 'text', text: cleanedText })
+          }
           contentBlocks.push(rescued)
           stopReason = 'tool_use'
           onEvent({ type: 'tool_start', name: rescued.name })
