@@ -560,6 +560,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let totalToolTurns = 0
   let rescueFailed = false
   let stepUpUsed = false // one step_up re-run per agent call
+  let endTurnByTool = false // a tool requested hard-stop (e.g. internal trigger)
   let lastRespondedModel = null // actual model that responded (may differ from config.model after fallback)
   const calledTools = new Set() // track tool+args for dedup across executor turns
   const metrics = { models: {}, totalLatencyMs: 0, fallbackCount: 0, duplicateToolCalls: 0, startTime: Date.now() }
@@ -696,6 +697,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     // Execute tools directly
     let toolResults = []
     let stepUpTriggered = false
+    let endTurnRequested = false
     const orchestratorToolNames = assistantContent.filter(b => b.type === 'tool_use').map(b => b.name)
     if (orchestratorToolNames.length > 0) {
       console.log(`[hybrid] orchestrator tools: ${orchestratorToolNames.join(', ')}`)
@@ -709,6 +711,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
         toolResult = { output: `Tool error: ${err.message}`, is_error: true }
       }
       if (toolResult._stepUp) stepUpTriggered = true
+      if (toolResult._endTurn) endTurnRequested = true
       if (toolResult._usage) {
         reasonerUsage.input_tokens += toolResult._usage.input_tokens
         reasonerUsage.output_tokens += toolResult._usage.output_tokens
@@ -767,7 +770,18 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     ])
     const executorTools = tools.definitions.filter(t => !ORCHESTRATOR_ONLY_TOOLS.has(t.name))
 
-    if (executor && executorModel && executorTools.length > 0) {
+    // Skip the executor turn entirely when every orchestrator tool was a
+    // no-followup-needed action (backchannel triggers, message sends, memory
+    // writes, reactions). Their tool_results contain only confirmation strings
+    // — there is nothing for the executor to chain on. With tool_choice:
+    // 'required' the executor would be forced to invent a tool call,
+    // hallucinating placeholder paths like read_file('path/to/file'), and the
+    // resulting error would feed back into the orchestrator and trigger a
+    // cascade of duplicate calls.
+    const allOrchestratorOnly = orchestratorToolNames.length > 0
+      && orchestratorToolNames.every(n => ORCHESTRATOR_ONLY_TOOLS.has(n))
+
+    if (executor && executorModel && executorTools.length > 0 && !allOrchestratorOnly) {
 
       // Latest results start as the orchestrator's tool results
       let latestResultText = toolResults.map(r => r.content).join('\n\n')
@@ -904,12 +918,26 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
 
     messages.push({ role: 'user', content: toolResults })
     iterations++
+
+    // A tool requested an explicit end-of-turn (e.g. internal({trigger:true})
+    // — the agent has done its job by waking another agent; any further
+    // orchestrator turn would just re-trigger or hallucinate). Hard-stop the
+    // loop here regardless of whether the model wants to keep going.
+    if (endTurnRequested) {
+      console.log(`[hybrid] tool requested end-of-turn — breaking orchestrator loop`)
+      endTurnByTool = true
+      break
+    }
   }
 
   // If the orchestrator ended with no text after tool results, make one more call
   // with tools disabled so it summarizes in its own voice.
-  // Use config.provider (not the captured `orchestrator`) because step_up may have changed it
-  await _nudgeIfEmpty(messages, config.provider, config, systemPrompt, totalUsage, onEvent)
+  // Use config.provider (not the captured `orchestrator`) because step_up may have changed it.
+  // Skip the nudge if a tool explicitly ended the turn (e.g. internal trigger
+  // delegated to another agent — the moderator should NOT then narrate).
+  if (!endTurnByTool) {
+    await _nudgeIfEmpty(messages, config.provider, config, systemPrompt, totalUsage, onEvent)
+  }
 
   metrics.totalLatencyMs = Date.now() - metrics.startTime
   metrics.duplicateToolCalls = calledTools.size < totalToolTurns ? totalToolTurns - calledTools.size : 0

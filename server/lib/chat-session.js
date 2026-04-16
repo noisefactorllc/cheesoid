@@ -193,11 +193,12 @@ export class Room {
     this.systemPrompt = await assemblePrompt(dir, config, plugins, { toolJournal: this.toolJournal })
     this.registry = new ProviderRegistry(config)
 
-    // Modal mode: attention/cognition gear shifting
+    // Modal mode: attention/cognition (/reasoner) gear shifting
     if (config.cognition?.length && config.attention?.length) {
       this.modality = new Modality({
         attention: config.attention,
         cognition: config.cognition,
+        reasoner: config.reasoner,
       })
     }
 
@@ -857,19 +858,39 @@ export class Room {
         }
       }
 
-      // Build moderator addendum — only when no floor is set and moderator is active.
-      // The moderator's job: decide who gets the floor, trigger them, update floor.
+      // Build moderator addendum.
+      // Fires in two cases:
+      // 1. No floor set — the elected moderator orchestrates.
+      // 2. Host holds the floor "continuing" (no explicit re-addressing) — the
+      //    new message might actually be for someone else and the host is
+      //    responsible for reading it and handing off, not answering on autopilot.
+      //
+      // The addendum asks the model (not regex) to read the message and decide
+      // who's being addressed. Addressing in natural chat is open-ended —
+      // "Blue, what's..." / "I'd love to hear Green's take" / "can Blue chime
+      // in?" — so the moderator LLM is the router.
       let moderatorAddendum = ''
-      if (moderator && !floor) {
-        const otherAgents = this._moderatorPool.filter(n => n !== myName).join(', ')
-        moderatorAddendum = [
-          `\n\n## CURRENT TURN: You are the moderator`,
-          `No one has the floor. Decide who should respond to the message above:`,
-          `- If addressed to everyone: call internal({ backchannel: "respond to ${name}'s message", trigger: true }) BEFORE responding. ${otherAgents} cannot speak unless you trigger them.`,
-          `- If meant for a specific agent: call internal({ backchannel: "respond to ${name}'s message", trigger: true, target: "[agent name]" }) to wake only that agent, then stay silent.`,
-          `- If just for you: respond normally.`,
-          `If you skip the trigger, other agents stay silent. This is your responsibility.`,
-        ].join('\n')
+      const isVisitorHuman = name !== myName && name !== 'system' && name !== 'webhook' && name !== 'wakeup'
+      const otherAgents = this._moderatorPool.filter(n => n !== myName).join(', ')
+      const moderationBody = [
+        ``,
+        `Read ${name}'s message above. Decide who it is addressed to — by name (vocative: "Blue, ..."), by implicit reference ("what does Green think?", "ask Blue"), by scope ("everyone", "all of you"), or just to you.`,
+        ``,
+        `Pick exactly ONE of these four actions and then STOP. Do not retry. Do not double-trigger. Do not call internal more than once for the same target.`,
+        ``,
+        `1. Message is for ONE other agent → call internal({ backchannel: "<brief context>", trigger: true, target: "<exact agent name>" }) ONCE, then end the turn with NO TEXT. Do not call any other tool. Do not narrate. Do not say "I'll let <agent> answer" — that's a string, not a trigger; only the single tool call wakes them.`,
+        `2. Message is for MULTIPLE other agents → call internal({ backchannel: "<brief context>", trigger: true }) ONCE without target to reach everyone. Then end the turn with no text.`,
+        `3. Message is for the GROUP (you included) → call internal({ backchannel: "all agents respond", trigger: true }) ONCE, then give your own brief reply and end the turn.`,
+        `4. Message is for YOU specifically → respond normally with text. No trigger needed.`,
+        ``,
+        `After your trigger call returns "Backchannel sent (triggered)." — that is your signal to STOP. Do NOT call internal again. Do NOT add a follow-up "let me also..." call. The other agent has been woken; your job is done.`,
+        ``,
+        `Other agents (${otherAgents}) cannot speak unless you trigger them. If you skip the trigger, they stay silent and the conversation breaks.`,
+      ]
+      if (isMultiAgent && moderator && !floor) {
+        moderatorAddendum = `\n\n## CURRENT TURN: You are the moderator\n\nNo one has the floor yet. Route ${name}'s message.\n${moderationBody.join('\n')}`
+      } else if (isMultiAgent && floor?.includes(myName) && !addressed && isVisitorHuman) {
+        moderatorAddendum = `\n\n## CURRENT TURN: Floor handoff check\n\nYou held the floor from your last turn, but that does NOT mean the new message is for you. The floor is sticky for efficiency, not ownership. Re-evaluate.\n${moderationBody.join('\n')}`
       }
 
       // Inject floor context into the message so agents know who's speaking
