@@ -11,7 +11,6 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   const memoryTools = buildMemoryTools(memory, state)
   const sharedTools = buildSharedWorkspaceTools(process.env.SHARED_WORKSPACE_PATH || '/shared')
   const roomTools = buildRoomTools(room, config)
-  const reasonerTools = buildReasonerTools(config, registry)
   let personaTools = { definitions: [], execute: async () => ({ error: 'unknown tool' }) }
 
   if (config.tools) {
@@ -27,7 +26,7 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   // Modality tools (attention/cognition gear shifting)
   const modalityTools = buildModalityTools(modality)
 
-  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...reasonerTools.definitions, ...personaTools.definitions]
+  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...personaTools.definitions]
 
   async function execute(name, input, options) {
     if (memoryTools.handles(name)) {
@@ -38,9 +37,6 @@ export async function loadTools(personaDir, config, memory, state, room, registr
     }
     if (roomTools.handles(name)) {
       return roomTools.execute(name, input)
-    }
-    if (reasonerTools.handles(name)) {
-      return reasonerTools.execute(name, input, options)
     }
     if (modalityTools.handles(name)) {
       return modalityTools.execute(name, input)
@@ -206,6 +202,7 @@ function buildRoomTools(room, config) {
           parts.push(`Thought: ${input.thought}`)
         }
 
+        let endTurn = false
         if (input.backchannel) {
           const pendingRoom = room._pendingRoom
           if (pendingRoom && pendingRoom !== 'home') {
@@ -216,10 +213,22 @@ function buildRoomTools(room, config) {
           } else {
             room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel, trigger: !!input.trigger, target: input.target || null })
           }
-          parts.push(input.trigger ? 'Backchannel sent (triggered).' : 'Backchannel sent.')
+          if (input.trigger) {
+            // Trigger broadcasts wake other agents. After firing once, this
+            // agent's job in the turn is done — any further internal calls
+            // would just re-wake the same recipients (cascade). Force the
+            // orchestrator loop to end via _endTurn so models that don't
+            // respect the prompt-level "STOP" instruction can't re-fire.
+            parts.push('Backchannel sent (triggered). Turn ended.')
+            endTurn = true
+          } else {
+            parts.push('Backchannel sent.')
+          }
         }
 
-        return { output: parts.join('\n') }
+        const result = { output: parts.join('\n') }
+        if (endTurn) result._endTurn = true
+        return result
       }
       case 'reply_to_message': {
         if (!input.messageId || !input.text) {
@@ -410,69 +419,6 @@ function buildMemoryTools(memory, state) {
     handles: (name) => memoryToolNames.has(name),
     execute,
   }
-}
-
-const REASONER_SYSTEM = 'You are a reasoning assistant. Analyze the given problem carefully and thoroughly. Provide your conclusion.'
-
-function buildReasonerTools(config, registry) {
-  if (!config.reasoner?.length || !registry) {
-    return { definitions: [], handles: () => false, execute: async () => ({ error: 'unknown tool' }) }
-  }
-
-  const definitions = [
-    {
-      name: 'deep_think',
-      description: 'Delegate a problem to a reasoning model for deep analysis. Use when a question requires careful multi-step reasoning, complex analysis, or strategic thinking that benefits from extended deliberation. Pass a self-contained prompt with all necessary context.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          prompt: {
-            type: 'string',
-            description: 'The question or problem to reason about, including any relevant context needed to think it through.',
-          },
-        },
-        required: ['prompt'],
-      },
-    },
-  ]
-
-  async function execute(name, input, options) {
-    const onEvent = options?.onEvent || (() => {})
-    const models = config.reasoner
-    let lastErr
-
-    for (const modelString of models) {
-      const { modelId, provider } = registry.resolve(modelString)
-      try {
-        const result = await provider.streamMessage(
-          {
-            model: modelId,
-            maxTokens: 16384,
-            system: REASONER_SYSTEM,
-            messages: [{ role: 'user', content: input.prompt }],
-            tools: [],
-            serverTools: [],
-            thinkingBudget: config.chat?.thinking_budget || null,
-          },
-          onEvent,
-        )
-
-        const text = result.contentBlocks
-          .filter(b => b.type === 'text')
-          .map(b => b.text)
-          .join('\n')
-
-        return { output: text, _usage: result.usage, _model: modelId }
-      } catch (err) {
-        lastErr = err
-        console.log(`[reasoner] ${modelId} failed: ${err.message}, trying next`)
-      }
-    }
-
-    return { output: `Reasoning failed: ${lastErr?.message || 'all models unavailable'}`, is_error: true }
-  }
-
-  return { definitions, handles: (name) => name === 'deep_think', execute }
 }
 
 function buildModalityTools(modality) {

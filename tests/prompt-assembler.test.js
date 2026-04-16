@@ -224,7 +224,7 @@ describe('assemblePrompt', () => {
     assert.ok(result.includes('internal'))
   })
 
-  it('includes deep_think guidance when reasoner is configured', async () => {
+  it('includes reasoner gear in modality guidance when reasoner is configured', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Test soul.',
       'prompts/system.md': 'System prompt.',
@@ -232,15 +232,17 @@ describe('assemblePrompt', () => {
     const result = await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
-      reasoner: 'claude-opus-4-6',
+      attention: ['claude-haiku-4-5'],
+      cognition: ['claude-sonnet-4-6'],
+      reasoner: ['claude-opus-4-6'],
       memory: { dir: 'memory/', auto_read: [] },
     })
 
-    assert.ok(result.includes('deep_think'))
-    assert.ok(result.includes('reasoning'))
+    assert.ok(result.includes('Reasoner'))
+    assert.ok(result.includes('three gears'))
   })
 
-  it('excludes deep_think guidance when no reasoner configured', async () => {
+  it('excludes reasoner gear from modality guidance when only two tiers configured', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Test soul.',
       'prompts/system.md': 'System prompt.',
@@ -248,13 +250,16 @@ describe('assemblePrompt', () => {
     const result = await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
+      attention: ['claude-haiku-4-5'],
+      cognition: ['claude-sonnet-4-6'],
       memory: { dir: 'memory/', auto_read: [] },
     })
 
-    assert.ok(!result.includes('deep_think'))
+    assert.ok(result.includes('two gears'))
+    assert.ok(!result.includes('Reasoner (deep analysis)'))
   })
 
-  it('includes deep_think guidance in openai-compat mode when reasoner configured', async () => {
+  it('includes reasoner gear in openai-compat mode when configured', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Test soul.',
       'prompts/system.md': 'System prompt.',
@@ -263,14 +268,33 @@ describe('assemblePrompt', () => {
       display_name: 'Test',
       provider: 'openai-compat',
       chat: { prompt: 'prompts/system.md' },
-      reasoner: 'claude-opus-4-6',
+      attention: ['claude-haiku-4-5'],
+      cognition: ['claude-sonnet-4-6'],
+      reasoner: ['claude-opus-4-6'],
       memory: { dir: 'memory/', auto_read: [] },
     })
 
-    // OpenAI returns array of system messages
     assert.ok(Array.isArray(result))
     const allContent = result.map(s => s.content).join('\n')
-    assert.ok(allContent.includes('deep_think'))
+    assert.ok(allContent.includes('Reasoner'))
+    assert.ok(allContent.includes('three gears'))
+  })
+
+  it('does not include any deep_think references (tool removed)', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Test soul.',
+      'prompts/system.md': 'System prompt.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+      attention: ['claude-haiku-4-5'],
+      cognition: ['claude-sonnet-4-6'],
+      reasoner: ['claude-opus-4-6'],
+      memory: { dir: 'memory/', auto_read: [] },
+    })
+
+    assert.ok(!result.includes('deep_think'))
   })
 
   it('includes modality section when cognition and attention configured', async () => {
@@ -294,8 +318,8 @@ describe('assemblePrompt', () => {
     const result = await assemblePrompt(dir, config, [])
     assert.ok(Array.isArray(result))
     const prompt = result.map(s => s.content).join('\n')
-    assert.ok(prompt.includes('Attention Mode'), 'should include attention mode docs')
-    assert.ok(prompt.includes('Cognition Mode'), 'should include cognition mode docs')
+    assert.ok(prompt.includes('Attention (resting state)'), 'should include attention mode docs')
+    assert.ok(prompt.includes('Cognition (full engagement)'), 'should include cognition mode docs')
     assert.ok(prompt.includes('step_up'), 'should mention step_up tool')
     assert.ok(prompt.includes('step_down'), 'should mention step_down tool')
   })
@@ -318,8 +342,8 @@ describe('assemblePrompt', () => {
 
     const result = await assemblePrompt(dir, config, [])
     assert.ok(typeof result === 'string')
-    assert.ok(result.includes('Attention Mode'), 'should include attention mode docs')
-    assert.ok(result.includes('Cognition Mode'), 'should include cognition mode docs')
+    assert.ok(result.includes('Attention (resting state)'), 'should include attention mode docs')
+    assert.ok(result.includes('Cognition (full engagement)'), 'should include cognition mode docs')
     assert.ok(result.includes('step_up'), 'should mention step_up tool')
     assert.ok(result.includes('step_down'), 'should mention step_down tool')
   })

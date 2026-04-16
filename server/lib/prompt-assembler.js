@@ -55,40 +55,60 @@ CRITICAL — Inside voice vs. outside voice: You have two voices. Your OUTSIDE v
 
 CRITICAL — Reactions are TOOL CALLS, not text: If someone asks you to react to a message, or if you want to react to a message, you MUST call the \`react_to_message\` tool with the messageId and emoji. Typing an emoji ("👍", "🎉", etc.) in your text response is NOT a reaction — it is a chat message containing emoji characters. These are different things. When asked "please react", call \`react_to_message\`; do NOT type the emoji in your text response. NEVER send a chat message whose content is just emoji. NEVER both call the tool and also type the emoji. After calling \`react_to_message\`, END YOUR TURN WITH ZERO TEXT OUTPUT — no emoji, no "done", no "reaction added", no acknowledgment of any kind. The reaction itself is the complete response. Do not narrate it, do not confirm it, do not echo it. Silence.`
 
-const REASONER_GUIDANCE = `## Deep Reasoning
-You have access to \`deep_think\` for problems requiring careful multi-step reasoning or complex analysis. Use it when a question would benefit from extended deliberation — don't use it for simple lookups or straightforward responses. Pass a self-contained prompt with all necessary context.`
+function modalityGuidance({ hasReasoner }) {
+  const gears = hasReasoner
+    ? '**Attention**, **Cognition**, and **Reasoner**'
+    : '**Attention** and **Cognition**'
+  const intro = `You operate in ${hasReasoner ? 'three' : 'two'} gears — ${gears} — sharing identical tools, memory, and conversation history. The only difference is the model running. Shift gears via \`step_up\` and \`step_down\`.`
 
-const MODALITY_GUIDANCE = `## Engagement Modality
+  const reasonerBlock = hasReasoner
+    ? `
 
-You operate in two modes — **Attention** and **Cognition** — that share identical tools, memory, and conversation history. The only difference is the model running.
+### Reasoner (deep analysis)
+- The most expensive gear. Reserve it for problems that genuinely need extended, multi-step reasoning: complex planning, subtle synthesis, hard diagnosis, tradeoff analysis you cannot do well in cognition alone
+- Not for lookups, chat, or routine tool chaining — those belong in attention or cognition
+- When the hard thinking is done, \`step_down\` returns you to attention (default) or pass \`target_layer: "cognition"\` to hold your voice without the cost`
+    : ''
 
-### Attention Mode (your resting state)
-- You are monitoring with "half an eye" — watching threads, triaging, handling routine observations
-- Handle simple acknowledgments, background monitoring, tool delegation
-- Do NOT engage substantively with your full voice — keep responses brief and functional
-- If someone needs your real attention, call \`step_up\` to shift to cognition mode
+  const stepUpBlock = hasReasoner
+    ? `
+- Attention → cognition: you are directly addressed, a question needs a substantive answer, the moment calls for your voice
+- Cognition → reasoner: the problem is genuinely hard and would benefit from slower, deeper thought; cheap to wrong-answer without it`
+    : `
+- Attention → cognition: you are directly addressed, a question needs a substantive answer, the moment calls for your voice`
 
-### Cognition Mode (full engagement)
-- This is where your personality, opinions, and nuanced communication shine
-- Speak with your full voice — this is the mode for substantive conversation
-- When engagement winds down, call \`step_down\` to return to attention mode
+  const stepDownBlock = hasReasoner
+    ? `
+- Cognition → attention: the conversation has gone quiet or monitoring is sufficient
+- Reasoner → cognition (partial): you've produced the reasoning, now deliver the response in your normal voice without paying for more reasoner turns
+- Reasoner → attention (default): done, stepping all the way back to rest`
+    : `
+- Cognition → attention: the conversation has gone quiet or monitoring is sufficient`
 
-### When to Step Up (attention → cognition)
-- You are being directly addressed or mentioned by name
-- A question or topic requires a substantive, thoughtful response
-- The situation calls for your personality, opinion, or nuanced communication
-- Your judgment says this moment deserves full engagement
+  return `## Engagement Modality
 
-### When to Step Down (cognition → attention)
-- The conversation has gone quiet — no direct engagement for a while
-- The thread has shifted to other participants
-- Your judgment says monitoring mode is sufficient
-- You've finished a substantive exchange and the topic is resolved
+${intro}
+
+### Attention (resting state)
+- Monitoring with "half an eye" — watching threads, triaging, routine observations
+- Brief acknowledgments, background monitoring, mechanical tool calls
+- Do NOT engage substantively here — keep it short and functional
+- If you need to actually engage, call \`step_up\` to reach cognition
+
+### Cognition (full engagement)
+- Your personality, opinions, and nuanced communication live here
+- The mode for substantive conversation and normal tool-using work
+- When engagement winds down, \`step_down\` returns you to attention${reasonerBlock}
+
+### When to Step Up${stepUpBlock}
+
+### When to Step Down${stepDownBlock}
 
 ### How Gear Shifting Works
-- \`step_up\`: Immediately re-runs this turn with the cognition model. Your current response is discarded and the cognition model handles it fresh.
-- \`step_down\`: Takes effect on the next turn. You finish your current response normally, then the next turn runs in attention mode.
-- You are the same agent in both modes — same memory, same history, same identity. Think of it as adjusting your engagement level, not switching personas.`
+- \`step_up\`: re-runs this turn immediately with the higher-gear model. Your current draft is discarded; the new model handles the turn fresh. One step per turn.
+- \`step_down\`: takes effect on the next turn. You finish the current response normally.${hasReasoner ? ' Pass `target_layer` to jump to a specific lower gear; omit it to drop to attention.' : ''}
+- You are the same agent at every gear — same memory, same history, same identity. Adjust engagement, don't switch personas.`
+}
 
 const SOURCE_TRUST_HIERARCHY = `## Source Trust Hierarchy
 When sources conflict, trust in this order:
@@ -245,11 +265,8 @@ export async function assemblePrompt(personaDir, config, plugins = [], { isClaud
     if (config._approximateThinking) {
       layer1Parts.push(`## Reasoning\nThink step by step before responding. Lay out your reasoning internally before acting. Consider edge cases and potential issues before executing.`)
     }
-    if (config.reasoner?.length) {
-      layer1Parts.push(REASONER_GUIDANCE)
-    }
     if (isModal) {
-      layer1Parts.push(MODALITY_GUIDANCE)
+      layer1Parts.push(modalityGuidance({ hasReasoner: !!(config.reasoner?.length) }))
     }
 
     // Layer 2: Identity — name + soul
@@ -289,10 +306,7 @@ export async function assemblePrompt(personaDir, config, plugins = [], { isClaud
     sections.push(TOOL_DISCIPLINE_HYBRID)
   }
   if (isModal) {
-    sections.push(MODALITY_GUIDANCE)
-  }
-  if (config.reasoner?.length) {
-    sections.push(REASONER_GUIDANCE)
+    sections.push(modalityGuidance({ hasReasoner: !!(config.reasoner?.length) }))
   }
   sections.push(SOURCE_TRUST_HIERARCHY)
   sections.push(CHAT_HISTORY)
