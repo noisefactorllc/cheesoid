@@ -203,16 +203,19 @@ function buildRoomTools(room, config) {
           }
         }
 
-        // Code-level block: one trigger per turn. After the first successful
-        // trigger, subsequent calls are a no-op — models (gemini-2.5-pro in
-        // particular) sometimes loop internal({trigger:true}) several times
-        // in one turn. The first call wakes the recipients; the second+
-        // would just re-wake the same recipients.
-        if (input.trigger && room._triggersFiredThisTurn >= 1) {
-          return {
-            output: 'Already triggered once this turn. Respond with text now.',
-            is_error: true,
-            _endTurn: true,
+        // Code-level block: no repeat-triggering the SAME target in one turn.
+        // Different targets are allowed (moderator may legitimately delegate to
+        // multiple visitors: "Blue, Green — each say ready"). Same-target loops
+        // are blocked — some models (gemini-2.5-pro) retry the identical call.
+        // Broadcast-to-all (no target) counts as its own slot.
+        if (input.trigger) {
+          if (!room._triggerTargetsThisTurn) room._triggerTargetsThisTurn = new Set()
+          const targetKey = input.target || '__broadcast__'
+          if (room._triggerTargetsThisTurn.has(targetKey)) {
+            return {
+              output: `Already triggered ${targetKey === '__broadcast__' ? 'the group' : targetKey} this turn. Do not repeat.`,
+              is_error: true,
+            }
           }
         }
 
@@ -237,11 +240,11 @@ function buildRoomTools(room, config) {
             room.broadcast({ type: 'backchannel', name: room.persona.config.display_name, text: input.backchannel, trigger: !!input.trigger, target: input.target || null })
           }
           if (input.trigger) {
-            // Track that a trigger fired this turn. Subsequent internal
-            // calls with trigger:true are blocked above. But the agent can
-            // still speak its own brief reply in this turn.
-            room._triggersFiredThisTurn = (room._triggersFiredThisTurn || 0) + 1
-            parts.push('Backchannel sent (triggered). Do not trigger again; respond with your own brief text if appropriate, then end the turn.')
+            // Track this target so we don't re-trigger the same agent in one turn.
+            if (!room._triggerTargetsThisTurn) room._triggerTargetsThisTurn = new Set()
+            const targetKey = input.target || '__broadcast__'
+            room._triggerTargetsThisTurn.add(targetKey)
+            parts.push('Backchannel sent (triggered). If you need to trigger a DIFFERENT agent too, call internal again with a different target; otherwise respond with your own brief text or end the turn.')
           } else {
             parts.push('Backchannel sent.')
           }

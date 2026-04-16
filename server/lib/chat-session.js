@@ -832,7 +832,7 @@ export class Room {
 
     this.busy = true
     this._backchannelTrigger = !!options._backchannelTrigger
-    this._triggersFiredThisTurn = 0
+    this._triggerTargetsThisTurn = new Set()
     this.lastActivity = Date.now()
     this._clearIdleTimer()
     if (room === 'home') {
@@ -861,6 +861,7 @@ export class Room {
       // 3. If no floor set, moderator orchestrates
       const myName = this.persona.config.display_name
       const isMultiAgent = room === 'home' && this._moderatorPool.length > 1 && name !== 'system'
+      const isVisitorHuman = name !== myName && name !== 'system' && name !== 'webhook' && name !== 'wakeup'
       let addressed = options._addressed || null
       let floor = this._floor
       let moderator = null
@@ -898,19 +899,20 @@ export class Room {
 
       // Modality: step up when we have the floor or are orchestrating
       const iHaveFloor = floor ? floor.includes(myName) : false
+      // Host-delegation-check: explicit addressing put a visitor on the floor,
+      // but the parser only catches the first name. The host needs to read
+      // the message itself and semantically decide whether ADDITIONAL agents
+      // were also addressed ("Blue and Green, each say ready"). Run the host
+      // turn in attention mode with a delegation-check addendum.
+      const isHostDelegationCheck = isMultiAgent && addressed && floor && !floor.includes(myName) && isVisitorHuman
       if (this.modality?.isModal) {
         if (options._silent) {
           // Silent messages are backchannel triggers — always step up.
           this.modality.stepUp('backchannel trigger')
         } else if (iHaveFloor) {
           this.modality.stepUp('has floor')
-        } else if (moderator) {
-          // Moderator is routing, not engaging. Stay in attention mode —
-          // the cheap model reads the message, decides who it's for, and
-          // either calls internal({trigger}) to delegate or step_up to
-          // engage itself. Stepping up pre-emptively put gemini-pro in
-          // the routing seat, where it ignored tool instructions and
-          // dumped text to chat instead of routing.
+        } else if (moderator || isHostDelegationCheck) {
+          // Routing, not engaging. Stay in attention mode.
           this.modality.stepDown('moderating — triage in attention')
         } else {
           this.modality.stepDown('not on floor')
@@ -929,7 +931,6 @@ export class Room {
       // "Blue, what's..." / "I'd love to hear Green's take" / "can Blue chime
       // in?" — so the moderator LLM is the router.
       let moderatorAddendum = ''
-      const isVisitorHuman = name !== myName && name !== 'system' && name !== 'webhook' && name !== 'wakeup'
       const otherAgents = this._moderatorPool.filter(n => n !== myName).join(', ')
       const moderationBody = [
         ``,
@@ -950,6 +951,22 @@ export class Room {
         moderatorAddendum = `\n\n## CURRENT TURN: You are the moderator\n\nNo one has the floor yet. Route ${name}'s message.\n${moderationBody.join('\n')}`
       } else if (isMultiAgent && floor?.includes(myName) && !addressed && isVisitorHuman) {
         moderatorAddendum = `\n\n## CURRENT TURN: Floor handoff check\n\nYou held the floor from your last turn, but that does NOT mean the new message is for you. The floor is sticky for efficiency, not ownership. Re-evaluate.\n${moderationBody.join('\n')}`
+      } else if (isHostDelegationCheck) {
+        const onFloor = floor.join(', ')
+        const otherVisitors = this._moderatorPool.filter(n => n !== myName && !floor.includes(n)).join(', ')
+        moderatorAddendum = [
+          `\n\n## CURRENT TURN: Host delegation check`,
+          ``,
+          `The addressing parser set floor = [${onFloor}] based on ${name}'s message. ${onFloor} will respond.`,
+          ``,
+          `Your ONLY job this turn: read the full message and decide if ADDITIONAL agents were also addressed (e.g., "Blue AND Green", "Blue, Green — ...", "ask Blue and also Green"). The parser is naive and catches only one name.`,
+          ``,
+          `If additional agents (${otherVisitors || 'none available'}) are implied: call internal({ backchannel: "<brief context>", trigger: true, target: "<exact agent name>" }) — one call per additional target. Different targets are allowed, same target is not.`,
+          ``,
+          `If ONLY ${onFloor} was addressed: output NOTHING. No text, no tool calls. Just end the turn.`,
+          ``,
+          `Do NOT trigger ${onFloor} (already on floor). Do NOT write a chat response — you do not have the floor. Your only legitimate output is additional-target trigger calls.`,
+        ].join('\n')
       }
 
       // Inject floor context into the message so agents know who's speaking
@@ -970,9 +987,12 @@ export class Room {
       // other agent/host has explicitly invited us to speak. That's permission
       // enough to bypass the floor gate; otherwise triggered visitors get stuck
       // silent whenever the floor is still held by whoever addressed them last.
-      if (floor && !floor.includes(myName) && !options._silent) {
+      if (floor && !floor.includes(myName) && !options._silent && !isHostDelegationCheck) {
         console.log(`[${this.persona.config.name}] Not on floor — skipping response`)
         return // finally block handles cleanup
+      }
+      if (isHostDelegationCheck) {
+        console.log(`[${this.persona.config.name}] Host delegation check — floor=${floor.join(',')}, may trigger additional targets`)
       }
       if (moderator && moderator !== myName) {
         // Elected moderator is a visitor — they can't self-activate, so trigger
@@ -1048,6 +1068,11 @@ export class Room {
           : [],
         registry: this.registry,
         modality: hasModality ? this.modality : null,
+        // Host-delegation-check turns are "trigger-only": the host should
+        // either fire internal(target) calls for additional visitors or
+        // produce no text. Suppress the empty-response nudge so silence
+        // (when no additional agents are implied) is the correct outcome.
+        skipEmptyNudge: isHostDelegationCheck,
       }
 
       let assistantText = ''
@@ -1062,6 +1087,16 @@ export class Room {
       let rawTextBuffer = ''
       let cleanTextSent = ''
       const onEvent = (event) => {
+        // Delegation-check turn: the host MUST NOT speak — only the visitor
+        // on the floor should. Drop text output entirely (the model ignores
+        // "output NOTHING" and narrates "I produce no output"). Keep tool
+        // calls so the host can still trigger additional visitors.
+        if (isHostDelegationCheck && event.type === 'text_delta') {
+          return
+        }
+        if (isHostDelegationCheck && event.type === 'assistant_text_turn') {
+          return
+        }
         if (event.type === 'text_delta') {
           assistantText += event.text
           rawTextBuffer += event.text

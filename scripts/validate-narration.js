@@ -53,7 +53,7 @@ function makeProviders() {
     })
     providers.push(['blueocean', 'UltraFast/gpt-oss-120b', p])
     providers.push(['blueocean', 'UltraFast/zai-glm-4.7', p])
-    providers.push(['blueocean', 'SecuredTEE/deepseek-r1-0528', p])
+    providers.push(['blueocean', 'SecuredTEE/gemma4-31b', p])
   }
 
   return providers

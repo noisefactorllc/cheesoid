@@ -1013,7 +1013,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   // Use config.provider (not the captured `orchestrator`) because step_up may have changed it.
   // Skip the nudge if a tool explicitly ended the turn (e.g. internal trigger
   // delegated to another agent — the moderator should NOT then narrate).
-  if (!endTurnByTool) {
+  if (!endTurnByTool && !config.skipEmptyNudge) {
     await _nudgeIfEmpty(messages, config.provider, config, systemPrompt, totalUsage, onEvent)
   }
 

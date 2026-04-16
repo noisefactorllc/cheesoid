@@ -219,9 +219,46 @@ describe('Multi-agent room', () => {
     room.destroy() // clean up idle timers so the test runner can exit
   })
 
-  it('non-silent message still honors the floor-skip when not on the floor', async () => {
-    // Control: ordinary (non-backchannel) messages must still be gated by the
-    // floor. Only _silent trigger messages bypass.
+  it('host runs delegation-check when visitor was explicitly addressed (multi-target support)', async () => {
+    // When explicit addressing sets floor=[Visitor] but the message implies
+    // more targets than the parser caught ("Alpha and Beta, each say ready"),
+    // the host must still run a delegation-check turn so its LLM can trigger
+    // additional visitors. Skip-gate must NOT fire here.
+    const dir = await createTestPersona('bc-deleg', 'BCDeleg')
+    const persona = await loadPersona(dir)
+    const room = new Room(persona)
+
+    room._moderatorPool = ['BCDeleg', 'Alpha', 'Beta']
+    room._floor = ['Alpha']
+    room.systemPrompt = 'stub'
+    room.initialize = async () => {}
+
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+
+    let resolveCalled = false
+    room.registry = {
+      resolve: () => { resolveCalled = true; throw new Error('PAST_SKIP') },
+    }
+
+    await room._processMessage('home', 'someHuman', 'Alpha and Beta, say ready', { _addressed: ['Alpha'] })
+
+    console.log = origLog
+    assert.ok(!logs.some(l => l.includes('Not on floor — skipping response')),
+      'host should NOT skip when visitor was addressed — delegation check runs')
+    assert.ok(logs.some(l => l.includes('Host delegation check')),
+      'host delegation-check log should fire')
+    assert.ok(resolveCalled,
+      'execution should reach model resolution (host runs its LLM turn)')
+    room.destroy()
+  })
+
+  it('system message off-floor still honors the skip-gate', async () => {
+    // Control: skip-gate still fires when floor is held by another agent and
+    // the caller isn't eligible for the host-delegation-check (system/webhook/
+    // wakeup). name='system' bypasses the multi-agent floor-add-host logic,
+    // so floor stays without the host, and the skip-gate is what stops us.
     const dir = await createTestPersona('bc-floor-skip', 'BCFloorSkip')
     const persona = await loadPersona(dir)
     const room = new Room(persona)
@@ -240,16 +277,14 @@ describe('Multi-agent room', () => {
       resolve: () => { resolveCalled = true; throw new Error('PAST_SKIP') },
     }
 
-    // Explicit @-addressing of another agent re-sets floor and, since this
-    // agent isn't addressed, the skip-gate fires.
-    await room._processMessage('home', 'someHuman', '@OtherAgent question for you', {})
+    await room._processMessage('home', 'system', 'not from a human', {})
 
     console.log = origLog
     assert.ok(logs.some(l => l.includes('Not on floor — skipping response')),
-      'non-silent message when off the floor should log the skip')
+      'system off-floor traffic should log the skip')
     assert.ok(!resolveCalled,
-      'non-silent off-floor call must not reach model resolution')
-    room.destroy() // clean up idle timers
+      'skipped call must not reach model resolution')
+    room.destroy()
   })
 
   it('non-triggering backchannel only appends context', async () => {
