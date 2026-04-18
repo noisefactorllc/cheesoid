@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 import { assemblePrompt, currentTimestamp } from './prompt-assembler.js'
+import { LaneRouter, splitChatAndThought } from './lane-router.js'
 
 // Short 8-char hex message IDs — full UUIDs are too long for LLMs to reliably
 // echo back when calling reply_to_message or react_to_message. 8 hex chars
@@ -39,48 +40,18 @@ function replaceTimestamp(prompt) {
 }
 
 /**
- * Strip narration markers from chat text so private reasoning never leaks to
- * the public chat stream. The per-turn rescue in agent.js catches balanced
- * tags in a single orchestrator turn, but the model sometimes splits the
- * narration across turns (opening tag on one turn, closing on another), and
- * per-turn assistant-text flush writes each half to chat separately. This
- * sanitizer runs at the final write boundary, handling:
- *   - Balanced pairs: <internal>...</internal>, <thinking>...</thinking>, etc.
- *   - Unbalanced open: <internal>... (truncated) — strips from tag to end.
- *   - Orphan close:    </internal> without open — strips the tag.
- *   - JSON-shaped reasoning blobs at the start: {"thought": ...}, {"backchannel": ...}
- *   - Code fences containing tool pseudo-calls: ```tool_code\n print(...) \n```
+ * Return the chat-lane portion of model output. Thought-lane content is still
+ * preserved (via splitChatAndThought) and should be handled by the caller when
+ * both lanes matter; this helper exists for call sites that only need the
+ * chat text (e.g. the visitor-relay path, which forwards chat to a remote
+ * agent and keeps thought local).
+ *
+ * Tag handling lives in `lane-router.js`. Do not re-implement narration
+ * stripping here — the bans on hiding/stripping/dropping apply.
  */
 export function stripChatNarration(text) {
   if (!text) return text
-  let cleaned = text
-  const narrationTags = ['internal', 'thinking', 'execute_protocol', 'tool_code', 'parameter', 'inner_voice', 'reasoning']
-  // Balanced pairs (greedy enough for nested content, stripped first)
-  for (const tag of narrationTags) {
-    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>`, 'gi'), '')
-  }
-  // Unbalanced open tags (model was truncated / split across turns)
-  for (const tag of narrationTags) {
-    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*$`, 'i'), '')
-  }
-  // Orphan close tags
-  for (const tag of narrationTags) {
-    cleaned = cleaned.replace(new RegExp(`</${tag}>`, 'gi'), '')
-  }
-  // Strip leading JSON reasoning blobs, iteratively — models sometimes emit
-  // several `{"thought":"..."}` objects in sequence before the visible reply.
-  // Each pass strips one blob at the start; we loop until no more are matched.
-  const jsonBlobRe = /^\s*\{\s*"(?:thought|backchannel|reasoning|inner_voice|analysis|inside_voice)"\s*:[\s\S]*?\}\s*(?=(?:\{\s*"|[^{]|$))/
-  for (let i = 0; i < 20; i++) {
-    const before = cleaned
-    cleaned = cleaned.replace(jsonBlobRe, '')
-    if (cleaned === before) break
-  }
-  // Triple-backtick fenced tool_code blocks
-  cleaned = cleaned.replace(/```(?:tool_code|python)?\s*(?:print|def |import )[\s\S]*?```/g, '')
-  // Pseudo-function-call syntax: call:toolname({...}) or toolname({...})
-  cleaned = cleaned.replace(/(?:call:)?\w+\(\s*\{[\s\S]*?\}\s*\)/g, '')
-  return cleaned.trim()
+  return splitChatAndThought(text).chat.trim()
 }
 
 const IDLE_THOUGHT_INTERVAL = 60 * 60 * 1000 // 60 minutes, doubles each time
@@ -413,37 +384,51 @@ export class Room {
     if (!text || !text.trim()) return
     if (this._pendingRoom !== 'home') return
 
-    // Extract narrated reasoning before stripping. If the model wrapped
-    // thoughts in <thinking>, <execute_protocol>, <internal>, etc. rather
-    // than using function calling, the thought content should be preserved
-    // as an idle_thought (visible in collapsed UI) even though it's stripped
-    // from the chat broadcast. Without this, narration-wrapped reasoning
-    // vanishes entirely when the rescue doesn't fire (e.g. <execute_protocol>
-    // or bare <thinking> which aren't tool names).
-    const narrationRe = /<(?:thinking|execute_protocol|internal|inner_voice|reasoning)\b[^>]*>([\s\S]*?)<\/(?:thinking|execute_protocol|internal|inner_voice|reasoning)>/gi
-    let match
-    const narrationParts = []
-    while ((match = narrationRe.exec(text)) !== null) {
-      const inner = match[1].replace(/<\w+[^>]*>[\s\S]*?<\/\w+>/g, '').trim()
-      if (inner) narrationParts.push(inner)
-    }
-    if (narrationParts.length > 0) {
-      const agentName = this.persona.config.display_name
-      const thoughtText = narrationParts.join('\n\n')
+    // Split the turn into chat and thought lanes. Both lanes are persisted
+    // independently; neither is dropped, none of the raw narration tags
+    // survive into either lane's content, and the retry/discard path is
+    // gone (see agent.js — no more "all-narration response" correction).
+    //
+    // Streaming broadcasts (text_delta + thought_delta) already went out live
+    // from the LaneRouter in the runHybridAgent onEvent handler. This method
+    // is responsible only for persisting the turn to history and issuing the
+    // final assistant_message_id event that the UI needs to attach a toolbar
+    // to the chat bubble.
+    const { chat, thought } = splitChatAndThought(text)
+    const agentName = this.persona.config.display_name
+    const turnId = shortMsgId()
+
+    if (thought && thought.trim()) {
       const thoughtId = shortMsgId()
-      const thoughtEntry = { type: 'idle_thought', text: thoughtText, name: agentName, id: thoughtId }
+      const thoughtEntry = {
+        type: 'assistant_thought',
+        text: thought.trim(),
+        name: agentName,
+        id: thoughtId,
+        turnId,
+        room: this.roomName,
+      }
       if (model) thoughtEntry.model = model
-      this.broadcast(thoughtEntry)
       this.recordHistory(thoughtEntry)
+      // Thought was already streamed live via thought_delta; no re-broadcast
+      // of the full text here. The entry id + turnId are what scrollback and
+      // reaction association need.
+      this.broadcast({ type: 'assistant_thought_id', id: thoughtId, turnId })
     }
 
-    const cleaned = stripChatNarration(text)
-    if (!cleaned) return
-    const assistantMsgId = shortMsgId()
-    const histEntry = { type: 'assistant_message', text: cleaned, room: this.roomName, id: assistantMsgId }
-    if (model) histEntry.model = model
-    this.recordHistory(histEntry)
-    this.broadcast({ type: 'assistant_message_id', id: assistantMsgId })
+    if (chat && chat.trim()) {
+      const assistantMsgId = shortMsgId()
+      const histEntry = {
+        type: 'assistant_message',
+        text: chat.trim(),
+        room: this.roomName,
+        id: assistantMsgId,
+        turnId,
+      }
+      if (model) histEntry.model = model
+      this.recordHistory(histEntry)
+      this.broadcast({ type: 'assistant_message_id', id: assistantMsgId, turnId })
+    }
   }
 
   /**
@@ -1143,13 +1128,26 @@ export class Room {
       let assistantModel = null
       // Track actual responding model — updated on fallback
       let activeModel = orchestratorModel
-      // Streaming-narration filter: accumulate raw text_delta chunks, strip
-      // narration from the running buffer, and only broadcast the delta of
-      // CLEAN text. Prevents live-streamed `{"thought":...}` / `<internal>...`
-      // from ever reaching the client, while still preserving incremental
-      // rendering of the visible chat portion.
-      let rawTextBuffer = ''
-      let cleanTextSent = ''
+      // Dual-lane streaming: the LaneRouter accepts raw text_delta chunks and
+      // emits ordered segments tagged as either chat or thought. Chat
+      // segments are broadcast as text_delta; thought segments as
+      // thought_delta. Both lanes reach the client live. Neither is dropped.
+      // Unresolved tag boundaries are held inside the router until the
+      // closing `>` arrives — no safe-prefix math needed here.
+      let laneRouter = new LaneRouter()
+      const emitLaneSegments = (segments, baseEvent) => {
+        for (const seg of segments) {
+          if (!seg.text) continue
+          const evtType = seg.lane === 'thought' ? 'thought_delta' : 'text_delta'
+          const out = { ...baseEvent, type: evtType, text: seg.text }
+          if (this._pendingRoom === 'home') {
+            this.broadcast(out)
+          } else {
+            const client = this.roomClients.get(this._pendingRoom)
+            if (client) client.sendEvent(out, this._pendingRoomChannel)
+          }
+        }
+      }
       const onEvent = (event) => {
         // Delegation-check turn: the host MUST NOT speak — only the visitor
         // on the floor should. Drop text output entirely (the model ignores
@@ -1163,36 +1161,9 @@ export class Room {
         }
         if (event.type === 'text_delta') {
           assistantText += event.text
-          rawTextBuffer += event.text
-          // Hold back any trailing incomplete tag / JSON blob. If the tail of
-          // rawTextBuffer contains `<` without a matching `>`, or an opening
-          // `{` without a matching `}`, we can't safely decide yet whether it
-          // will resolve to narration — so only consider the "safe" prefix.
-          let safeEnd = rawTextBuffer.length
-          const lastOpen = rawTextBuffer.lastIndexOf('<')
-          if (lastOpen >= 0 && !rawTextBuffer.slice(lastOpen).includes('>')) {
-            safeEnd = Math.min(safeEnd, lastOpen)
-          }
-          const lastBrace = rawTextBuffer.lastIndexOf('{')
-          if (lastBrace >= 0 && !rawTextBuffer.slice(lastBrace).includes('}')) {
-            safeEnd = Math.min(safeEnd, lastBrace)
-          }
-          const safeBuffer = rawTextBuffer.slice(0, safeEnd)
-          const currentClean = stripChatNarration(safeBuffer)
-          // Only broadcast when the clean text is monotonically extending the
-          // previously-sent clean prefix. If it shrinks (narration was detected
-          // retroactively) we can't retract, so we hold — the end-of-turn
-          // assistant_message is the canonical record.
-          if (
-            this._pendingRoom === 'home'
-            && currentClean.length > cleanTextSent.length
-            && currentClean.startsWith(cleanTextSent)
-          ) {
-            const newChunk = currentClean.slice(cleanTextSent.length)
-            cleanTextSent = currentClean
-            this.broadcast({ ...event, text: newChunk })
-          }
-          return // suppress raw text_delta broadcast
+          const segs = laneRouter.push(event.text)
+          emitLaneSegments(segs, event)
+          return
         }
         if (event.type === 'model_fallback') {
           activeModel = event.to
@@ -1201,16 +1172,15 @@ export class Room {
           assistantModel = event.model
         }
         // Per-turn text flush: the agent loop emits assistant_text_turn after each
-        // orchestrator turn that produced text, BEFORE tool execution. This gives
-        // us a commit point independent of downstream tool outcomes — a stalled
-        // deep_think can no longer swallow already-spoken text.
+        // orchestrator turn that produced text, BEFORE tool execution. Flush any
+        // content the router is still holding so the stream ends cleanly and
+        // content on either lane makes it to the client.
         if (event.type === 'assistant_text_turn') {
+          const tailSegs = laneRouter.flush()
+          emitLaneSegments(tailSegs, { model: event.model || activeModel })
           this._handleAssistantTextTurn(event.text, event.model || activeModel)
-          // reset per-turn streaming buffers so the next orchestrator turn
-          // starts fresh — otherwise cleanTextSent carries over and the diff
-          // math breaks on the next turn's text
-          rawTextBuffer = ''
-          cleanTextSent = ''
+          // reset per-turn streaming state for the next orchestrator turn
+          laneRouter = new LaneRouter()
         }
         // Tag tool events with the model that actually initiated them
         // (executor events already have model from the hybrid loop wrapper)
@@ -1510,16 +1480,16 @@ export class Room {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
       if (idleText) {
-        // Strip narration artifacts (<internal>...</internal>, XML-parameter
-        // wrappers, JSON thought blobs). Models narrate tool calls during
-        // idle, and the whole blob used to end up as a private idle_thought
-        // with the chat-intent prose trapped inside. We want:
-        //  - narration stripped
-        //  - whatever clean prose remains recorded as the idle_thought
-        const cleaned = stripChatNarration(idleText)
-        if (cleaned) {
+        // Idle turns are thought-lane by design. Split the text to keep raw
+        // narration tags out of the output, but preserve *all* content from
+        // both lanes — no dropping, no hiding. Chat-outside-tags text during
+        // an idle turn (model violating the idle prompt) still surfaces
+        // here as part of the idle thought rather than vanishing.
+        const { chat, thought } = splitChatAndThought(idleText)
+        const combined = [thought, chat].map(s => s.trim()).filter(Boolean).join('\n\n')
+        if (combined) {
           const idleId = shortMsgId()
-          const histEntry = { type: 'idle_thought', text: cleaned, name: agentName, id: idleId }
+          const histEntry = { type: 'idle_thought', text: combined, name: agentName, id: idleId }
           if (idleModel) histEntry.model = idleModel
           this.broadcast(histEntry)
           this.recordHistory(histEntry)

@@ -1,36 +1,6 @@
 import { CircuitOpenError } from './circuit-breaker.js'
 
 /**
- * Strip narration wrappers (<internal>, <thinking>, <execute_protocol>,
- * <tool_code>, <parameter>, etc.) and return the remaining visible prose.
- * Mirrors stripChatNarration in chat-session.js; duplicated here to avoid
- * a circular import (chat-session imports agent).
- */
-const NARRATION_TAGS = ['internal', 'thinking', 'execute_protocol', 'tool_code', 'parameter', 'inner_voice', 'reasoning']
-function _stripNarrationForCheck(text) {
-  let cleaned = text
-  for (const tag of NARRATION_TAGS) {
-    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?</${tag}>`, 'gi'), '')
-  }
-  for (const tag of NARRATION_TAGS) {
-    cleaned = cleaned.replace(new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*$`, 'i'), '')
-  }
-  for (const tag of NARRATION_TAGS) {
-    cleaned = cleaned.replace(new RegExp(`</${tag}>`, 'gi'), '')
-  }
-  // Pseudo-function-call syntax: call:toolname({...}) or toolname({...})
-  cleaned = cleaned.replace(/(?:call:)?\w+\(\s*\{[\s\S]*?\}\s*\)/g, '')
-  // Leading JSON reasoning blobs
-  const jsonBlobRe = /^\s*\{\s*"(?:thought|backchannel|reasoning|inner_voice|analysis|inside_voice)"\s*:[\s\S]*?\}\s*(?=(?:\{\s*"|[^{]|$))/
-  for (let i = 0; i < 20; i++) {
-    const before = cleaned
-    cleaned = cleaned.replace(jsonBlobRe, '')
-    if (cleaned === before) break
-  }
-  return cleaned.trim()
-}
-
-/**
  * Heuristic intent classifier — determines tool vs text without an API call.
  * Returns 'required', 'none', or 'uncertain' (needs LLM classification).
  */
@@ -196,10 +166,8 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   let rescueCount = 0
   let totalToolTurns = 0
   let rescueFailed = false
-  let narrationCorrectionFired = false
 
   while (iterations < maxTurns) {
-    let needsNarrationCorrection = false
     // Intent routing for providers that support it (open models).
     let toolChoice = undefined
     if (provider.supportsIntentRouting && tools.definitions.length > 0) {
@@ -318,37 +286,9 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     const cleanedContent = assistantContent.filter(b => b.type !== 'thinking')
     messages.push({ role: 'assistant', content: cleanedContent })
 
-    // Narration-correction trigger: if this was a chat-response turn and the
-    // model produced text blocks that contain ONLY narration wrappers
-    // (<internal>, <execute_protocol>, <thinking>, <tool_code>, etc.) with
-    // nothing visible after stripping, there's no chat reply. The user would
-    // see silence. Inject a correction and force one retry.
-    //
-    // Skip when: idle turn (journaling is fine), already corrected once,
-    // a tool was rescued (coordination was the point), or any clean prose
-    // remains (model produced real chat alongside narration).
-    if (!config.isIdle && !narrationCorrectionFired && stopReason !== 'tool_use') {
-      const allText = cleanedContent
-        .filter(b => b.type === 'text' && b.text)
-        .map(b => b.text)
-        .join('\n')
-      if (allText && !_stripNarrationForCheck(allText)) {
-        needsNarrationCorrection = true
-        console.log(`[intent-router] all-narration response — will request retry with plain chat text`)
-      }
-    }
-
-    if (needsNarrationCorrection && !narrationCorrectionFired) {
-      narrationCorrectionFired = true
-      messages.push({
-        role: 'user',
-        content: '[system: Your previous response was private reasoning wrapped in <internal>/<parameter> XML. That is not a chat reply — the user cannot see private reasoning. Respond now with a plain chat message that directly addresses the user. Do not wrap your reply in <internal>, <parameter>, <thinking>, <execute_protocol>, or any other tag. Write the reply as normal chat text.]',
-      })
-      iterations++
-      continue
-    }
-
-    // If no tool use, we're done
+    // If no tool use, we're done. Narration content in the turn is routed
+    // to the thought lane downstream (chat-session.js splitChatAndThought);
+    // nothing is dropped, nothing is retried. Both lanes render to the user.
     if (stopReason !== 'tool_use') {
       consecutiveToolCalls = 0
       break
@@ -689,7 +629,6 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   let rescueCount = 0
   let totalToolTurns = 0
   let rescueFailed = false
-  let narrationCorrectionFired = false
   let stepUpUsed = false // one step_up re-run per agent call
   let endTurnByTool = false // a tool requested hard-stop (e.g. internal trigger)
   let lastRespondedModel = null // actual model that responded (may differ from config.model after fallback)
@@ -697,7 +636,6 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   const metrics = { models: {}, totalLatencyMs: 0, fallbackCount: 0, duplicateToolCalls: 0, startTime: Date.now() }
 
   while (iterations < maxTurns) {
-    let needsNarrationCorrection = false
     // Intent routing — applies when orchestrator is openai-compat
     let toolChoice = undefined
     if (orchestrator.supportsIntentRouting && tools.definitions.length > 0) {
@@ -836,32 +774,9 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       onEvent({ type: 'assistant_text_turn', text: turnText, model: actualModel })
     }
 
-    // Narration-correction trigger: if this was a chat-response turn and the
-    // model produced text blocks that contain ONLY narration wrappers
-    // (<internal>, <execute_protocol>, <thinking>, <tool_code>, etc.) with
-    // nothing visible after stripping, there's no chat reply. Inject a
-    // correction and force one retry.
-    //
-    // Skip when: idle turn (journaling is fine), already corrected once,
-    // a tool was rescued (coordination was the point), or clean prose remains.
-    if (!config.isIdle && !narrationCorrectionFired && stopReason !== 'tool_use') {
-      if (turnText && !_stripNarrationForCheck(turnText)) {
-        needsNarrationCorrection = true
-        console.log(`[hybrid] all-narration response — will request retry with plain chat text`)
-      }
-    }
-
-    if (needsNarrationCorrection && !narrationCorrectionFired) {
-      narrationCorrectionFired = true
-      messages.push({
-        role: 'user',
-        content: '[system: Your previous response was private reasoning wrapped in <internal>/<parameter> XML. That is not a chat reply — the user cannot see private reasoning. Respond now with a plain chat message that directly addresses the user. Do not wrap your reply in <internal>, <parameter>, <thinking>, <execute_protocol>, or any other tag. Write the reply as normal chat text.]',
-      })
-      iterations++
-      continue
-    }
-
-    // No tool use — orchestrator is done
+    // No tool use — orchestrator is done. Narration wrappers in the turn
+    // text are split into chat and thought lanes downstream
+    // (chat-session.js splitChatAndThought); nothing is dropped or retried.
     if (stopReason !== 'tool_use') {
       consecutiveToolCalls = 0
       break

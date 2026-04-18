@@ -16,6 +16,8 @@ let myName = localStorage.getItem('cheesoid-name')
 let evtSource = null
 let assistantEl = null
 let assistantBuffer = ''
+let assistantThoughtEl = null       // per-turn thought-lane block attached to assistantEl
+let assistantThoughtBuffer = ''
 const idleStreams = new Map() // agentName → { el, buffer }
 let lastSender = null
 let personaLabel = 'Cheesoid'
@@ -277,6 +279,8 @@ function connectSSE() {
   viewCache.clear()
   assistantEl = null
   assistantBuffer = ''
+  assistantThoughtEl = null
+  assistantThoughtBuffer = ''
   thinkingEl = null
   visitorStreams.clear()
   idleStreams.clear()
@@ -371,11 +375,32 @@ function handleEvent(e) {
           const el = appendMessage('user', msg.text, msg.name, msg.timestamp, false, msg.model, msg.id)
           if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
         } else if (msg.type === 'assistant_message') {
-          if (msg.name) {
+          // If a paired thought block already exists for this turn (thought is
+          // recorded first server-side), fill the existing bubble's chat body
+          // rather than creating a new message — keeps thought and chat in one
+          // grouped render per turn.
+          const existing = msg.turnId ? document.querySelector(`[data-turn-id="${msg.turnId}"]`) : null
+          if (existing && existing.classList.contains('message')) {
+            if (msg.id) existing.dataset.messageId = msg.id
+            const body = existing.querySelector(':scope > .message-body')
+            if (body) {
+              let content = ''
+              if (msg.tools && msg.tools.length > 0) {
+                content += `<div class="visitor-tools-summary">used: ${msg.tools.join(', ')}</div>`
+              }
+              content += renderMarkdown(msg.text)
+              body.innerHTML = content
+            }
+            if (msg.id && !existing.querySelector('.message-toolbar')) {
+              existing.appendChild(createToolbar(msg.id))
+            }
+            if (msg.replyTo) renderReplyHeader(existing, msg.replyTo)
+          } else if (msg.name) {
             // Visiting agent message with optional tool summary
             const el = appendMessage('assistant', '', msg.name, msg.timestamp, true, msg.model, msg.id)
             el.classList.add('visitor-message')
             el.style.borderLeftColor = nameColor(msg.name)
+            if (msg.turnId) el.dataset.turnId = msg.turnId
             const body = el.querySelector('.message-body')
             if (body) {
               let content = ''
@@ -388,9 +413,34 @@ function handleEvent(e) {
             if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
           } else {
             const el = appendMessage('assistant', '', null, msg.timestamp, false, msg.model, msg.id)
+            if (msg.turnId) el.dataset.turnId = msg.turnId
             const body = el.querySelector('.message-body')
             if (body) body.innerHTML = renderMarkdown(msg.text)
             if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
+          }
+        } else if (msg.type === 'assistant_thought') {
+          // Thought-lane history entry. If it's paired with an assistant_message
+          // (same turnId, rendered earlier in scrollback because thought is
+          // recorded first), attach to that message. Otherwise render as a
+          // standalone thought block so it never hides.
+          const sibling = msg.turnId ? document.querySelector(`[data-turn-id="${msg.turnId}"]`) : null
+          if (sibling) {
+            const block = ensureThoughtBlock(sibling)
+            const body = block.querySelector('.assistant-thought-body')
+            if (body) body.innerHTML = renderMarkdown(msg.text)
+            if (msg.id) block.dataset.thoughtId = msg.id
+            if (msg.turnId) block.dataset.turnId = msg.turnId
+          } else {
+            const el = appendMessage('assistant', '', msg.name, msg.timestamp, !!msg.name, msg.model)
+            if (msg.name) el.classList.add('visitor-message')
+            const block = ensureThoughtBlock(el)
+            const body = block.querySelector('.assistant-thought-body')
+            if (body) body.innerHTML = renderMarkdown(msg.text)
+            if (msg.id) block.dataset.thoughtId = msg.id
+            if (msg.turnId) {
+              block.dataset.turnId = msg.turnId
+              el.dataset.turnId = msg.turnId
+            }
           }
         } else if (msg.type === 'idle_thought' || msg.type === 'system') {
           const el = document.createElement('div')
@@ -542,10 +592,18 @@ function handleEvent(e) {
     case 'assistant_message_id':
       if (assistantEl) {
         assistantEl.dataset.messageId = event.id
+        if (event.turnId) assistantEl.dataset.turnId = event.turnId
         // Only add toolbar if not already present (guard against SSE reconnect double-render)
         if (!assistantEl.querySelector('.message-toolbar')) {
           assistantEl.appendChild(createToolbar(event.id))
         }
+      }
+      break
+
+    case 'assistant_thought_id':
+      if (assistantThoughtEl) {
+        assistantThoughtEl.dataset.thoughtId = event.id
+        if (event.turnId) assistantThoughtEl.dataset.turnId = event.turnId
       }
       break
 
@@ -560,7 +618,7 @@ function handleEvent(e) {
           const el = appendMessage('assistant', '', agentName, null, true)
           el.classList.add('visitor-message')
           el.style.borderLeftColor = nameColor(agentName)
-          visitorStreams.set(agentName, { element: el, buffer: '', thinkingEl: null })
+          visitorStreams.set(agentName, { element: el, buffer: '', thinkingEl: null, thoughtEl: null, thoughtBuffer: '' })
         }
         const vs = visitorStreams.get(agentName)
         if (vs.thinkingEl) { vs.thinkingEl.remove(); vs.thinkingEl = null }
@@ -581,6 +639,45 @@ function handleEvent(e) {
         assistantBuffer += event.text
         const body = assistantEl.querySelector('.message-body')
         if (body) body.innerHTML = renderMarkdown(assistantBuffer)
+        scrollToBottom()
+      }
+      break
+
+    case 'thought_delta':
+      // Thought lane — separate visible block above the chat body. Never hidden,
+      // never stripped, never retry-discarded. Part of compliance with bans on
+      // hiding thought / dropping messages / raw tags in chat.
+      if (event.visiting) {
+        const agentName = event.agentName
+        if (!visitorStreams.has(agentName)) {
+          const el = appendMessage('assistant', '', agentName, null, true)
+          el.classList.add('visitor-message')
+          el.style.borderLeftColor = nameColor(agentName)
+          visitorStreams.set(agentName, { element: el, buffer: '', thinkingEl: null, thoughtEl: null, thoughtBuffer: '' })
+        }
+        const vs = visitorStreams.get(agentName)
+        if (vs.thinkingEl) { vs.thinkingEl.remove(); vs.thinkingEl = null }
+        if (!vs.thoughtEl) {
+          vs.thoughtEl = ensureThoughtBlock(vs.element)
+          vs.thoughtBuffer = ''
+        }
+        vs.thoughtBuffer += event.text
+        const tBody = vs.thoughtEl.querySelector('.assistant-thought-body')
+        if (tBody) tBody.innerHTML = renderMarkdown(vs.thoughtBuffer)
+        scrollToBottom()
+      } else {
+        if (!assistantEl) {
+          assistantEl = appendMessage('assistant', '')
+          assistantBuffer = ''
+        }
+        if (thinkingEl) { thinkingEl.remove(); thinkingEl = null }
+        if (!assistantThoughtEl) {
+          assistantThoughtEl = ensureThoughtBlock(assistantEl)
+          assistantThoughtBuffer = ''
+        }
+        assistantThoughtBuffer += event.text
+        const tBody = assistantThoughtEl.querySelector('.assistant-thought-body')
+        if (tBody) tBody.innerHTML = renderMarkdown(assistantThoughtBuffer)
         scrollToBottom()
       }
       break
@@ -704,35 +801,27 @@ function handleEvent(e) {
         // Collapse tool details now that streaming is done
         const toolDetails = assistantEl.querySelector('details.tool-details')
         if (toolDetails) toolDetails.open = false
-        // Extract thought tags and render as idle thoughts
-        if (assistantBuffer.includes('<thought>')) {
-          const thoughts = []
-          assistantBuffer = assistantBuffer.replace(/<thought>([\s\S]*?)<\/thought>/g, (_, content) => {
-            thoughts.push(content.trim())
-            return ''
-          })
-          for (const thought of thoughts) {
-            const el = document.createElement('div')
-            el.className = 'idle-thought'
-            const metaHtml = `<div class="inline-meta"><span class="message-time">${formatTime(Date.now())}</span>${currentModel ? `<span class="message-model">${escapeHtml(currentModel)}</span>` : ''}</div>`
-            el.innerHTML = metaHtml + renderMarkdown(thought)
-            messages.appendChild(el)
-          }
-        }
-        // Strip backchannel tags from visible output
-        if (assistantBuffer.includes('<backchannel>')) {
-          assistantBuffer = assistantBuffer.replace(/<backchannel>[\s\S]*?<\/backchannel>/g, '')
-        }
+        // The server is now responsible for routing narration-tagged content
+        // to the thought lane (thought_delta) and the chat lane (text_delta).
+        // The frontend only renders what each lane broadcasts. No tag
+        // stripping here — that would violate the ban on hiding text.
+        // <backchannel> is an agent-coord wire channel handled server-side
+        // (case 'backchannel' event below); no client-side stripping needed.
         assistantBuffer = assistantBuffer.trim()
         const body = assistantEl.querySelector('.message-body')
         if (body) body.innerHTML = renderMarkdown(assistantBuffer)
-        // Remove empty ghost elements (backchannel-only responses, no tools either)
-        if (!assistantBuffer.trim() && !assistantEl.querySelector('.tool-call')) {
+        // Remove the message if it ended up with neither chat body nor thought
+        // nor tool chips — purely empty turn, nothing worth showing.
+        const hasThought = assistantEl.querySelector(':scope > .assistant-thought')
+        const hasTools = assistantEl.querySelector('.tool-call')
+        if (!assistantBuffer && !hasThought && !hasTools) {
           assistantEl.remove()
         }
       }
       assistantEl = null
       assistantBuffer = ''
+      assistantThoughtEl = null
+      assistantThoughtBuffer = ''
       refreshPresence()
       break
 
@@ -1171,6 +1260,32 @@ function createToolbar(msgId) {
   toolbar.appendChild(replyBtn)
   toolbar.appendChild(reactBtn)
   return toolbar
+}
+
+// Thought-lane block attached above the chat body inside an assistant message.
+// Renders visibly (styled as reasoning, not hidden) as the first child of the
+// message element so thought appears above chat per the dual-lane policy.
+// Bans enforced: not showing thought, stripping raw tags, hiding text.
+function ensureThoughtBlock(parentEl) {
+  let block = parentEl.querySelector(':scope > .assistant-thought')
+  if (block) return block
+  block = document.createElement('div')
+  block.className = 'assistant-thought'
+  const header = document.createElement('div')
+  header.className = 'assistant-thought-header'
+  header.textContent = 'thinking'
+  const body = document.createElement('div')
+  body.className = 'assistant-thought-body'
+  block.appendChild(header)
+  block.appendChild(body)
+  // Insert before the message body so thought renders above chat.
+  const messageBody = parentEl.querySelector(':scope > .message-body')
+  if (messageBody) {
+    parentEl.insertBefore(block, messageBody)
+  } else {
+    parentEl.appendChild(block)
+  }
+  return block
 }
 
 function appendMessage(role, text, name, timestamp, fromAgent = false, model = null, messageId = null) {

@@ -287,6 +287,39 @@ main {
   margin-top: var(--hf-space-2);
 }
 
+/* Dual-lane assistant output — thought block above the chat body.
+   Required by the standing bans: thought must be visible, never hidden,
+   never stripped. Rendered with visually-distinct styling so the reader
+   can tell it apart from chat content. No `<details>` collapse here —
+   ban on hiding text means the content is always rendered expanded. */
+.assistant-thought {
+  color: var(--hf-text-dim);
+  font-size: var(--hf-size-sm);
+  font-style: italic;
+  margin: var(--hf-space-1) 0 var(--hf-space-2) 0;
+  padding: var(--hf-space-2) var(--hf-space-3);
+  border-left: 2px solid var(--hf-border);
+  background: color-mix(in srgb, var(--hf-bg-surface) 50%, transparent 50%);
+  border-radius: 0 var(--hf-radius-sm) var(--hf-radius-sm) 0;
+}
+
+.assistant-thought-header {
+  font-size: var(--hf-size-xs, 0.75em);
+  font-style: normal;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--hf-text-muted);
+  margin-bottom: var(--hf-space-1);
+}
+
+.assistant-thought-body {
+  /* Inherit italic from parent; spacing matches idle-thought-body. */
+}
+
+.assistant-thought-body > :first-child { margin-top: 0; }
+.assistant-thought-body > :last-child { margin-bottom: 0; }
+
 /* DM welcome header */
 .dm-welcome {
   display: flex;
