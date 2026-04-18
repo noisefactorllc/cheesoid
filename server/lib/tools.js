@@ -339,7 +339,7 @@ function buildMemoryTools(memory, state) {
     },
     {
       name: 'write_memory',
-      description: 'Write or overwrite a memory file. Use for saving important information across sessions. Do not write to SOUL.md.',
+      description: 'CALL THIS TOOL to persist information across sessions. Writes or overwrites a memory file on disk. Whenever a user asks you to remember, save, note, record, or persist something — and an existing memory file does not already cover it — call this tool. Typing "I will remember that" or "noted" in your text response does NOT save anything; only this tool does. Prefer append_memory when adding to an existing file. Do not write to SOUL.md.',
       input_schema: {
         type: 'object',
         properties: {
@@ -351,7 +351,7 @@ function buildMemoryTools(memory, state) {
     },
     {
       name: 'append_memory',
-      description: 'Append content to an existing memory file.',
+      description: 'CALL THIS TOOL to add a new fact/observation to an existing memory file on disk. Whenever a user asks you to remember, save, note, or persist something and an appropriate memory file already exists (e.g. MEMORY.md), call this tool — do not just acknowledge the request in text. Typing "I will remember" in chat persists nothing; only this tool does.',
       input_schema: {
         type: 'object',
         properties: {
