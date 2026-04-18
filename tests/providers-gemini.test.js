@@ -208,3 +208,106 @@ describe('gemini provider — SSE parsing', () => {
     assert.deepEqual(chunks, [{ x: 1 }, { y: 2 }])
   })
 })
+
+describe('gemini provider — intent routing', () => {
+  it('exposes classifyIntent and supportsIntentRouting=true', () => {
+    const p = createGeminiProvider({ api_key: 'k' })
+    assert.equal(p.supportsIntentRouting, true)
+    assert.equal(typeof p.classifyIntent, 'function')
+  })
+
+  function withMockedFetch(responseJson, fn, { status = 200 } = {}) {
+    const originalFetch = globalThis.fetch
+    const calls = []
+    globalThis.fetch = async (url, opts) => {
+      calls.push({ url, body: opts?.body ? JSON.parse(opts.body) : null })
+      return {
+        ok: status === 200,
+        status,
+        async json() { return responseJson },
+        async text() { return JSON.stringify(responseJson) },
+      }
+    }
+    return fn(calls).finally(() => { globalThis.fetch = originalFetch })
+  }
+
+  const partsFor = (text) => ({
+    candidates: [{ content: { parts: [{ text }] } }],
+  })
+
+  it('returns "required" when classifier responds with action=tool', async () => {
+    const p = createGeminiProvider({ api_key: 'k' })
+    await withMockedFetch(partsFor('{"action":"tool"}'), async () => {
+      const out = await p.classifyIntent({
+        model: 'gemini-2.5-pro',
+        system: null,
+        messages: [{ role: 'user', content: 'please remember that the sky is green' }],
+        tools: [{ name: 'write_memory', description: 'save info' }],
+      })
+      assert.equal(out, 'required')
+    })
+  })
+
+  it('returns "none" when classifier responds with action=text', async () => {
+    const p = createGeminiProvider({ api_key: 'k' })
+    await withMockedFetch(partsFor('{"action":"text"}'), async () => {
+      const out = await p.classifyIntent({
+        model: 'gemini-2.5-pro',
+        system: null,
+        messages: [{ role: 'user', content: 'hi there' }],
+        tools: [{ name: 'write_memory' }],
+      })
+      assert.equal(out, 'none')
+    })
+  })
+
+  it('falls back to "auto" on non-2xx response', async () => {
+    const p = createGeminiProvider({ api_key: 'k' })
+    await withMockedFetch({}, async () => {
+      const out = await p.classifyIntent({
+        model: 'gemini-2.5-pro',
+        system: null,
+        messages: [{ role: 'user', content: 'anything' }],
+        tools: [{ name: 'write_memory' }],
+      })
+      assert.equal(out, 'auto')
+    }, { status: 500 })
+  })
+
+  it('returns "auto" when message list is empty (nothing to classify)', async () => {
+    const p = createGeminiProvider({ api_key: 'k' })
+    // No fetch should be issued since contents is empty
+    const originalFetch = globalThis.fetch
+    let fetched = false
+    globalThis.fetch = async () => { fetched = true; throw new Error('should not be called') }
+    try {
+      const out = await p.classifyIntent({
+        model: 'gemini-2.5-pro',
+        system: null,
+        messages: [],
+        tools: [{ name: 'write_memory' }],
+      })
+      assert.equal(out, 'auto')
+      assert.equal(fetched, false)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('sends a generateContent request with the classifier prompt in systemInstruction', async () => {
+    const p = createGeminiProvider({ api_key: 'k' })
+    await withMockedFetch(partsFor('{"action":"tool"}'), async (calls) => {
+      await p.classifyIntent({
+        model: 'gemini-2.5-pro',
+        system: null,
+        messages: [{ role: 'user', content: 'please remember X' }],
+        tools: [{ name: 'write_memory', description: 'save info' }],
+      })
+      assert.equal(calls.length, 1)
+      assert.match(calls[0].url, /generateContent$/)
+      const sys = calls[0].body?.systemInstruction?.parts?.[0]?.text || ''
+      assert.match(sys, /strict intent classifier/i)
+      assert.match(sys, /remember\/save\/note\/persist/)
+    })
+  })
+})

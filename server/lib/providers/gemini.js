@@ -261,7 +261,91 @@ export function createGeminiProvider(config) {
   const thinkingBudgetDefault = config.thinking_budget ?? null
 
   return {
-    supportsIntentRouting: false, // native API doesn't need the openai-compat rescue path
+    // Gemini in AUTO mode freely responds in text when it could have called a
+    // tool. For "remember X"-style requests the model narrates "I'll remember
+    // that" and never invokes write_memory, which looks like hallucinated tool
+    // use. Intent routing forces tool_choice=ANY for action-y requests so the
+    // call actually happens. Matches openai-compat's classifier behavior — was
+    // lost when gemini moved off that shim to the native provider.
+    supportsIntentRouting: true,
+
+    async classifyIntent({ model, system, messages, tools }) {
+      const toolSummary = tools.map(t => `- ${t.name}: ${t.description || 'no description'}`).join('\n')
+
+      const lastUserMsg = messages[messages.length - 1]
+      const hasToolResults = Array.isArray(lastUserMsg?.content) &&
+        lastUserMsg.content.some(b => b.type === 'tool_result')
+
+      const classifyPrompt = [
+        'You are a strict intent classifier for an AI agent. Determine what the agent should do next.',
+        '',
+        'Available tools:',
+        toolSummary,
+        '',
+        'Rules:',
+        '- If the user is asking the agent to DO something (run a command, check status, look something up, take an action, remember/save/note/persist information), respond: {"action":"tool"}',
+        '- If the user is making conversation (greeting, opinion, acknowledgment, question that needs no data), respond: {"action":"text"}',
+        '- If tool results were just returned and the task needs MORE tool calls to complete, respond: {"action":"tool"}',
+        '- If tool results were just returned and the agent should now summarize or respond to the user, respond: {"action":"text"}',
+        hasToolResults ? '\nIMPORTANT: The most recent message contains tool results. The agent just finished a tool call. Decide whether more tools are needed or if it is time to respond.' : '',
+        '',
+        'Respond with ONLY the JSON object. No explanation, no markdown, no other text.',
+      ].join('\n')
+
+      const recentMessages = messages.slice(-6)
+      const annotated = _annotateToolResults(recentMessages)
+      const contents = _translateMessages(null, annotated)
+      if (contents.length === 0) return 'auto'
+
+      try {
+        if (circuitBreaker.isOpen(baseUrl)) return 'auto'
+
+        const url = `${baseUrl}/models/${model}:generateContent`
+        const body = {
+          contents,
+          systemInstruction: { parts: [{ text: classifyPrompt }] },
+          generationConfig: {
+            maxOutputTokens: 32,
+            temperature: 0,
+            thinkingConfig: { thinkingBudget: 0, includeThoughts: false },
+          },
+        }
+
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'x-goog-api-key': apiKey,
+          },
+          body: JSON.stringify(body),
+        })
+
+        if (!response.ok) {
+          await response.text().catch(() => '')
+          return 'auto'
+        }
+
+        circuitBreaker.recordSuccess(baseUrl)
+        const data = await response.json()
+        const text = data.candidates?.[0]?.content?.parts
+          ?.map(p => p.text || '')
+          .join('')
+          .trim() || ''
+        try {
+          const parsed = JSON.parse(text)
+          if (parsed.action === 'tool') return 'required'
+          if (parsed.action === 'text') return 'none'
+        } catch {
+          if (text.includes('"tool"')) return 'required'
+          if (text.includes('"text"')) return 'none'
+        }
+      } catch (err) {
+        const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
+        console.log(`[gemini] classifier fetch failed${cause}, falling back to auto`)
+        circuitBreaker.recordFailure(baseUrl, `classifier fetch failed${cause}`)
+      }
+      return 'auto'
+    },
 
     async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }, onEvent) {
       const annotated = _annotateToolResults(messages)
