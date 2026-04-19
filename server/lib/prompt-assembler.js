@@ -191,6 +191,17 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
     systemPromptContent = await readSafe(join(personaDir, promptPath))
   }
 
+  // In DM mode, strip the single persona-authored sentence that asserts the
+  // agent is in a shared room. Targeted phrase-level edit — leaves the rest
+  // of the persona's system prompt untouched. Matches only the opening
+  // "You are in a shared room..." sentence (first period).
+  if (mode === 'dm' && systemPromptContent) {
+    systemPromptContent = systemPromptContent.replace(
+      /^You are in a shared room[^.]*\.\s*/,
+      '',
+    )
+  }
+
   // Room sections
   const operationalSections = []
 

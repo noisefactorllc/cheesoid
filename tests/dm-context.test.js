@@ -98,4 +98,38 @@ describe('DM-mode prompt assembly', () => {
       'DM marker must explicitly deny the shared-room framing',
     )
   })
+
+  it('strips persona-authored "You are in a shared room..." sentence in DM mode', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'You are in a shared room. Be brief and kind.\n\n## Duties\n- Help.',
+    })
+
+    const prompt = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } })
+
+    assert.ok(!prompt.includes('You are in a shared room.'),
+      'DM prompt must not carry the persona-authored shared-room assertion')
+    assert.ok(prompt.includes('Be brief and kind.'),
+      'the rest of the persona system prompt must be preserved')
+    assert.ok(prompt.includes('## Duties'),
+      'persona duties section must be preserved')
+  })
+
+  it('preserves persona-authored "You are in a shared room..." sentence in room mode', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'You are in a shared room. Be brief and kind.',
+    })
+
+    const prompt = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+    })
+
+    assert.ok(prompt.includes('You are in a shared room.'),
+      'room-mode prompt must still carry persona-authored room framing')
+  })
 })
