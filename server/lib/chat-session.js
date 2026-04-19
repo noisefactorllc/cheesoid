@@ -230,10 +230,28 @@ export class Room {
 
         const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '??:??'
         if (entry.type === 'assistant_message' || entry.type === 'idle_thought') {
+          // Annotate past DM replies this agent sent, so the model can see
+          // in history that "I replied privately to X here".
+          if (entry.dm_from && entry.dm_to) {
+            this.messages.push({
+              role: 'user',
+              content: `(system) Previous turn was a private DM you sent to ${entry.dm_to}.`,
+            })
+          }
           this.messages.push({ role: 'assistant', content: entry.text })
         } else if (entry.type === 'user_message') {
           const prefix = entry.name || 'anon'
-          this.messages.push({ role: 'user', content: `${prefix}: ${entry.text}` })
+          if (entry.dm_from && entry.dm_to) {
+            // Past DM addressed to this agent (or recorded between two
+            // other agents). Annotate so the model doesn't read it as a
+            // shared-room message.
+            this.messages.push({
+              role: 'user',
+              content: `(system) Previous message was a private 1:1 DM from ${entry.dm_from} to ${entry.dm_to}.\n\n${prefix}: ${entry.text}`,
+            })
+          } else {
+            this.messages.push({ role: 'user', content: `${prefix}: ${entry.text}` })
+          }
         } else if (entry.type === 'system') {
           this.messages.push({ role: 'user', content: `* ${entry.text}` })
         }
