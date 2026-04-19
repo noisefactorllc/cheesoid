@@ -819,10 +819,21 @@ export class Room {
       let assistantText = ''
       let assistantModel = null
 
+      // DM turns always re-assemble the system prompt in DM mode — the cached
+      // this.systemPrompt is built in room mode at init and carries "shared
+      // room" framing that is wrong for a DM.
       const activeIsClaude = orchestratorModel.startsWith('claude')
-      const basePrompt = activeIsClaude
-        ? this.systemPrompt
-        : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
+      const dmContextOpt = { mode: 'dm', dmPartner: from }
+      const basePrompt = await assemblePrompt(
+        this.persona.dir,
+        this.persona.config,
+        this.persona.plugins,
+        {
+          isClaude: activeIsClaude,
+          toolJournal: this.toolJournal,
+          context: dmContextOpt,
+        },
+      )
       const prompt = replaceTimestamp(basePrompt)
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, (event) => {
