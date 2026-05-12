@@ -161,4 +161,47 @@ describe('Webhook queueing', () => {
     assert.equal(room._messageQueue[0].name, 'agent')
     assert.equal(room._messageQueue[1].name, 'bot')
   })
+
+  it('does not elect a visitor moderator for webhook messages', async () => {
+    // Regression: webhook payloads are not broadcast to visitors (broadcast
+    // guard at _processMessage excludes name='webhook'). When the round-robin
+    // moderator election lands on a visitor for a webhook, the visitor is
+    // triggered with routing instructions but has no payload to route, and
+    // replies with a confused placeholder. The election must skip webhook
+    // messages so they always land on the host who can actually see them.
+    const room = new Room(mockPersona())
+
+    room._moderatorPool = ['Test', 'Visitor']
+    room.participants.set('Visitor', Date.now())
+    room._moderatorIndex = 1
+    room._floor = null
+    room.systemPrompt = 'stub'
+    room.initialize = async () => {}
+
+    const broadcasts = []
+    room.broadcast = (event) => broadcasts.push(event)
+
+    let resolveCalled = false
+    room.registry = {
+      resolve: () => { resolveCalled = true; throw new Error('PAST_SKIP') },
+    }
+
+    try {
+      await room._processMessage('home', 'webhook', '[webhook] daily-ops payload')
+    } catch { /* expected stub throw */ }
+
+    const electionTrigger = broadcasts.find(
+      e => e.type === 'backchannel' && e.moderator_election === true
+    )
+    assert.ok(
+      !electionTrigger,
+      'webhook should not trigger a visitor moderator-election backchannel'
+    )
+    assert.ok(
+      resolveCalled,
+      'webhook should fall through to host model resolution, not return early at the election'
+    )
+
+    room.destroy()
+  })
 })

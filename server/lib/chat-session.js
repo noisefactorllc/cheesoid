@@ -1067,7 +1067,7 @@ export class Room {
       // 2. If no addressing, the current floor persists (conversation continues)
       // 3. If no floor set, moderator orchestrates
       const myName = this.persona.config.display_name
-      const isMultiAgent = room === 'home' && this._moderatorPool.length > 1 && name !== 'system'
+      const isMultiAgent = room === 'home' && this._moderatorPool.length > 1 && name !== 'system' && name !== 'webhook'
       const isVisitorHuman = name !== myName && name !== 'system' && name !== 'webhook' && name !== 'wakeup'
       let addressed = options._addressed || null
       let floor = this._floor
