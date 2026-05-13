@@ -245,10 +245,20 @@ function buildRoomTools(room, config) {
           const agentName = room.persona.config.display_name
           const activeModel = options?.model || null
           room.broadcast({ type: 'idle_text_delta', text: input.thought, name: agentName, model: activeModel })
-          room.broadcast({ type: 'idle_done', name: agentName, model: activeModel })
-          const entry = { type: 'idle_thought', text: input.thought, name: agentName }
-          if (activeModel) entry.model = activeModel
-          room.recordHistory(entry)
+          if (Array.isArray(room._idleToolThoughts)) {
+            // Inside an idle turn — _idleThought finalizes the live stream
+            // (via the agent's `done` event) and writes ONE unified
+            // idle_thought to history at end-of-turn. Emitting idle_done
+            // or recordHistory here creates a duplicate entry and prematurely
+            // closes the live stream so subsequent text_delta from continued
+            // model output opens a second idle div.
+            room._idleToolThoughts.push(input.thought)
+          } else {
+            room.broadcast({ type: 'idle_done', name: agentName, model: activeModel })
+            const entry = { type: 'idle_thought', text: input.thought, name: agentName }
+            if (activeModel) entry.model = activeModel
+            room.recordHistory(entry)
+          }
           parts.push(`Thought: ${input.thought}`)
         }
 

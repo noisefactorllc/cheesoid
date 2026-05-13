@@ -1535,6 +1535,10 @@ export class Room {
     }
 
     this.busy = true
+    // Park mid-turn internal({thought}) payloads here so the tool can stream
+    // them live but defer history + idle_done to this function's post-emit,
+    // which writes ONE unified idle_thought per cycle.
+    this._idleToolThoughts = []
     console.log(`[${this.persona.config.name}] Idle thought triggered, ${this.clients.size} clients connected`)
 
     try {
@@ -1652,14 +1656,22 @@ export class Room {
       if (this.messages.length > MAX_CONTEXT_MESSAGES) {
         this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
       }
-      if (idleText) {
+      const parkedToolThoughts = (this._idleToolThoughts || []).map(s => s.trim()).filter(Boolean)
+      if (idleText || parkedToolThoughts.length > 0) {
         // Idle turns are thought-lane by design. Split the text to keep raw
         // narration tags out of the output, but preserve *all* content from
         // both lanes — no dropping, no hiding. Chat-outside-tags text during
         // an idle turn (model violating the idle prompt) still surfaces
-        // here as part of the idle thought rather than vanishing.
+        // here as part of the idle thought rather than vanishing. Mid-turn
+        // internal({thought}) tool calls that the model emits alongside
+        // text get folded in here too — the tool parks them in
+        // _idleToolThoughts and defers history/idle_done to this post-emit,
+        // so each cycle writes exactly one idle_thought regardless of
+        // whether the model used text, the tool, or both.
         const { chat, thought } = splitChatAndThought(idleText)
-        const combined = [thought, chat].map(s => s.trim()).filter(Boolean).join('\n\n')
+        const textParts = [thought, chat].map(s => s.trim()).filter(Boolean).join('\n\n')
+        const toolParts = parkedToolThoughts.join('\n\n')
+        const combined = [textParts, toolParts].filter(Boolean).join('\n\n')
         if (combined) {
           const idleId = shortMsgId()
           const histEntry = { type: 'idle_thought', text: combined, name: agentName, id: idleId }
@@ -1683,6 +1695,10 @@ export class Room {
       // coupled to a chat broadcast (pure handoff out of an idle thought).
       this._flushPendingBackchannels()
       this.busy = false
+      // Closing the idle turn — reset to null (not undefined) so the
+      // internal({thought}) tool detects "not in an idle turn" via
+      // Array.isArray() and resumes its standalone emit + record path.
+      this._idleToolThoughts = null
 
       // Flush any context messages that arrived while the agent was busy
       if (this._pendingContextMessages && this._pendingContextMessages.length > 0) {

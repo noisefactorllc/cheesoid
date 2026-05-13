@@ -132,6 +132,38 @@ describe('internal tool', () => {
     assert.ok(calls.some(c => c.type === 'backchannel' && c.text === 'Brad, this is yours.'))
   })
 
+  it('during an idle turn, thought streams live but defers history + idle_done to post-emit', async () => {
+    // Regression: gpt-5.4 (and other multi-output models) commonly emit BOTH
+    // text and `internal({thought:...})` in the same idle cycle. The tool used
+    // to broadcast idle_done and recordHistory on every thought, so the live
+    // stream closed prematurely (subsequent text_delta opened a second div)
+    // AND the post-emit also recorded its own idle_thought — two entries per
+    // cycle in brad/history/*.jsonl (one no-id from tool, one id-tagged from
+    // post-emit). Confirmed 2026-05-13 in brad's history. _idleToolThoughts
+    // signals an active idle turn — the tool parks the thought there for the
+    // unified post-emit and skips its own idle_done/history.
+    const dir = await makeTmpDir()
+    const config = {
+      agents: [{ name: 'Brad', secret: 's' }],
+      memory: { dir: 'memory/', auto_read: [] },
+    }
+    const idleToolThoughts = []
+    const room = stubRoom({ _idleToolThoughts: idleToolThoughts })
+    const tools = await loadTools(dir, config, stubMemory(), stubState(), room, null)
+
+    await tools.execute('internal', { thought: 'mid-turn aside' })
+
+    const calls = room.broadcast.mock.calls.map(c => c.arguments[0])
+    assert.ok(calls.some(c => c.type === 'idle_text_delta' && c.text === 'mid-turn aside'),
+      'idle_text_delta must still fire so the live UI streams the thought')
+    assert.ok(!calls.some(c => c.type === 'idle_done'),
+      'idle_done must NOT fire during an idle turn — agent done event finalizes the stream')
+    assert.equal(room.recordHistory.mock.callCount(), 0,
+      'recordHistory must NOT fire during an idle turn — post-emit writes the unified entry')
+    assert.deepEqual(idleToolThoughts, ['mid-turn aside'],
+      'thought must be parked in _idleToolThoughts for the post-emit to fold in')
+  })
+
   it('combines thought and backchannel in one call', async () => {
     const dir = await makeTmpDir()
     const config = {
