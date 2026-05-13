@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  pull_request:
+  push:
+    branches: [main, preview]
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install
+        run: npm ci
+
+      - name: Lint
+        run: |
+          if jq -e '.scripts.lint' package.json >/dev/null 2>&1; then
+            npm run lint
+          else
+            echo "No lint script — skipping"
+          fi
+
+      - name: Build
+        run: |
+          if jq -e '.scripts.build' package.json >/dev/null 2>&1; then
+            build_cmd=$(jq -r '.scripts.build' package.json)
+            if echo "$build_cmd" | grep -qE '(docker-compose|docker compose)'; then
+              echo "Docker-based build — skipped in CI"
+            else
+              npm run build
+            fi
+          else
+            echo "No build script — skipping"
+          fi
+
+      - name: Unit tests
+        run: |
+          if jq -e '.scripts.test' package.json >/dev/null 2>&1; then
+            test_cmd=$(jq -r '.scripts.test' package.json)
+            if [ "$test_cmd" = 'echo "Error: no test specified" && exit 1' ]; then
+              echo "Placeholder test script — skipping"
+            elif echo "$test_cmd" | grep -qiE '(playwright)'; then
+              echo "Playwright tests require browser/server — skipping in install CI"
+            else
+              npm test
+            fi
+          else
+            echo "No test script — skipping"
+          fi
