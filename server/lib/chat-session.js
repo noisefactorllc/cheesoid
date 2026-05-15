@@ -54,7 +54,7 @@ export function stripChatNarration(text) {
   return splitChatAndThought(text).chat.trim()
 }
 
-const IDLE_THOUGHT_INTERVAL = 60 * 60 * 1000 // 60 minutes, doubles each time
+const IDLE_THOUGHT_INTERVAL = 120 * 60 * 1000 // 120 minutes, 8x falloff each cycle
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
 export const MAX_HISTORY = 40
 const MAX_CONTEXT_MESSAGES = 40 // max messages in the live agent context
@@ -1729,7 +1729,7 @@ export class Room {
         // (e.g. a message came in during the thought and restarted it)
         if (!this.idleTimer && !this._destroyed) {
           if (completed === 'degenerate') {
-            this._idleInterval = Math.min(this._idleInterval * 2, MAX_IDLE_INTERVAL)
+            this._idleInterval = Math.min(this._idleInterval * 8, MAX_IDLE_INTERVAL)
             this._consecutiveDegenerateCount++
 
             if (this._consecutiveDegenerateCount >= 5) {
@@ -1737,7 +1737,7 @@ export class Room {
               return // don't reschedule
             }
           } else if (completed === true) {
-            this._idleInterval = Math.min(this._idleInterval * 2, MAX_IDLE_INTERVAL)
+            this._idleInterval = Math.min(this._idleInterval * 8, MAX_IDLE_INTERVAL)
             this._consecutiveDegenerateCount = 0
           } else {
             // completed === false (error/skipped) — don't change interval

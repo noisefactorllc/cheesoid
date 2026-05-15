@@ -207,7 +207,7 @@ describe('Backoff protection from room messages (Fix B)', () => {
 
     room.addAgentMessage('visitor', 'hello', { source: 'user' })
 
-    assert.equal(room._idleInterval, 60 * 60 * 1000)
+    assert.equal(room._idleInterval, 120 * 60 * 1000)
     assert.equal(room._consecutiveDegenerateCount, 0)
     room.destroy()
   })
@@ -240,7 +240,7 @@ describe('Backoff protection from room messages (Fix B)', () => {
 
     room.addAgentMessage('visitor', 'hello')
 
-    assert.equal(room._idleInterval, 60 * 60 * 1000)
+    assert.equal(room._idleInterval, 120 * 60 * 1000)
     room.destroy()
   })
 })

@@ -25,7 +25,7 @@ function makeRoom() {
     chatLog: null, registry: null, modality: null, clients: new Set(),
     participants: new Map(), busy: false, lastActivity: Date.now(), idleTimer: null,
     history: [], roomClients: new Map(), _pendingRoom: 'home', _messageQueue: [],
-    _idleInterval: 3600000, _consecutiveDegenerateCount: 0, _destroyed: false,
+    _idleInterval: 7200000, _consecutiveDegenerateCount: 0, _destroyed: false,
     _sessionStartHandled: false, _pendingContextMessages: [],
     _moderatorPool: ['Tester'], _moderatorIndex: 0, _floor: null, _wakeupSchedulers: [],
   } })

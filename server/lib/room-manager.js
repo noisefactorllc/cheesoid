@@ -36,7 +36,7 @@ export class RoomManager {
       roomClients: new Map(),
       _pendingRoom: null,
       _messageQueue: [],
-      _idleInterval: 60 * 60 * 1000,
+      _idleInterval: 120 * 60 * 1000,
       _consecutiveDegenerateCount: 0,
       _destroyed: false,
       _sessionStartHandled: false,
