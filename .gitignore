@@ -4,7 +4,7 @@ node_modules/
 .DS_Store
 personas/*/memory/
 personas/*/history/
-docs/superpowers/specs/
-docs/superpowers/plans/
+docs/superpowers/
+docs/plans/
 test-results
 .superpowers

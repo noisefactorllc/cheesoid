@@ -45,7 +45,7 @@ memory:
     const dir = await makePersona(`
 name: test
 agents:
-  - name: Brad
+  - name: Alice
     secret: \${TEST_SECRET}
 rooms:
   - url: http://localhost:3001

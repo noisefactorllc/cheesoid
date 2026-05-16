@@ -574,7 +574,7 @@ it('executor fallback uses registry when available', async () => {
   })
 
   it('emits assistant_text_turn event after each turn that produces text, before tool execution', async () => {
-    // Regression: brad produced 1527 tokens of text + called deep_think in the same turn.
+    // Regression: alice produced 1527 tokens of text + called deep_think in the same turn.
     // deep_think stalled for 16 minutes. The text was streamed via text_delta but never
     // persisted to history because chat-session.js only writes history after the full
     // orchestrator loop returns. Fix: emit a standalone assistant_text_turn event at each
@@ -583,7 +583,7 @@ it('executor fallback uses registry when available', async () => {
     const provider = makeProvider({
       responses: [
         {
-          // Turn 1: text + tool_use together (the brad case)
+          // Turn 1: text + tool_use together (the alice case)
           contentBlocks: [
             { type: 'text', text: 'Got it, working on it now.' },
             { type: 'tool_use', id: 'toolu_1', name: 'bash', input: { command: 'ls' } },

@@ -61,7 +61,7 @@ describe('Room history', () => {
   })
 
   describe('_handleAssistantTextTurn (per-turn history flushing)', () => {
-    // Regression: brad produced a 1527-token acknowledgement then called deep_think.
+    // Regression: alice produced a 1527-token acknowledgement then called deep_think.
     // deep_think stalled for 16 minutes. The text streamed live over WebSocket but
     // was never persisted to history because chat-session.js only flushed after the
     // entire orchestrator loop completed. On reconnect the text was gone.

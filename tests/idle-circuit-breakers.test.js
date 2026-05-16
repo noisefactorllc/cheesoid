@@ -100,7 +100,7 @@ describe('Single idle_thought per cycle (Fix C — no duplicate when tool + text
     // Regression: gpt-5.4 commonly emits text AND calls internal({thought})
     // in the same idle turn. The tool used to recordHistory immediately and
     // the post-emit also recorded the text. Two idle_thought entries landed
-    // per cycle in brad/history (one no-id from tool, one id-tagged from
+    // per cycle in alice/history (one no-id from tool, one id-tagged from
     // post-emit). The fix routes the tool's thought through _idleToolThoughts
     // so the post-emit folds both sources into a single entry.
     const persona = makePersona()

@@ -9,7 +9,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
     assert.equal(client.roomName, 'test-room')
@@ -23,7 +23,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
     const event = client._parseSSE('data: {"type":"user_message","name":"alice","text":"hello"}')
@@ -36,7 +36,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
     assert.equal(client._parseSSE(''), null)
@@ -51,11 +51,11 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: (msg) => received.push(msg),
     })
     client._handleEvent({ type: 'user_message', name: 'alice', text: 'hello' })
-    client._handleEvent({ type: 'user_message', name: 'Brad', text: 'my own echo' })
+    client._handleEvent({ type: 'user_message', name: 'Alice', text: 'my own echo' })
     assert.equal(received.length, 1)
     assert.equal(received[0].name, 'alice')
     assert.equal(received[0].room, 'test-room')
@@ -68,7 +68,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: (msg) => received.push(msg),
     })
     client._handleEvent({ type: 'user_message', name: 'alice', text: 'hello' })
@@ -82,7 +82,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: (msg) => received.push(msg),
     })
     client._handleEvent({
@@ -90,7 +90,7 @@ describe('RoomClient', () => {
       messages: [
         { type: 'user_message', name: 'alice', text: 'earlier' },
         { type: 'assistant_message', text: 'response' },
-        { type: 'user_message', name: 'Brad', text: 'my echo' },
+        { type: 'user_message', name: 'Alice', text: 'my echo' },
       ],
     })
     assert.equal(received.length, 2)
@@ -107,7 +107,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: (msg) => received.push(msg),
     })
     client._handleEvent({ type: 'user_message', name: 'alice', text: 'live' })
@@ -120,7 +120,7 @@ describe('RoomClient', () => {
       name: 'secure-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
     assert.equal(client._isHttps, true)
@@ -132,7 +132,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
     assert.equal(client._isHttps, false)
@@ -157,7 +157,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
 
@@ -165,7 +165,7 @@ describe('RoomClient', () => {
     srv.close()
 
     assert.deepEqual(receivedBody, {
-      name: 'Brad',
+      name: 'Alice',
       event: { type: 'text_delta', text: 'hello' },
     })
   })
@@ -176,7 +176,7 @@ describe('RoomClient', () => {
       name: 'dead-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: () => {},
     })
 
@@ -220,7 +220,7 @@ describe('RoomClient', () => {
       name: 'test-room',
       secret: 'test-secret',
     }, {
-      agentName: 'Brad',
+      agentName: 'Alice',
       onMessage: (msg) => received.push(msg),
     })
     client._handleEvent({ type: 'presence', participants: ['alice'] })

@@ -31,18 +31,18 @@ describe('Auth middleware', () => {
   })
 
   it('authenticates agent via bearer token', () => {
-    const agents = [{ name: 'Brad', secret: 'brad-secret-123' }]
+    const agents = [{ name: 'Alice', secret: 'alice-secret-123' }]
     const auth = createAuthMiddleware(agents)
-    const { req, res } = mockReqRes({ authorization: 'Bearer brad-secret-123' })
+    const { req, res } = mockReqRes({ authorization: 'Bearer alice-secret-123' })
     let called = false
     auth(req, res, () => { called = true })
     assert.ok(called)
-    assert.equal(req.userName, 'Brad')
+    assert.equal(req.userName, 'Alice')
     assert.equal(req.isAgent, true)
   })
 
   it('rejects invalid bearer token', () => {
-    const agents = [{ name: 'Brad', secret: 'brad-secret-123' }]
+    const agents = [{ name: 'Alice', secret: 'alice-secret-123' }]
     const auth = createAuthMiddleware(agents)
     const { req, res } = mockReqRes({ authorization: 'Bearer wrong-token' })
     let called = false

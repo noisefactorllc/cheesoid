@@ -47,8 +47,8 @@ describe('react_to_message tool', () => {
     const dir = await makeTmpDir()
     const config = { memory: { dir: 'memory/', auto_read: [] } }
     const sendReactionMock = mock.fn(async () => {})
-    const roomClients = new Map([['brad', { sendReaction: sendReactionMock }]])
-    const room = stubRoom({ _pendingRoom: 'brad', roomClients })
+    const roomClients = new Map([['alice', { sendReaction: sendReactionMock }]])
+    const room = stubRoom({ _pendingRoom: 'alice', roomClients })
     const tools = await loadTools(dir, config, stubMemory(), stubState(), room, null)
 
     const result = await tools.execute('react_to_message', { messageId: 'abcd1234', emoji: '👍' })
@@ -87,7 +87,7 @@ describe('react_to_message tool', () => {
   it('does NOT set _endTurn when visitor relay has no room client', async () => {
     const dir = await makeTmpDir()
     const config = { memory: { dir: 'memory/', auto_read: [] } }
-    const room = stubRoom({ _pendingRoom: 'brad', roomClients: new Map() /* empty — no client for "brad" */ })
+    const room = stubRoom({ _pendingRoom: 'alice', roomClients: new Map() /* empty — no client for "alice" */ })
     const tools = await loadTools(dir, config, stubMemory(), stubState(), room, null)
 
     const result = await tools.execute('react_to_message', { messageId: 'abcd1234', emoji: '👍' })

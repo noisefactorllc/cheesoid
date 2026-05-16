@@ -91,7 +91,7 @@ describe('Multi-agent room', () => {
   it('relayAgentEvent broadcasts tool events with agentName', async () => {
     const host = servers[0]
     // relayAgentEvent is fire-and-forget for tool events — no accumulation
-    host.room.relayAgentEvent('Brad', { type: 'tool_start', name: 'read_memory' })
+    host.room.relayAgentEvent('Alice', { type: 'tool_start', name: 'read_memory' })
     // Just verify it doesn't throw — broadcast goes to SSE clients
   })
 
@@ -288,7 +288,7 @@ describe('Multi-agent room', () => {
   })
 
   it('floor marker is NOT appended to user messages (would echo back into chat)', async () => {
-    // Regression: brad's chat output started with "[floor: Brad]" because the
+    // Regression: alice's chat output started with "[floor: Alice]" because the
     // floor note was appended as a suffix to the user message in this.messages.
     // Open-weights executors mimic that suffix straight back into their reply.
     // Same lesson the codebase already learned for moderatorAddendum (line 1293
@@ -296,12 +296,12 @@ describe('Multi-agent room', () => {
     // (prevents echo leak)") and for DM markers (lines 791-795: "prefixes tend
     // to get mimicked back into the reply"). The floor note must live in the
     // system prompt, not in the user message.
-    const dir = await createTestPersona('floor-noecho', 'Brad')
+    const dir = await createTestPersona('floor-noecho', 'Alice')
     const persona = await loadPersona(dir)
     const room = new Room(persona)
 
-    room._moderatorPool = ['Brad', 'Alpha']
-    room._floor = ['Brad']
+    room._moderatorPool = ['Alice', 'Alpha']
+    room._floor = ['Alice']
     room.systemPrompt = 'stub'
     room.initialize = async () => {}
 
@@ -312,11 +312,11 @@ describe('Multi-agent room', () => {
       resolve: () => { throw new Error('PAST_FLOOR_INJECT') },
     }
 
-    await room._processMessage('home', 'Alex', 'hey brad how is it going')
+    await room._processMessage('home', 'Alex', 'hey alice how is it going')
 
     const lastUser = [...room.messages].reverse().find(m => m.role === 'user')
     assert.ok(lastUser, 'user message should be in context')
-    assert.ok(lastUser.content.includes('hey brad how is it going'),
+    assert.ok(lastUser.content.includes('hey alice how is it going'),
       'user text should be present')
     assert.ok(!lastUser.content.includes('[floor:'),
       `user message must not carry "[floor: ...]" suffix — got: ${JSON.stringify(lastUser.content)}`)
@@ -350,7 +350,7 @@ describe('Multi-agent room', () => {
 
   it('host assistant_message is broadcast with name so visitors can attribute it', async () => {
     const hostDir = await createTestPersona('broadcast-host', 'BroadcastHost', {
-      agents: [{ name: 'Brad', secret: 'brad-secret' }],
+      agents: [{ name: 'Alice', secret: 'alice-secret' }],
     })
     const host = await startCheesoid(hostDir, 4011)
     servers.push(host)
@@ -363,17 +363,17 @@ describe('Multi-agent room', () => {
     }
 
     host.room._pendingRoom = 'home'
-    host.room._handleAssistantTextTurn('Brad, can you take this one?', 'test-model')
+    host.room._handleAssistantTextTurn('Alice, can you take this one?', 'test-model')
 
     const messages = broadcasts.filter(e => e.type === 'assistant_message')
     assert.equal(messages.length, 1, 'should broadcast assistant_message for visitor consumption')
     assert.equal(messages[0].name, 'BroadcastHost', 'broadcast must include host name')
-    assert.ok(messages[0].text.includes('Brad'))
+    assert.ok(messages[0].text.includes('Alice'))
     assert.ok(messages[0].id, 'should carry an id')
   })
 
   it('visitor receiving host assistant_message appends it to context', async () => {
-    const visitorDir = await createTestPersona('visitor-ctx', 'Brad', {
+    const visitorDir = await createTestPersona('visitor-ctx', 'Alice', {
       rooms: [{ name: 'host-room', url: 'http://localhost:4099', secret: 's' }],
     })
     const visitor = await startCheesoid(visitorDir, 4014)
@@ -391,7 +391,7 @@ describe('Multi-agent room', () => {
   })
 
   it('visitor self-triggers when host addresses it by name', async () => {
-    const visitorDir = await createTestPersona('visitor-trig', 'Brad', {
+    const visitorDir = await createTestPersona('visitor-trig', 'Alice', {
       rooms: [{ name: 'host-room', url: 'http://localhost:4099', secret: 's' }],
     })
     const visitor = await startCheesoid(visitorDir, 4016)
@@ -406,7 +406,7 @@ describe('Multi-agent room', () => {
       calls.push({ room, name, text, opts })
     }
 
-    visitor.room._handleRemoteEvent({ type: 'assistant_message', name: 'Host', text: 'Brad, what do you think?' }, 'host-room')
+    visitor.room._handleRemoteEvent({ type: 'assistant_message', name: 'Host', text: 'Alice, what do you think?' }, 'host-room')
     await new Promise(r => setTimeout(r, 10))
 
     assert.equal(calls.length, 1, 'addressed visitor should self-trigger')
@@ -417,7 +417,7 @@ describe('Multi-agent room', () => {
   })
 
   it('visitor does NOT self-trigger when host chat does not address it', async () => {
-    const visitorDir = await createTestPersona('visitor-nontrig', 'Brad', {
+    const visitorDir = await createTestPersona('visitor-nontrig', 'Alice', {
       rooms: [{ name: 'host-room', url: 'http://localhost:4099', secret: 's' }],
     })
     const visitor = await startCheesoid(visitorDir, 4017)
@@ -437,7 +437,7 @@ describe('Multi-agent room', () => {
   })
 
   it('visitor ignores host assistant_message when busy', async () => {
-    const visitorDir = await createTestPersona('visitor-busy', 'Brad', {
+    const visitorDir = await createTestPersona('visitor-busy', 'Alice', {
       rooms: [{ name: 'host-room', url: 'http://localhost:4099', secret: 's' }],
     })
     const visitor = await startCheesoid(visitorDir, 4018)
@@ -451,7 +451,7 @@ describe('Multi-agent room', () => {
     let triggered = false
     visitor.room._processMessage = async () => { triggered = true }
 
-    visitor.room._handleRemoteEvent({ type: 'assistant_message', name: 'Host', text: 'Brad, are you there?' }, 'host-room')
+    visitor.room._handleRemoteEvent({ type: 'assistant_message', name: 'Host', text: 'Alice, are you there?' }, 'host-room')
     await new Promise(r => setTimeout(r, 10))
 
     assert.ok(!triggered, 'busy visitor should defer rather than trigger mid-turn')
@@ -459,12 +459,12 @@ describe('Multi-agent room', () => {
     // _pendingContextMessages while busy, then flushes into messages at the
     // end of the current turn so the visitor sees it on the next response.
     const queued = visitor.room._pendingContextMessages || []
-    assert.ok(queued.some(m => m.content && m.content.includes('Brad, are you there?')),
+    assert.ok(queued.some(m => m.content && m.content.includes('Alice, are you there?')),
       'queued for next turn so the host chat is not lost')
   })
 
   it('visitor ignores DM-flagged assistant_message events (not group chat)', async () => {
-    const visitorDir = await createTestPersona('visitor-dm-skip', 'Brad', {
+    const visitorDir = await createTestPersona('visitor-dm-skip', 'Alice', {
       rooms: [{ name: 'host-room', url: 'http://localhost:4099', secret: 's' }],
     })
     const visitor = await startCheesoid(visitorDir, 4019)
@@ -476,36 +476,36 @@ describe('Multi-agent room', () => {
 
     const before = visitor.room.messages.length
     visitor.room._handleRemoteEvent({
-      type: 'assistant_message', name: 'Host', text: 'Brad, private note', dm_from: 'Host', dm_to: 'Someone',
+      type: 'assistant_message', name: 'Host', text: 'Alice, private note', dm_from: 'Host', dm_to: 'Someone',
     }, 'host-room')
     assert.equal(visitor.room.messages.length, before, 'DM responses must not contaminate visitor group context')
   })
 
   it('auto-nudges mentioned agent via room client when visiting', async () => {
     const visitorDir = await createTestPersona('visitor-nudge', 'VisitorNudge', {
-      rooms: [{ name: 'brad', url: 'http://localhost:4099', secret: 's', domain: 'brad.test' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:4099', secret: 's', domain: 'alice.test' }],
     })
     const visitor = await startCheesoid(visitorDir, 4012)
     servers.push(visitor)
 
     const bcSends = []
-    const realClient = visitor.room.roomClients.get('brad')
+    const realClient = visitor.room.roomClients.get('alice')
     if (realClient) realClient.destroy()
-    visitor.room.roomClients.set('brad', {
+    visitor.room.roomClients.set('alice', {
       sendBackchannel: (text, opts) => { bcSends.push({ text, ...opts }) },
       sendMessage: () => {},
       destroy: () => {},
     })
 
-    visitor.room._pendingRoom = 'brad'
-    visitor.room._autoNudgeMentionedAgents('Hey brad, what do you think?')
+    visitor.room._pendingRoom = 'alice'
+    visitor.room._autoNudgeMentionedAgents('Hey alice, what do you think?')
     assert.equal(bcSends.length, 1)
-    assert.ok(bcSends[0].text.includes('brad'))
+    assert.ok(bcSends[0].text.includes('alice'))
   })
 
   it('internal tool delivers thought to home and backchannel to remote room', async () => {
     const visitorDir = await createTestPersona('internal-test', 'InternalTest', {
-      rooms: [{ name: 'brad', url: 'http://localhost:4099', secret: 's', domain: 'brad.test' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:4099', secret: 's', domain: 'alice.test' }],
     })
     const visitor = await startCheesoid(visitorDir, 4015)
     servers.push(visitor)
@@ -522,17 +522,17 @@ describe('Multi-agent room', () => {
     if (!visitor.room.tools) await visitor.room.initialize()
 
     // Override the real RoomClient with our mock after initialization
-    const realClient = visitor.room.roomClients.get('brad')
+    const realClient = visitor.room.roomClients.get('alice')
     if (realClient) realClient.destroy()
-    visitor.room.roomClients.set('brad', mockClient)
+    visitor.room.roomClients.set('alice', mockClient)
 
     // Simulate being in a remote room
-    visitor.room._pendingRoom = 'brad'
+    visitor.room._pendingRoom = 'alice'
 
     // Call internal tool directly (simulating what the agent loop does)
     const result = await visitor.room.tools.execute('internal', {
       thought: 'Not my area of expertise.',
-      backchannel: 'Brad, this is your domain.',
+      backchannel: 'Alice, this is your domain.',
     })
 
     // Thought echoed in result for agent memory
@@ -541,7 +541,7 @@ describe('Multi-agent room', () => {
 
     // Backchannel delivered to remote room
     assert.equal(bcSends.length, 1)
-    assert.equal(bcSends[0], 'Brad, this is your domain.')
+    assert.equal(bcSends[0], 'Alice, this is your domain.')
   })
 
   it('full host→visitor flow: host turn broadcasts assistant_message that the visitor consumes', async () => {

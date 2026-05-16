@@ -160,7 +160,7 @@ ANTHROPIC_API_KEY=sk-... \
 STRIPE_API_KEY=sk_live_... \
 DB_HOST=db.example.com \
 DB_PASSWORD=secret \
-PERSONA=brad \
+PERSONA=my-agent \
 npm start
 ```
 
@@ -194,9 +194,9 @@ For SSH access, mount a key and configure the host in your environment:
 ```bash
 docker run -p 3000:3000 \
   -e ANTHROPIC_API_KEY=sk-... \
-  -e PERSONA=ehsre \
-  -v ~/.ssh/ehsre_key:/root/.ssh/id_ed25519:ro \
-  -v ./personas/ehsre:/app/personas/ehsre \
+  -e PERSONA=my-agent \
+  -v ~/.ssh/agent_key:/root/.ssh/id_ed25519:ro \
+  -v ./personas/my-agent:/app/personas/my-agent \
   cheesoid
 ```
 
@@ -341,7 +341,7 @@ These patterns are conventions enforced through the system prompt, not hard fram
 
 When multiple agents run in separate containers, they can share files through a common Docker volume mounted at `/shared/`. This gives agents a lightweight way to exchange drafts, hand off analysis, or collaborate on documents without git or external APIs.
 
-All agents see the same files — access is flat, with subdirectories by convention (e.g. `/shared/brad/`, `/shared/margo/`). There's no locking or versioning; agents coordinate via chat.
+All agents see the same files — access is flat, with subdirectories by convention (e.g. `/shared/agent-a/`, `/shared/agent-b/`). There's no locking or versioning; agents coordinate via chat.
 
 Three built-in tools are available to every persona automatically:
 

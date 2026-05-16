@@ -10,4 +10,4 @@ services:
     volumes:
       - ./personas:/app/personas
       - ./log:/app/log
-    restart: unless-stopped
+    restart: always

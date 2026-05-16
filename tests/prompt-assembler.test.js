@@ -177,7 +177,7 @@ describe('assemblePrompt', () => {
       name: 'host',
       display_name: 'Host',
       chat: { prompt: 'prompts/system.md' },
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
     }, [])
     assert.ok(prompt.includes('Multi-Agent Turn-Taking'))
     assert.ok(prompt.includes('moderator'))
@@ -193,7 +193,7 @@ describe('assemblePrompt', () => {
       name: 'visitor',
       display_name: 'Visitor',
       chat: { prompt: 'prompts/system.md' },
-      rooms: [{ name: 'brad', url: 'http://localhost:9999', secret: 's' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:9999', secret: 's' }],
     }, [])
     assert.ok(prompt.includes('internal'))
     assert.ok(prompt.includes('backchannel'))
@@ -223,7 +223,7 @@ describe('assemblePrompt', () => {
     const result = await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
-      rooms: [{ name: 'brad', url: 'http://localhost:3001', secret: 's' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:3001', secret: 's' }],
     })
 
     assert.ok(result.includes('internal'), 'should reference internal tool')
@@ -239,7 +239,7 @@ describe('assemblePrompt', () => {
     const result = await assemblePrompt(dir, {
       display_name: 'Host',
       chat: { prompt: 'prompts/system.md' },
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
     })
 
     assert.ok(result.includes('internal'), 'should reference internal tool')

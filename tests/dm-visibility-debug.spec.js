@@ -1,7 +1,7 @@
 // @ts-check
 import { test, expect } from '@playwright/test'
 
-const BASE = 'https://brad.noisefactor.io'
+const BASE = process.env.TEST_BASE_URL || 'http://localhost:3000'
 
 test('DM messages are visible after sending', async ({ page }) => {
   // Collect console logs for debugging
@@ -21,13 +21,14 @@ test('DM messages are visible after sending', async ({ page }) => {
   // Take pre-DM screenshot
   await page.screenshot({ path: 'tests/dm-debug-1-room.png', fullPage: true })
 
-  // Find Brad in participant list and click to open DM view
-  const bradParticipant = page.locator('#participants li', { hasText: 'Brad' })
-  await expect(bradParticipant).toBeVisible({ timeout: 10000 })
-  await bradParticipant.click()
+  // Find the host agent in participant list and click to open DM view
+  const hostParticipant = page.locator('#participants li').first()
+  await expect(hostParticipant).toBeVisible({ timeout: 10000 })
+  const hostName = await hostParticipant.textContent()
+  await hostParticipant.click()
 
-  // Verify we're in dm:Brad view
-  await expect(page.locator('#channel-name')).toHaveText('Brad')
+  // Verify we're in the DM view
+  await expect(page.locator('#channel-name')).toHaveText(hostName.trim())
 
   // Take screenshot of empty DM view
   await page.screenshot({ path: 'tests/dm-debug-2-dm-view.png', fullPage: true })

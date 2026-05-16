@@ -36,7 +36,7 @@ describe('internal tool', () => {
   it('registers internal tool when rooms are configured', async () => {
     const dir = await makeTmpDir()
     const config = {
-      rooms: [{ name: 'brad', url: 'http://localhost:3001', secret: 's' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:3001', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const room = stubRoom()
@@ -51,7 +51,7 @@ describe('internal tool', () => {
   it('registers internal tool when agents are configured', async () => {
     const dir = await makeTmpDir()
     const config = {
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const room = stubRoom()
@@ -74,7 +74,7 @@ describe('internal tool', () => {
   it('thought broadcasts to home room and returns content', async () => {
     const dir = await makeTmpDir()
     const config = {
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const room = stubRoom()
@@ -100,13 +100,13 @@ describe('internal tool', () => {
       sendBackchannel: mock.fn(async (text) => { bcSends.push(text) }),
       sendMessage: mock.fn(async () => {}),
     }
-    const roomClients = new Map([['brad', mockClient]])
+    const roomClients = new Map([['alice', mockClient]])
 
     const config = {
-      rooms: [{ name: 'brad', url: 'http://localhost:3001', secret: 's' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:3001', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
-    const room = stubRoom({ _pendingRoom: 'brad', roomClients })
+    const room = stubRoom({ _pendingRoom: 'alice', roomClients })
     const tools = await loadTools(dir, config, stubMemory(), stubState(), room, null)
 
     const result = await tools.execute('internal', { backchannel: 'Taking this one.' })
@@ -119,17 +119,17 @@ describe('internal tool', () => {
   it('backchannel broadcasts to SSE when in home room', async () => {
     const dir = await makeTmpDir()
     const config = {
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const room = stubRoom({ _pendingRoom: 'home' })
     const tools = await loadTools(dir, config, stubMemory(), stubState(), room, null)
 
-    const result = await tools.execute('internal', { backchannel: 'Brad, this is yours.' })
+    const result = await tools.execute('internal', { backchannel: 'Alice, this is yours.' })
 
     assert.ok(result.output.includes('Backchannel sent'))
     const calls = room.broadcast.mock.calls.map(c => c.arguments[0])
-    assert.ok(calls.some(c => c.type === 'backchannel' && c.text === 'Brad, this is yours.'))
+    assert.ok(calls.some(c => c.type === 'backchannel' && c.text === 'Alice, this is yours.'))
   })
 
   it('during an idle turn, thought streams live but defers history + idle_done to post-emit', async () => {
@@ -138,13 +138,13 @@ describe('internal tool', () => {
     // to broadcast idle_done and recordHistory on every thought, so the live
     // stream closed prematurely (subsequent text_delta opened a second div)
     // AND the post-emit also recorded its own idle_thought — two entries per
-    // cycle in brad/history/*.jsonl (one no-id from tool, one id-tagged from
-    // post-emit). Confirmed 2026-05-13 in brad's history. _idleToolThoughts
+    // cycle in alice/history/*.jsonl (one no-id from tool, one id-tagged from
+    // post-emit). Confirmed 2026-05-13 in alice's history. _idleToolThoughts
     // signals an active idle turn — the tool parks the thought there for the
     // unified post-emit and skips its own idle_done/history.
     const dir = await makeTmpDir()
     const config = {
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const idleToolThoughts = []
@@ -167,7 +167,7 @@ describe('internal tool', () => {
   it('combines thought and backchannel in one call', async () => {
     const dir = await makeTmpDir()
     const config = {
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const room = stubRoom({ _pendingRoom: 'home' })
@@ -175,7 +175,7 @@ describe('internal tool', () => {
 
     const result = await tools.execute('internal', {
       thought: 'Not my area.',
-      backchannel: 'Brad, this is yours.',
+      backchannel: 'Alice, this is yours.',
     })
 
     assert.ok(result.output.includes('Not my area.'))
@@ -185,7 +185,7 @@ describe('internal tool', () => {
   it('returns error when neither thought nor backchannel provided', async () => {
     const dir = await makeTmpDir()
     const config = {
-      agents: [{ name: 'Brad', secret: 's' }],
+      agents: [{ name: 'Alice', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
     const room = stubRoom()
@@ -208,21 +208,21 @@ describe('internal tool', () => {
       sendBackchannel: mock.fn(async (text, opts) => { bcSends.push({ text, opts }) }),
       sendMessage: mock.fn(async () => {}),
     }
-    const roomClients = new Map([['brad', mockClient]])
+    const roomClients = new Map([['alice', mockClient]])
     const config = {
-      rooms: [{ name: 'brad', url: 'http://localhost:3001', secret: 's' }],
+      rooms: [{ name: 'alice', url: 'http://localhost:3001', secret: 's' }],
       memory: { dir: 'memory/', auto_read: [] },
     }
-    const room = stubRoom({ _pendingRoom: 'brad', roomClients })
+    const room = stubRoom({ _pendingRoom: 'alice', roomClients })
     const tools = await loadTools(dir, config, stubMemory(), stubState(), room, null)
 
-    const result = await tools.execute('internal', { trigger: true, target: 'Brad' })
+    const result = await tools.execute('internal', { trigger: true, target: 'Alice' })
 
     assert.equal(result.is_error, undefined, 'trigger-only must succeed, not is_error')
     assert.equal(mockClient.sendBackchannel.mock.callCount(), 1, 'sendBackchannel must fire exactly once')
     assert.ok(bcSends[0].text.length > 0, 'synthesized backchannel text must be non-empty')
     assert.equal(bcSends[0].opts.trigger, true, 'trigger flag must propagate')
-    assert.equal(bcSends[0].opts.target, 'Brad', 'target must propagate')
+    assert.equal(bcSends[0].opts.target, 'Alice', 'target must propagate')
   })
 
   it('trigger-only broadcast (no target) fires home-room backchannel', async () => {

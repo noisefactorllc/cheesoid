@@ -26,7 +26,7 @@ A shared Docker volume mounted at `/shared/` in every agent container. Three new
 
 **Path safety:** All paths are resolved relative to `/shared/` and validated to prevent directory traversal (no `../` escapes). Paths are normalized and must stay within the shared root.
 
-**Filesystem:** Plain files. Agents can create subdirectories (e.g. `/shared/margo/`, `/shared/drafts/`). Parent directories are created automatically on write (`mkdir -p` equivalent).
+**Filesystem:** Plain files. Agents can create subdirectories (e.g. `/shared/agent-a/`, `/shared/drafts/`). Parent directories are created automatically on write (`mkdir -p` equivalent).
 
 **No access control.** All agents see everything. They're collaborators, not tenants.
 
@@ -150,20 +150,14 @@ Injected after the room/agent sections, before the memory auto_read files (which
 
 Create the shared Docker volume once:
 ```bash
-ssh ops@172.105.109.25 'docker volume create cheesoid-shared'
+ssh ops@$OPS_SERVER_IP 'docker volume create cheesoid-shared'
 ```
 
-Add `-v cheesoid-shared:/shared` to every agent container's `docker run` command in:
-- `scaffold/.github/workflows/dispatch-cheesoid-deploy.yml` (Brad, EHSRE, yipyip-ehsre, Margo blocks)
-- Any manual `docker run` commands for agent containers
+Add `-v cheesoid-shared:/shared` to every agent container's `docker run` command in the deploy workflow and any manual docker run commands.
 
 ### Persona Updates
 
-Add `startup_checks` to each persona's `persona.yaml`:
-
-**Brad:** `required_paths: [/secrets/.ssh/id_ed25519, /secrets/.brad/private-key.pem, /shared/]`
-**EHSRE:** `required_paths: [/secrets/.ssh/id_ed25519, /shared/]`
-**Margo:** `required_paths: [/secrets/.ssh/id_ed25519, /secrets/.margo/private-key.pem, /shared/]`
+Add `startup_checks` to each persona's `persona.yaml` with `required_paths` including `/shared/` and any secrets the persona needs.
 
 ## Files Changed
 
