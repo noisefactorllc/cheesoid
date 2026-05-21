@@ -417,6 +417,26 @@ export class Room {
     }
   }
 
+  async _announceProviderQuotaExhausted(provider) {
+    if (!this._a.quotaExhaustedAnnounced) this._a.quotaExhaustedAnnounced = new Set()
+    if (this._a.quotaExhaustedAnnounced.has(provider)) return
+    this._a.quotaExhaustedAnnounced.add(provider)
+
+    const name = this.persona.config.display_name
+    const text = `Heads up — ${provider}'s quota is exhausted, so I'm running on a slower fallback for now. Things may lag until that's topped up.`
+    const message = { type: 'assistant_message', name, text }
+    this.recordHistory(message)
+    if (!this._pendingRoom || this._pendingRoom === 'home') {
+      this.broadcast(message)
+      return
+    }
+    const client = this.roomClients?.get?.(this._pendingRoom)
+    if (client) {
+      try { await client.sendMessage(text, { room: this._pendingRoomChannel }) }
+      catch (err) { console.error(`[${this.persona.config.name}] quota relay failed: ${err.message}`) }
+    }
+  }
+
   /**
    * Flush a single orchestrator turn's text to history immediately, before any
    * downstream tool calls execute. Called from the agent loop's onEvent when an
@@ -1328,6 +1348,11 @@ export class Room {
         }
         if (event.type === 'model_fallback') {
           activeModel = event.to
+        }
+        if (event.type === 'provider_quota_exhausted') {
+          this._announceProviderQuotaExhausted(event.provider).catch(err => {
+            console.error(`[${this.persona.config.name}] quota announcement failed: ${err.message}`)
+          })
         }
         if (event.type === 'done' && event.model) {
           assistantModel = event.model

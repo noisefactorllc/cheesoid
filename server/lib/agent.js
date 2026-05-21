@@ -25,6 +25,21 @@ export function classifyIntentHeuristic(lastUserContent) {
   return 'uncertain'
 }
 
+const QUOTA_EXHAUSTED_PATTERNS = /insufficient_quota|RESOURCE_EXHAUSTED|credits?\s+(are\s+)?depleted|exceeded your.*quota|quota.*exceeded/i
+
+export function isQuotaExhaustedError(err) {
+  if (!err?.message) return false
+  return QUOTA_EXHAUSTED_PATTERNS.test(err.message)
+}
+
+export function inferProviderLabel(modelId) {
+  if (!modelId || typeof modelId !== 'string') return null
+  if (/^gpt-|^o\d/i.test(modelId)) return 'OpenAI'
+  if (/^claude/i.test(modelId)) return 'Anthropic'
+  if (/^gemini/i.test(modelId)) return 'Gemini'
+  return null
+}
+
 /**
  * Attempt to extract a tool call from text that was narrated instead of
  * being emitted as a structured tool_calls response. Returns a tool_use
@@ -584,6 +599,11 @@ async function callExecutorWithFallback(config, params, onEvent) {
 async function callOrchestratorWithFallback(config, params, onEvent) {
   const triedModels = [params.model]
   const layer = config.layer
+  const maybeEmitQuotaEvent = (err, modelId) => {
+    if (!isQuotaExhaustedError(err)) return
+    const provider = inferProviderLabel(modelId)
+    if (provider) onEvent({ type: 'provider_quota_exhausted', provider, model: modelId })
+  }
   try {
     const t0 = Date.now()
     const result = await config.provider.streamMessage(params, onEvent)
@@ -593,6 +613,7 @@ async function callOrchestratorWithFallback(config, params, onEvent) {
     // (e.g. anthropic → openai), so per-provider errors — billing (400 credit
     // balance), auth (401/403), rate limits (429), overload (529), server
     // errors — all warrant trying the backup.
+    maybeEmitQuotaEvent(err, params.model)
     if (!config.orchestratorFallbackModels?.length) {
       err.layer = err.layer || layer
       err.triedModels = triedModels
@@ -610,6 +631,7 @@ async function callOrchestratorWithFallback(config, params, onEvent) {
         const result = await provider.streamMessage({ ...params, model: modelId }, onEvent)
         return { ...result, actualModel: modelId, _latencyMs: Date.now() - t0 }
       } catch (fallbackErr) {
+        maybeEmitQuotaEvent(fallbackErr, modelId)
         lastErr = fallbackErr
         console.log(`[hybrid] orchestrator fallback ${modelId} failed: ${fallbackErr.message}`)
       }
