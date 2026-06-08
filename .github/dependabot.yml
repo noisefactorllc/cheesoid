@@ -7,6 +7,14 @@ updates:
       day: "monday"
       time: "08:00"
       timezone: "America/Denver"
+    # Cooldown: hold non-security version bumps so a freshly-published
+    # (possibly compromised) release ages in the ecosystem before we pull it.
+    # Most supply-chain compromises are detected and yanked within 24-72h.
+    # Graded 7/7/14: patch & minor wait 7d (default-days), major waits 14d.
+    # SECURITY updates bypass cooldown and still ship immediately.
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
     groups:
       npm-patches:
         patterns:
@@ -22,5 +30,26 @@ updates:
     open-pull-requests-limit: 5
     commit-message:
       prefix: "deps"
+    labels:
+      - "dependencies"
+
+  # Keep GitHub Actions refs (pinned to SHA) fresh and SHA-updatable.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "08:00"
+      timezone: "America/Denver"
+    cooldown:
+      default-days: 7
+      semver-major-days: 14
+    groups:
+      actions:
+        patterns:
+          - "*"
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: "deps(actions)"
     labels:
       - "dependencies"
