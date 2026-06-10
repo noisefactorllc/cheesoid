@@ -58,6 +58,12 @@ const IDLE_THOUGHT_INTERVAL = 120 * 60 * 1000 // 120 minutes, 8x falloff each cy
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
 export const MAX_HISTORY = 40
 const MAX_CONTEXT_MESSAGES = 40 // max messages in the live agent context
+// Flood circuit-breaker threshold: after this many identical consecutive
+// history entries, stop persisting duplicates. A runaway loop once wrote
+// ~149k identical wakeup messages in an hour (a 494MB day-file) that OOM'd the
+// host on reload (2026-06-10 P0). Legitimate history never repeats one entry
+// this many times in a row.
+export const HISTORY_FLOOD_LIMIT = 50
 const MAX_QUEUED_WEBHOOKS = 10
 const HEARTBEAT_INTERVAL = 30 * 1000 // 30 seconds — keeps SSE alive through proxies
 // Join/leave events are broadcast to SSE clients for UI presence updates
@@ -117,6 +123,8 @@ export class Room {
         _messageQueue: [],
         _idleInterval: IDLE_THOUGHT_INTERVAL,
         _consecutiveDegenerateCount: 0,
+        _lastHistSig: null,
+        _lastHistRepeat: 0,
         _destroyed: false,
         _sessionStartHandled: false,
         _pendingContextMessages: [],
@@ -383,6 +391,24 @@ export class Room {
   }
 
   recordHistory(entry) {
+    // Flood circuit-breaker. Suppress a flood of identical consecutive entries
+    // (same type+name+text) and log loudly so the underlying re-injection loop
+    // stays visible instead of silently filling disk and blowing the heap on
+    // the next reload (2026-06-10 P0 — a wakeup loop wrote a 494MB day-file).
+    const sig = `${entry.type}|${entry.name || ''}|${entry.text || ''}`
+    if (sig === this._a._lastHistSig) {
+      this._a._lastHistRepeat++
+      if (this._a._lastHistRepeat >= HISTORY_FLOOD_LIMIT) {
+        if (this._a._lastHistRepeat === HISTORY_FLOOD_LIMIT) {
+          console.error(`[${this.persona.config.name}] HISTORY FLOOD: identical entry repeated ${HISTORY_FLOOD_LIMIT}x (type=${entry.type}, name=${entry.name}) — suppressing duplicates; a loop is re-injecting this message`)
+        }
+        return
+      }
+    } else {
+      this._a._lastHistSig = sig
+      this._a._lastHistRepeat = 0
+    }
+
     this.history.push({ ...entry, timestamp: Date.now() })
     if (this.history.length > MAX_HISTORY) {
       this.history.shift()
