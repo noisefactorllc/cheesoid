@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { parseCron, nextMatch } from '../server/lib/wakeup.js'
+import { parseCron, nextMatch, nextTimer, MAX_TIMEOUT } from '../server/lib/wakeup.js'
 
 describe('parseCron', () => {
   it('parses simple schedule "0 12 * * *"', () => {
@@ -90,5 +90,40 @@ describe('nextMatch', () => {
     const schedule = parseCron('0 12 * * *')
     const next = nextMatch(schedule, after)
     assert.equal(next.getDate(), 27) // next day
+  })
+})
+
+describe('nextTimer (overflow-safe scheduling — the death-loop guard)', () => {
+  it('fires directly when the target is within the setTimeout ceiling', () => {
+    const now = 1_000_000
+    const r = nextTimer(now + 60_000, now) // 1 minute out
+    assert.equal(r.fire, true)
+    assert.equal(r.delay, 60_000)
+  })
+
+  it('re-arms in a clamped chunk when the target exceeds the ceiling', () => {
+    // The exact EHSRE case: a ~36916-minute wakeup (~2.21B ms) must NOT be
+    // handed to setTimeout, which would fire immediately and spin the scheduler.
+    const now = 1_000_000
+    const r = nextTimer(now + 36_916 * 60_000, now)
+    assert.equal(r.fire, false)        // does not run the wakeup yet
+    assert.equal(r.delay, MAX_TIMEOUT) // clamped to Node's ceiling
+  })
+
+  it('never returns a delay above Node\'s setTimeout ceiling', () => {
+    for (const days of [25, 60, 366]) {
+      const r = nextTimer(days * 24 * 60 * 60 * 1000, 0)
+      assert.ok(r.delay <= 2_147_483_647, `${days}d delay must be clamped`)
+    }
+  })
+
+  it('fires with zero delay when the target is already in the past', () => {
+    const r = nextTimer(4000, 5000)
+    assert.equal(r.fire, true)
+    assert.equal(r.delay, 0)
+  })
+
+  it('MAX_TIMEOUT is Node\'s 32-bit signed millisecond ceiling', () => {
+    assert.equal(MAX_TIMEOUT, 2 ** 31 - 1)
   })
 })

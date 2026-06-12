@@ -1,6 +1,21 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+// Node's setTimeout delay is a 32-bit signed int of milliseconds. A delay above
+// this fires (almost) immediately with a TimeoutOverflowWarning — which, for a
+// self-rescheduling timer, becomes a tight infinite loop. Clamp to it and re-arm.
+export const MAX_TIMEOUT = 2_147_483_647 // 2^31 - 1 ms (~24.8 days)
+
+// Compute the next timer step toward an absolute target time. Returns the delay
+// to hand to setTimeout (never above MAX_TIMEOUT) and whether the timer firing
+// after that delay should run the wakeup (target reached) or just re-arm toward
+// a target that is still further out than the ceiling.
+export function nextTimer(targetMs, nowMs) {
+  const remaining = targetMs - nowMs
+  if (remaining > MAX_TIMEOUT) return { delay: MAX_TIMEOUT, fire: false }
+  return { delay: Math.max(0, remaining), fire: true }
+}
+
 /**
  * Wakeup scheduler — runs a persona's wakeup prompt on a cron schedule.
  *
@@ -53,13 +68,31 @@ export class WakeupScheduler {
 
     const now = new Date()
     const next = nextMatch(this._schedule, now)
-    const delay = next.getTime() - now.getTime()
+    this._nextTime = next.getTime()
+    const delay = this._nextTime - now.getTime()
 
     console.log(`[${this._label}] Next wakeup: ${next.toISOString()} (${Math.round(delay / 60000)}m)`)
+
+    this._arm()
+  }
+
+  // Arm a timer toward the absolute target `this._nextTime`. setTimeout fires
+  // immediately for delays beyond MAX_TIMEOUT, which would spin this
+  // self-rescheduling timer into a tight loop, so far-future targets are
+  // re-armed in clamped chunks until the remaining time fits, then the wakeup
+  // runs. clearTimeout in destroy() stops whichever step is pending.
+  _arm() {
+    if (this._destroyed) return
+
+    const { delay, fire } = nextTimer(this._nextTime, Date.now())
 
     this._timer = setTimeout(async () => {
       this._timer = null
       if (this._destroyed) return
+      if (!fire) {
+        this._arm() // a far-future chunk elapsed — re-arm toward the target
+        return
+      }
 
       try {
         const prompt = await readFile(this._promptPath, 'utf8')
