@@ -58,6 +58,17 @@ const IDLE_THOUGHT_INTERVAL = 120 * 60 * 1000 // 120 minutes, 8x falloff each cy
 const MAX_IDLE_INTERVAL = 7 * 24 * 60 * 60 * 1000 // 7 days cap
 export const MAX_HISTORY = 40
 const MAX_CONTEXT_MESSAGES = 40 // max messages in the live agent context
+// Live context is ALSO bounded by an approximate TOKEN budget, not just a
+// message count. A 40-message cap sounds bounded, but a single message can
+// carry a huge tool_result — read_memory on a 104 KB MEMORY.md returned ~26K
+// tokens, and a few of those stacked the prompt past 300K-600K tokens (spiking
+// to ~2M on multi-tool turns), which degrades the model into not calling tools
+// and confabulating (2026-06-13 "Brad braindead"). The token budget evicts the
+// oldest messages until the live context fits, regardless of per-message size.
+// ~80K for messages + ~35K system prompt stays under where the model was last
+// observed healthy (~122K total).
+const MAX_CONTEXT_TOKENS = 80_000
+const MIN_CONTEXT_MESSAGES = 4 // never trim below this — the latest turn must survive even if large
 // Flood circuit-breaker threshold: after this many identical consecutive
 // history entries, stop persisting duplicates. A runaway loop once wrote
 // ~149k identical wakeup messages in an hour (a 494MB day-file) that OOM'd the
@@ -83,6 +94,56 @@ This is NOT a message to the user. They cannot read it. Do not address them, do 
 Your history contains your previous actions and thoughts — don't repeat work you already did, don't re-raise settled threads.
 
 If nothing is on your mind, say so in one line and stop.`
+
+/**
+ * Approximate token count for a single message's content (string, or an array
+ * of content blocks incl. tool_use/tool_result). ~4 chars/token plus a small
+ * structural overhead. Deliberately cheap — it runs every turn and only needs
+ * to be good enough to bound the prompt, not exact.
+ */
+export function estimateMessageTokens(message) {
+  const c = message?.content
+  let chars
+  if (typeof c === 'string') chars = c.length
+  else if (c == null) chars = 0
+  else { try { chars = JSON.stringify(c).length } catch { chars = 0 } }
+  return Math.ceil(chars / 4) + 8
+}
+
+function leadsWithToolResult(message) {
+  return Array.isArray(message?.content) && message.content.some(b => b?.type === 'tool_result')
+}
+
+/**
+ * Trim the live agent context to fit a token budget, keeping the NEWEST
+ * messages. Bounds by message count first (cheap), then drops oldest messages
+ * until under `maxTokens` — but never below `minMessages`, so the most recent
+ * turn survives even when it is large. Finally strips a leading orphan
+ * tool_result whose tool_use may have been trimmed; agent.js's orphan repair is
+ * the backstop for any remaining tool-pair gaps.
+ *
+ * This replaced a plain `slice(-MAX_CONTEXT_MESSAGES)`: a message count alone
+ * does not bound tokens when individual tool_results are huge, which let the
+ * prompt run to 300K+ tokens and degrade the model (2026-06-13). For agents
+ * whose context is already small, this is a no-op.
+ */
+export function trimContextToBudget(messages, {
+  maxTokens = MAX_CONTEXT_TOKENS,
+  maxMessages = MAX_CONTEXT_MESSAGES,
+  minMessages = MIN_CONTEXT_MESSAGES,
+} = {}) {
+  if (!Array.isArray(messages) || messages.length === 0) return messages
+  let trimmed = messages.length > maxMessages ? messages.slice(-maxMessages) : messages.slice()
+  let total = trimmed.reduce((sum, m) => sum + estimateMessageTokens(m), 0)
+  while (total > maxTokens && trimmed.length > minMessages) {
+    total -= estimateMessageTokens(trimmed[0])
+    trimmed.shift()
+  }
+  while (trimmed.length > 1 && leadsWithToolResult(trimmed[0])) {
+    trimmed.shift()
+  }
+  return trimmed
+}
 
 /**
  * A Room is a shared conversation space for one persona.
@@ -1003,9 +1064,7 @@ export class Room {
       })
       this.messages = result.messages
       // Trim context to prevent unbounded growth
-      if (this.messages.length > MAX_CONTEXT_MESSAGES) {
-        this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
-      }
+      this.messages = trimContextToBudget(this.messages)
 
       // Route response back as a DM — strip any DM prefix the agent may have echoed
       let dmResponse = assistantText.trim()
@@ -1444,9 +1503,7 @@ export class Room {
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
       // Trim context to prevent unbounded growth
-      if (this.messages.length > MAX_CONTEXT_MESSAGES) {
-        this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
-      }
+      this.messages = trimContextToBudget(this.messages)
 
       // Delegation-check recovery: the host was asked to scan the user's
       // message for additional agents beyond the parser's floor pick. If the
@@ -1704,9 +1761,7 @@ export class Room {
 
       this.messages = result.messages
       // Trim context to prevent unbounded growth
-      if (this.messages.length > MAX_CONTEXT_MESSAGES) {
-        this.messages = this.messages.slice(-MAX_CONTEXT_MESSAGES)
-      }
+      this.messages = trimContextToBudget(this.messages)
       const parkedToolThoughts = (this._idleToolThoughts || []).map(s => s.trim()).filter(Boolean)
       if (idleText || parkedToolThoughts.length > 0) {
         // Idle turns are thought-lane by design. Split the text to keep raw
