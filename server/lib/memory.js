@@ -9,6 +9,20 @@ export const MEMORY_READ_CAP_BYTES = 32 * 1024
 // file up before it becomes the next oversized read_memory dump.
 export const MEMORY_COMPACT_WARN_BYTES = 64 * 1024
 
+/**
+ * Cap a string to `capBytes` of UTF-8. Shared by the read_memory tool and the
+ * prompt assembler's auto_read injection so both enforce the same limit — the
+ * assembler previously read files unbounded, letting a 479KB MEMORY.md ride
+ * into the system prompt on every turn (margo, 2026-07-04). A boundary split
+ * mid-character yields a replacement char at the cut point, which is fine in
+ * a truncation context.
+ */
+export function capUtf8Bytes(content, capBytes = MEMORY_READ_CAP_BYTES) {
+  const buf = Buffer.from(content, 'utf8')
+  if (buf.length <= capBytes) return { text: content, truncated: false, totalBytes: buf.length }
+  return { text: buf.subarray(0, capBytes).toString('utf8'), truncated: true, totalBytes: buf.length }
+}
+
 export class Memory {
   constructor(personaDir, memorySubdir = 'memory/') {
     this.dir = join(personaDir, memorySubdir)
@@ -40,12 +54,11 @@ export class Memory {
   async readCapped(filename, capBytes = MEMORY_READ_CAP_BYTES) {
     const content = await this.read(filename)
     if (content === null) return null
-    const buf = Buffer.from(content, 'utf8')
-    if (buf.length <= capBytes) return content
-    const head = buf.subarray(0, capBytes).toString('utf8')
-    const totalKB = Math.ceil(buf.length / 1024)
+    const { text, truncated, totalBytes } = capUtf8Bytes(content, capBytes)
+    if (!truncated) return content
+    const totalKB = Math.ceil(totalBytes / 1024)
     const capKB = Math.floor(capBytes / 1024)
-    return `${head}\n\n… [truncated: showing the first ${capKB}KB of ${totalKB}KB total — this file is too large to read in full; split it into smaller topic files]`
+    return `${text}\n\n… [truncated: showing the first ${capKB}KB of ${totalKB}KB total — this file is too large to read in full; split it into smaller topic files]`
   }
 
   async write(filename, content) {
@@ -72,5 +85,15 @@ export class Memory {
     } catch {
       return []
     }
+  }
+
+  /** Memory files with on-disk byte sizes — the visibility agents need to manage their own compaction. */
+  async listWithSizes() {
+    const files = await this.list()
+    const out = []
+    for (const filename of files) {
+      out.push({ filename, bytes: (await this.sizeOf(filename)) ?? 0 })
+    }
+    return out
   }
 }

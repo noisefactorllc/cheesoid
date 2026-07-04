@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { Memory, MEMORY_READ_CAP_BYTES } from '../server/lib/memory.js'
+import { Memory, MEMORY_READ_CAP_BYTES, capUtf8Bytes } from '../server/lib/memory.js'
 import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -138,6 +138,31 @@ describe('Memory', () => {
       await mem.append('log.md', 'b'.repeat(10))
       // original 10 bytes + '\n' + 10 appended bytes = 21
       assert.equal(await mem.sizeOf('log.md'), 21)
+    })
+  })
+
+  describe('capUtf8Bytes', () => {
+    it('passes content at or under the cap through untouched', () => {
+      const content = 'x'.repeat(100)
+      const result = capUtf8Bytes(content, 100)
+      assert.equal(result.text, content)
+      assert.equal(result.truncated, false)
+      assert.equal(result.totalBytes, 100)
+    })
+
+    it('truncates content over the cap and reports the true size', () => {
+      const content = 'x'.repeat(MEMORY_READ_CAP_BYTES + 500)
+      const result = capUtf8Bytes(content)
+      assert.equal(result.truncated, true)
+      assert.equal(result.totalBytes, MEMORY_READ_CAP_BYTES + 500)
+      assert.equal(Buffer.byteLength(result.text, 'utf8'), MEMORY_READ_CAP_BYTES)
+    })
+
+    it('measures bytes, not characters, for multibyte content', () => {
+      const content = '🧀'.repeat(50) // 4 bytes each = 200 bytes, 100 JS chars
+      const result = capUtf8Bytes(content, 100)
+      assert.equal(result.truncated, true)
+      assert.equal(result.totalBytes, 200)
     })
   })
 })

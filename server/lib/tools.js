@@ -2,7 +2,7 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { buildSharedWorkspaceTools } from './shared-workspace.js'
-import { MEMORY_COMPACT_WARN_BYTES } from './memory.js'
+import { MEMORY_COMPACT_WARN_BYTES, MEMORY_READ_CAP_BYTES } from './memory.js'
 
 /**
  * Build the full tool set for a persona: memory tools + persona-specific tools.
@@ -416,7 +416,7 @@ function buildMemoryTools(memory, state) {
     },
     {
       name: 'list_memory',
-      description: 'List all available memory files.',
+      description: 'List all available memory files with their sizes. Files flagged as over the read/preload cap should be compacted into topic files.',
       input_schema: { type: 'object', properties: {} },
     },
     {
@@ -470,8 +470,16 @@ function buildMemoryTools(memory, state) {
         return { output: `Appended to: ${input.filename}${pressure}` }
       }
       case 'list_memory': {
-        const files = await memory.list()
-        return { output: files.length > 0 ? files.join('\n') : '(no memory files)' }
+        const files = await memory.listWithSizes()
+        if (files.length === 0) return { output: '(no memory files)' }
+        const capKB = Math.floor(MEMORY_READ_CAP_BYTES / 1024)
+        const lines = files.map(({ filename, bytes }) => {
+          const kb = Math.ceil(bytes / 1024)
+          return bytes > MEMORY_READ_CAP_BYTES
+            ? `${filename} (${kb}KB — over the ${capKB}KB read/preload cap; compact into topic files)`
+            : `${filename} (${kb}KB)`
+        })
+        return { output: lines.join('\n') }
       }
       case 'get_state': {
         if (!state) return { output: 'State not available', is_error: true }

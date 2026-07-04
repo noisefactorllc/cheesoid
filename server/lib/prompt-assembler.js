@@ -1,5 +1,31 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { capUtf8Bytes, MEMORY_READ_CAP_BYTES, MEMORY_COMPACT_WARN_BYTES } from './memory.js'
+
+// Framework-level memory-hygiene doctrine, injected for every persona so
+// individual persona prompts never need to restate limits or compaction
+// procedure. The numbers are derived from the enforced constants so the
+// prose can never drift from what the code actually does.
+const _CAP_KB = Math.floor(MEMORY_READ_CAP_BYTES / 1024)
+const _WARN_KB = Math.floor(MEMORY_COMPACT_WARN_BYTES / 1024)
+const MEMORY_DOCTRINE = [
+  `## Memory Hygiene`,
+  ``,
+  `Your memory is a working set, not an archive. The framework enforces limits: auto_read files (like MEMORY.md) are preloaded into your prompt but truncated past ${_CAP_KB}KB; \`read_memory\` returns at most ${_CAP_KB}KB of a file; \`append_memory\` warns once a file passes ${_WARN_KB}KB; \`list_memory\` shows every file's size.`,
+  ``,
+  `Structure your memory accordingly:`,
+  `- **MEMORY.md** is a tight index of durable facts: the current state of the world, active priorities, standing directives, and one-line pointers to topic files. Keep it well under ${_CAP_KB}KB.`,
+  `- **Topic files** hold the details: episodes, incident notes, dated snapshots, deep context — named by topic and date when relevant (e.g. \`launch-2026-04.md\`, \`metrics-2026-q2.md\`).`,
+  ``,
+  `Compaction is part of your job. Do it during idle time, and immediately when you see a truncation or size notice:`,
+  `1. Verify first — refresh facts from live sources before rewriting. Never compress stale facts into confident-sounding summaries.`,
+  `2. Rewrite MEMORY.md with \`write_memory\`: keep what a future you needs, move episodic detail into topic files, delete what is no longer true.`,
+  `3. When a file accumulates contradictions or dead facts, rewrite it rather than appending another correction.`,
+].join('\n')
+
+// One WARN per persona+file per process for oversized auto_read files — the
+// assembler runs every turn on the non-Claude path and would otherwise spam.
+const _warnedOversizedAutoRead = new Set()
 
 // Base behavioral layer for non-Anthropic models. Claude gets this from its
 // training/system prompt; open models need it explicitly.
@@ -294,6 +320,8 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
 
   operationalSections.push(SESSION_EPHEMERALITY)
 
+  operationalSections.push(MEMORY_DOCTRINE)
+
   // Plugin skills
   for (const plugin of plugins) {
     for (const skill of plugin.skills) {
@@ -308,13 +336,31 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
   // Config degradation notices (set by persona.js for openai-compat)
   const degradationNotices = config._degradationNotices || []
 
-  // Memory files
+  // Memory files. Injection is capped to the same limit as the read_memory
+  // tool — auto_read used to bypass that cap entirely, so an agent that let
+  // MEMORY.md grow unbounded injected the whole thing into its own system
+  // prompt every turn (margo's reached 479KB ≈ 120K tokens, 2026-07-04). The
+  // truncation notice rides in the prompt itself so an oversized agent sees
+  // standing pressure to compact until the file is back under the cap.
   const contextSections = []
   const memoryDir = config.memory?.dir || 'memory/'
   const autoRead = config.memory?.auto_read || []
   for (const filename of autoRead) {
     const content = await readSafe(join(personaDir, memoryDir, filename))
-    if (content) contextSections.push(content)
+    if (!content) continue
+    const { text, truncated, totalBytes } = capUtf8Bytes(content)
+    if (!truncated) {
+      contextSections.push(text)
+      continue
+    }
+    const totalKB = Math.ceil(totalBytes / 1024)
+    const capKB = Math.floor(MEMORY_READ_CAP_BYTES / 1024)
+    const warnKey = `${config.name || personaDir}:${filename}`
+    if (!_warnedOversizedAutoRead.has(warnKey)) {
+      _warnedOversizedAutoRead.add(warnKey)
+      console.log(`[${config.name || 'unknown'}] WARN: auto_read ${filename} is ${totalKB}KB — truncated to ${capKB}KB in the system prompt; compact it into topic files`)
+    }
+    contextSections.push(`${text}\n\n… [preload truncated: showing the first ${capKB}KB of ${totalKB}KB of ${filename} — a memory file this large degrades your context on every turn. Compact ${filename}: keep it a tight index of durable facts and move the rest into topic files.]`)
   }
 
   // Tool journal — recent tool use summaries for cross-session awareness

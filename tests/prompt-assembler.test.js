@@ -56,6 +56,54 @@ describe('assemblePrompt', () => {
     assert.ok(systemIdx < memoryIdx)
   })
 
+  it('injects the framework memory-hygiene doctrine with numbers from the enforced constants', async () => {
+    const dir = await makePersona({ 'SOUL.md': 'Soul.' })
+
+    const result = flat(await assemblePrompt(dir, { display_name: 'Test' }))
+
+    assert.ok(result.includes('## Memory Hygiene'))
+    assert.ok(result.includes('truncated past 32KB'))
+    assert.ok(result.includes('warns once a file passes 64KB'))
+    assert.ok(result.includes('Rewrite MEMORY.md with `write_memory`'))
+    assert.ok(result.includes('Never compress stale facts'))
+  })
+
+  it('caps oversized auto_read memory in the assembled prompt', async () => {
+    const big = 'M'.repeat(40 * 1024) // 40KB > 32KB cap
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'memory/MEMORY.md': big,
+    })
+
+    const result = flat(await assemblePrompt(dir, {
+      display_name: 'Test',
+      name: 'test-cap',
+      memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
+    }))
+
+    assert.ok(result.includes('[preload truncated: showing the first 32KB of 40KB of MEMORY.md'))
+    assert.ok(result.includes('Compact MEMORY.md'))
+    // the injected memory content itself is bounded near the cap, not 40KB
+    const memoryPortion = result.slice(result.indexOf('MMMM'), result.indexOf('[preload truncated'))
+    assert.ok(Buffer.byteLength(memoryPortion, 'utf8') <= 33 * 1024)
+  })
+
+  it('injects auto_read memory at or under the cap verbatim with no marker', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'memory/MEMORY.md': 'Small durable facts.',
+    })
+
+    const result = flat(await assemblePrompt(dir, {
+      display_name: 'Test',
+      name: 'test-nocap',
+      memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
+    }))
+
+    assert.ok(result.includes('Small durable facts.'))
+    assert.ok(!result.includes('[preload truncated'))
+  })
+
   it('Claude path returns { static, dynamic } with the timestamp only in the dynamic tail', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Soul corpus.',

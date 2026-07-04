@@ -93,4 +93,36 @@ describe('memory tools (read_memory / append_memory) via loadTools', () => {
     assert.match(result.output, /^Appended to: MEMORY\.md/)
     assert.match(result.output, /KB — consider compacting into topic files/)
   })
+
+  it('list_memory reports each file with its size', async () => {
+    const dir = await makeMemoryPersona({ 'MEMORY.md': 'x'.repeat(2048), 'notes.md': 'tiny' })
+    const config = { memory: { dir: 'memory/', auto_read: [] } }
+    const mem = new Memory(dir, 'memory/')
+    const tools = await loadTools(dir, config, mem, stubState(), stubRoom(), null)
+
+    const result = await tools.execute('list_memory', {})
+    assert.match(result.output, /MEMORY\.md \(2KB\)/)
+    assert.match(result.output, /notes\.md \(1KB\)/)
+    assert.ok(!result.output.includes('over the'), 'no cap flag for small files')
+  })
+
+  it('list_memory flags files over the read/preload cap', async () => {
+    const dir = await makeMemoryPersona({ 'MEMORY.md': 'x'.repeat(MEMORY_READ_CAP_BYTES + 1024) })
+    const config = { memory: { dir: 'memory/', auto_read: [] } }
+    const mem = new Memory(dir, 'memory/')
+    const tools = await loadTools(dir, config, mem, stubState(), stubRoom(), null)
+
+    const result = await tools.execute('list_memory', {})
+    assert.match(result.output, /MEMORY\.md \(33KB — over the 32KB read\/preload cap; compact into topic files\)/)
+  })
+
+  it('list_memory reports no memory files when the directory is empty', async () => {
+    const dir = await makeMemoryPersona()
+    const config = { memory: { dir: 'memory/', auto_read: [] } }
+    const mem = new Memory(dir, 'memory/')
+    const tools = await loadTools(dir, config, mem, stubState(), stubRoom(), null)
+
+    const result = await tools.execute('list_memory', {})
+    assert.equal(result.output, '(no memory files)')
+  })
 })
