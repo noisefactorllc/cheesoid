@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { Memory } from '../server/lib/memory.js'
+import { Memory, MEMORY_READ_CAP_BYTES } from '../server/lib/memory.js'
 import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -68,5 +68,76 @@ describe('Memory', () => {
     const mem = new Memory(personaDir, 'memory/')
     const content = await mem.read('nope.md')
     assert.equal(content, null)
+  })
+
+  describe('readCapped', () => {
+    it('passes small files through unchanged', async () => {
+      const { personaDir } = await makeMemoryDir({
+        'topics.md': 'Topic content.',
+      })
+      const mem = new Memory(personaDir, 'memory/')
+      const content = await mem.readCapped('topics.md')
+      assert.equal(content, 'Topic content.')
+    })
+
+    it('passes a file exactly at the cap through unchanged', async () => {
+      const exact = 'x'.repeat(100)
+      const { personaDir } = await makeMemoryDir({ 'at-cap.md': exact })
+      const mem = new Memory(personaDir, 'memory/')
+      const content = await mem.readCapped('at-cap.md', 100)
+      assert.equal(content, exact)
+    })
+
+    it('truncates oversized files to the cap plus a sizing trailer', async () => {
+      // KB-scale cap, matching how MEMORY_READ_CAP_BYTES is actually used (a
+      // clean multiple of 1024) so the KB figures in the trailer are exact.
+      const capBytes = 2048
+      const big = 'y'.repeat(capBytes + 500) // 2548 bytes -> ceil(2548/1024) = 3KB
+      const { personaDir } = await makeMemoryDir({ 'big.md': big })
+      const mem = new Memory(personaDir, 'memory/')
+      const content = await mem.readCapped('big.md', capBytes)
+      assert.ok(content.startsWith('y'.repeat(capBytes)), 'keeps exactly the first capBytes')
+      assert.ok(content.includes('truncated'), 'states that the content was truncated')
+      assert.ok(content.includes('2KB'), 'states the cap size in KB')
+      assert.ok(content.includes('3KB'), 'states the true total size in KB')
+      assert.ok(content.includes('topic files'), 'advises splitting the file into topic files')
+    })
+
+    it('defaults to MEMORY_READ_CAP_BYTES (32KB) when no cap is given', async () => {
+      const big = 'z'.repeat(MEMORY_READ_CAP_BYTES + 1024)
+      const { personaDir } = await makeMemoryDir({ 'MEMORY.md': big })
+      const mem = new Memory(personaDir, 'memory/')
+      const content = await mem.readCapped('MEMORY.md')
+      assert.ok(content.length < big.length, 'default cap truncates a file over 32KB')
+      assert.ok(content.startsWith('z'.repeat(MEMORY_READ_CAP_BYTES)))
+    })
+
+    it('returns null for missing files, same as read', async () => {
+      const { personaDir } = await makeMemoryDir()
+      const mem = new Memory(personaDir, 'memory/')
+      assert.equal(await mem.readCapped('nope.md'), null)
+    })
+  })
+
+  describe('sizeOf', () => {
+    it('returns the byte size of a memory file on disk', async () => {
+      const { personaDir } = await makeMemoryDir({ 'notes.md': 'x'.repeat(42) })
+      const mem = new Memory(personaDir, 'memory/')
+      assert.equal(await mem.sizeOf('notes.md'), 42)
+    })
+
+    it('returns null for missing files', async () => {
+      const { personaDir } = await makeMemoryDir()
+      const mem = new Memory(personaDir, 'memory/')
+      assert.equal(await mem.sizeOf('nope.md'), null)
+    })
+
+    it('reflects growth after an append', async () => {
+      const { personaDir } = await makeMemoryDir({ 'log.md': 'a'.repeat(10) })
+      const mem = new Memory(personaDir, 'memory/')
+      await mem.append('log.md', 'b'.repeat(10))
+      // original 10 bytes + '\n' + 10 appended bytes = 21
+      assert.equal(await mem.sizeOf('log.md'), 21)
+    })
   })
 })

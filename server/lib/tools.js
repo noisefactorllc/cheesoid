@@ -2,6 +2,7 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { buildSharedWorkspaceTools } from './shared-workspace.js'
+import { MEMORY_COMPACT_WARN_BYTES } from './memory.js'
 
 /**
  * Build the full tool set for a persona: memory tools + persona-specific tools.
@@ -448,7 +449,7 @@ function buildMemoryTools(memory, state) {
   async function execute(name, input) {
     switch (name) {
       case 'read_memory': {
-        const content = await memory.read(input.filename)
+        const content = await memory.readCapped(input.filename)
         return content !== null
           ? { output: content }
           : { output: `File not found: ${input.filename}`, is_error: true }
@@ -462,7 +463,11 @@ function buildMemoryTools(memory, state) {
       }
       case 'append_memory': {
         await memory.append(input.filename, input.content)
-        return { output: `Appended to: ${input.filename}` }
+        const size = await memory.sizeOf(input.filename)
+        const pressure = size != null && size > MEMORY_COMPACT_WARN_BYTES
+          ? ` (file is ${Math.ceil(size / 1024)}KB — consider compacting into topic files)`
+          : ''
+        return { output: `Appended to: ${input.filename}${pressure}` }
       }
       case 'list_memory': {
         const files = await memory.list()

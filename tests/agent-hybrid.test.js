@@ -503,7 +503,10 @@ it('executor fallback uses registry when available', async () => {
     const tools = makeTools([{ name: 'bash', description: 'Run a command' }])
     const config = {
       provider: orchestrator,
-      model: 'claude-sonnet-4-6',
+      // Non-Claude orchestrator: the executor shim only engages for weak
+      // (non-Claude) orchestrators; Claude models chain tools natively and
+      // skip the executor loop entirely.
+      model: 'gemma-4-31b',
       executorProvider: failingExecutor,
       executorModel: 'failing-model',
       executorFallbackModels: ['claude-haiku-4-5'],

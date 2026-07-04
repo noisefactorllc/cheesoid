@@ -28,8 +28,49 @@ describe('trimContextToBudget', () => {
     assert.ok(tokensOf(out) <= budget + 16_000, `trimmed=${tokensOf(out)} should be ~<= ${budget}`)
     // Newest turn preserved.
     assert.deepStrictEqual(out[out.length - 1], msgs[msgs.length - 1])
-    // Actually dropped something.
-    assert.ok(out.length < msgs.length)
+    // Aging runs before eviction, so the 13 old, oversized tool_results here
+    // shrink enough on their own to satisfy the budget — eviction never needs
+    // to drop a whole message. That is a strictly better outcome than
+    // dropping messages: no history is lost, only stale tool-result detail.
+    assert.equal(out.length, msgs.length, 'aging alone can satisfy the budget without evicting any message')
+    assert.ok(tokensOf(out) < tokensOf(msgs) / 4, `trimmed=${tokensOf(out)} should have shrunk dramatically via aging`)
+  })
+
+  it('evicts down to the target once triggered (hysteresis), not just under the trigger', () => {
+    const msgs = []
+    for (let i = 0; i < 16; i++) {
+      msgs.push({ role: 'user', content: `turn ${i}` })
+      msgs.push({
+        role: 'assistant',
+        content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: big(60 * 1024) }],
+      })
+    }
+    const out = trimContextToBudget(msgs, { maxTokens: 80_000, targetTokens: 48_000, minMessages: 4 })
+    // Draining to the 48K target leaves it well under the 80K trigger. The old
+    // trim-to-trigger behavior would have stopped at ~77K (> 64K).
+    assert.ok(tokensOf(out) < 64_000, `trimmed=${tokensOf(out)} should approach the 48K target, not the 80K trigger`)
+    assert.ok(tokensOf(out) <= 48_000 + 16_000, 'within one large message of the target')
+    assert.ok(tokensOf(out) < tokensOf(msgs))
+    assert.deepStrictEqual(out[out.length - 1], msgs[msgs.length - 1])
+  })
+
+  it('does NOT evict between the target and the trigger (trigger stays at maxTokens)', () => {
+    // ~61K total — above the 48K target but below the 80K trigger. The target
+    // only governs how far to drain ONCE triggered; the trigger is maxTokens, so
+    // nothing is evicted here.
+    const msgs = []
+    for (let i = 0; i < 4; i++) {
+      msgs.push({ role: 'user', content: `turn ${i}` })
+      msgs.push({
+        role: 'assistant',
+        content: [{ type: 'tool_result', tool_use_id: `t${i}`, content: big(60 * 1024) }],
+      })
+    }
+    const total = tokensOf(msgs)
+    assert.ok(total > 48_000 && total < 80_000, `precondition: ${total} is between target and trigger`)
+    const out = trimContextToBudget(msgs)
+    assert.equal(out.length, msgs.length, 'no messages evicted between target and trigger')
+    assert.equal(tokensOf(out), total)
   })
 
   it('never trims below minMessages, even if the tail is large', () => {
@@ -72,5 +113,85 @@ describe('trimContextToBudget', () => {
   it('handles empty / non-array input safely', () => {
     assert.deepStrictEqual(trimContextToBudget([]), [])
     assert.equal(trimContextToBudget(null), null)
+  })
+})
+
+describe('tool-result aging (trimContextToBudget)', () => {
+  // 8 messages / 4 assistant turns, with the oversized tool_result on the
+  // OLDEST assistant turn — 3 assistant turns newer than it, so it falls
+  // outside the protected window (TOOL_RESULT_AGE_PROTECT_TURNS = 3) and is
+  // eligible for aging once a trim event fires.
+  function messagesWithOldToolResult(toolResultContent) {
+    return [
+      { role: 'user', content: 'turn 0' },
+      { role: 'assistant', content: [{ type: 'tool_result', tool_use_id: 't0', content: toolResultContent }] },
+      { role: 'user', content: 'turn 1' },
+      { role: 'assistant', content: 'ack 1' },
+      { role: 'user', content: 'turn 2' },
+      { role: 'assistant', content: 'ack 2' },
+      { role: 'user', content: 'turn 3' },
+      { role: 'assistant', content: 'ack 3' },
+    ]
+  }
+
+  it('ages an oversized tool_result outside the protected window once a trim event fires', () => {
+    const bigResult = 'q'.repeat(1000)
+    const msgs = messagesWithOldToolResult(bigResult)
+    // minMessages == msgs.length so the eviction loop can never run — isolates
+    // aging from eviction. maxTokens: 1 guarantees the trim event fires.
+    const out = trimContextToBudget(msgs, { maxTokens: 1, minMessages: msgs.length })
+
+    assert.equal(out.length, msgs.length, 'aging shrinks content, it does not evict messages')
+    const aged = out[1].content[0]
+    assert.equal(
+      aged.content,
+      `${'q'.repeat(200)}… [aged tool result — 1000 chars total; re-run the tool if this data is needed]`,
+    )
+    assert.notEqual(out[1], msgs[1], 'aged message is a new object (copy-on-write)')
+    assert.equal(msgs[1].content[0].content, bigResult, 'original input message is never mutated')
+  })
+
+  it('never ages tool_results in the most recent protected turns, even if huge, even when a trim fires', () => {
+    const bigResult = 'r'.repeat(1000)
+    // 3 assistant turns total (indices 1, 3, 5) — the protected window is the
+    // most recent 3 assistant turns, so ALL of them (including the tool_result
+    // on the very last one) are protected here.
+    const msgs = [
+      { role: 'user', content: 'turn 0' },
+      { role: 'assistant', content: 'ack 0' },
+      { role: 'user', content: 'turn 1' },
+      { role: 'assistant', content: 'ack 1' },
+      { role: 'user', content: 'turn 2' },
+      { role: 'assistant', content: [{ type: 'tool_result', tool_use_id: 't2', content: bigResult }] },
+    ]
+    const out = trimContextToBudget(msgs, { maxTokens: 1, minMessages: msgs.length })
+
+    assert.equal(out[5], msgs[5], 'protected message keeps the exact same reference — untouched')
+    assert.equal(out[5].content[0].content, bigResult, 'protected tool_result content is not shrunk')
+  })
+
+  it('leaves tool_results at or under the aging threshold untouched, even when old and a trim fires', () => {
+    // Exactly at TOOL_RESULT_AGE_THRESHOLD_CHARS (600) — "longer than ~600"
+    // means strictly-over triggers aging, so this boundary case must survive.
+    const smallResult = 's'.repeat(600)
+    const msgs = messagesWithOldToolResult(smallResult)
+    const out = trimContextToBudget(msgs, { maxTokens: 1, minMessages: msgs.length })
+
+    assert.equal(out[1], msgs[1], 'small tool_result message keeps the same reference — untouched')
+    assert.equal(out[1].content[0].content, smallResult)
+    assert.ok(!out[1].content[0].content.includes('aged tool result'))
+  })
+
+  it('does not age anything when no trim event fires, even with an old oversized tool_result present', () => {
+    const bigResult = 't'.repeat(1000)
+    const msgs = messagesWithOldToolResult(bigResult)
+    // Default budget (80K tokens) — this tiny message set comes nowhere close,
+    // so the hysteresis trigger never fires and aging must not run at all.
+    const out = trimContextToBudget(msgs)
+
+    assert.equal(out.length, msgs.length)
+    for (let i = 0; i < msgs.length; i++) {
+      assert.equal(out[i], msgs[i], `message ${i} must be the exact same reference — no trim, no aging`)
+    }
   })
 })

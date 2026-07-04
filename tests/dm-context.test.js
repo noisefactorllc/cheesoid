@@ -15,6 +15,10 @@ async function makePersona(files) {
   return dir
 }
 
+// The Claude path returns { static, dynamic }; flatten it for content-presence
+// checks (the DM framing lives in the static corpus).
+const flat = (r) => (typeof r === 'string' ? r : Array.isArray(r) ? r.map(s => s.content).join('\n\n') : `${r.static}\n\n${r.dynamic}`)
+
 describe('DM-mode prompt assembly', () => {
   it('omits shared-room framing when mode=dm (Claude path)', async () => {
     const dir = await makePersona({
@@ -22,12 +26,12 @@ describe('DM-mode prompt assembly', () => {
       'prompts/system.md': 'Persona voice lives here.',
     })
 
-    const prompt = await assemblePrompt(dir, {
+    const prompt = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
       rooms: [{ name: '#general' }],
       agents: [{ name: 'Other' }],
-    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } })
+    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } }))
 
     assert.ok(!prompt.includes('You are in a shared room'),
       'Claude DM prompt must not contain shared-room framing')
@@ -105,10 +109,10 @@ describe('DM-mode prompt assembly', () => {
       'prompts/system.md': 'You are in a shared room. Be brief and kind.\n\n## Duties\n- Help.',
     })
 
-    const prompt = await assemblePrompt(dir, {
+    const prompt = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
-    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } })
+    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } }))
 
     assert.ok(!prompt.includes('You are in a shared room.'),
       'DM prompt must not carry the persona-authored shared-room assertion')
@@ -124,10 +128,10 @@ describe('DM-mode prompt assembly', () => {
       'prompts/system.md': 'You are in a shared room. Be brief and kind.',
     })
 
-    const prompt = await assemblePrompt(dir, {
+    const prompt = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
-    })
+    }))
 
     assert.ok(prompt.includes('You are in a shared room.'),
       'room-mode prompt must still carry persona-authored room framing')

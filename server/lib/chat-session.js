@@ -40,6 +40,54 @@ function replaceTimestamp(prompt) {
 }
 
 /**
+ * Render the current agent state as a compact system-prompt tail block, or ''
+ * when state is not loaded. Injected each turn (state is tiny) so the model sees
+ * live state without a get_state round-trip. Guards against unset/failed state.
+ */
+function stateBlock(state) {
+  if (!state?.data) return ''
+  let json
+  try { json = JSON.stringify(state.data) } catch { return '' }
+  return `\n\n## Current State\n${json}`
+}
+
+/**
+ * Compose the provider-bound system prompt from an assembled prompt plus the
+ * volatile per-turn tail (timestamp, optional moderator addendum, current
+ * state). Shape-dispatched:
+ *   - { static, dynamic }  (Claude path) → a two-element Anthropic content-block
+ *       array: the stable static corpus marked cache_control:ephemeral, and an
+ *       unmarked dynamic tail (timestamp + addendum + state). This is what makes
+ *       the large static prefix cacheable across turns.
+ *   - array  (openai-compat layers)      → timestamp substituted in place; the
+ *       volatile suffix appended to the END of the last layer so layers 1-3 stay
+ *       a stable prefix for provider-side automatic caching.
+ *   - string (fallback/stubs)            → timestamp substituted; suffix appended.
+ */
+function composeSystem(assembled, { addendum = '', state = null } = {}) {
+  if (assembled == null) return assembled
+  const suffix = (addendum || '') + stateBlock(state)
+
+  if (typeof assembled === 'object' && !Array.isArray(assembled) && typeof assembled.static === 'string') {
+    return [
+      { type: 'text', text: assembled.static, cache_control: { type: 'ephemeral' } },
+      { type: 'text', text: replaceTimestamp(assembled.dynamic) + suffix },
+    ]
+  }
+
+  if (Array.isArray(assembled)) {
+    const layers = replaceTimestamp(assembled)
+    if (suffix) {
+      const last = layers[layers.length - 1]
+      layers[layers.length - 1] = { ...last, content: last.content + suffix }
+    }
+    return layers
+  }
+
+  return replaceTimestamp(assembled) + suffix
+}
+
+/**
  * Return the chat-lane portion of model output. Thought-lane content is still
  * preserved (via splitChatAndThought) and should be handled by the caller when
  * both lanes matter; this helper exists for call sites that only need the
@@ -68,7 +116,25 @@ const MAX_CONTEXT_MESSAGES = 40 // max messages in the live agent context
 // ~80K for messages + ~35K system prompt stays under where the model was last
 // observed healthy (~122K total).
 const MAX_CONTEXT_TOKENS = 80_000
+// Trim hysteresis: eviction TRIGGERS at MAX_CONTEXT_TOKENS but, once it fires,
+// evicts down to this lower TARGET. Trimming only to the trigger would shave one
+// message per turn and churn the message-array prefix continuously (busting
+// incremental prompt caching every turn); dropping to the target instead leaves
+// the prefix stable for many turns before the next eviction.
+const TRIM_TARGET_TOKENS = 48_000
 const MIN_CONTEXT_MESSAGES = 4 // never trim below this — the latest turn must survive even if large
+// Tool-result aging: when a trim event fires, old tool_results are shrunk in
+// place BEFORE any message is evicted. This is a second defense against the
+// same 2026-06-13 "Brad braindead" failure described above — even inside the
+// token budget, a handful of surviving giant tool_results (e.g. a
+// read_memory dump) can still dominate the live window at full fidelity
+// until eviction happens to reach them. Aging only runs alongside a trim
+// event (never every turn) so its cache-prefix invalidation piggybacks on
+// the trim's own invalidation instead of adding a second cache-busting edit
+// on unrelated turns.
+const TOOL_RESULT_AGE_THRESHOLD_CHARS = 600 // tool_result content longer than this gets aged
+const TOOL_RESULT_AGE_KEEP_CHARS = 200 // chars kept from the head of an aged tool_result
+const TOOL_RESULT_AGE_PROTECT_TURNS = 3 // most recent N assistant turns (the current/most-recent tool loop) are never aged
 // Flood circuit-breaker threshold: after this many identical consecutive
 // history entries, stop persisting duplicates. A runaway loop once wrote
 // ~149k identical wakeup messages in an hour (a 494MB day-file) that OOM'd the
@@ -88,6 +154,7 @@ Treat it as your own time to think:
   - Catch up on your own actions and commitments. What's still unresolved?
   - Plan your next move. What's worth doing, remembering, or setting aside?
   - Use tools only if they advance something already in flight — don't invent work.
+  - Memory upkeep is part of the job: if a memory file has grown large or gone stale, review it and consolidate or compact it — append-only growth quietly degrades recall.
 
 This is NOT a message to the user. They cannot read it. Do not address them, do not announce things to them, do not write "just a heads-up…" or "let me know if…" — if something actually needs to reach a human, send it as a real chat message via your tools. Otherwise, speak to yourself.
 
@@ -115,6 +182,52 @@ function leadsWithToolResult(message) {
 }
 
 /**
+ * Shrink oversized tool_result content in messages older than the most
+ * recent `protectTurns` assistant turns. A "turn" is one assistant-role
+ * message; the tool_result(s) answering that turn's tool_use calls live in
+ * the very next message, so protecting by assistant-message count also
+ * protects the tool_result(s) paired with it. Messages inside the protected
+ * window — including the current/most-recent tool loop — are returned
+ * exactly as given (same reference, untouched). If fewer than `protectTurns`
+ * assistant turns exist at all, nothing is old enough to age.
+ *
+ * Copy-on-write: only messages whose content actually shrinks get a new
+ * message/content-array object; everything else keeps its original
+ * reference, so an unaged prefix stays `===`-identical across calls.
+ */
+function ageOldToolResults(messages, protectTurns = TOOL_RESULT_AGE_PROTECT_TURNS) {
+  let assistantSeen = 0
+  let cutoff = 0
+  for (let i = messages.length - 1; i >= 0; i--) {
+    if (messages[i]?.role === 'assistant') {
+      assistantSeen++
+      if (assistantSeen === protectTurns) {
+        cutoff = i
+        break
+      }
+    }
+  }
+  if (assistantSeen < protectTurns) return messages // nothing is old enough to age yet
+
+  let anyChanged = false
+  const aged = messages.map((message, i) => {
+    if (i >= cutoff || !Array.isArray(message?.content)) return message
+    let contentChanged = false
+    const newContent = message.content.map(block => {
+      if (block?.type !== 'tool_result' || typeof block.content !== 'string') return block
+      if (block.content.length <= TOOL_RESULT_AGE_THRESHOLD_CHARS) return block
+      contentChanged = true
+      const head = block.content.slice(0, TOOL_RESULT_AGE_KEEP_CHARS)
+      return { ...block, content: `${head}… [aged tool result — ${block.content.length} chars total; re-run the tool if this data is needed]` }
+    })
+    if (!contentChanged) return message
+    anyChanged = true
+    return { ...message, content: newContent }
+  })
+  return anyChanged ? aged : messages
+}
+
+/**
  * Trim the live agent context to fit a token budget, keeping the NEWEST
  * messages. Bounds by message count first (cheap), then drops oldest messages
  * until under `maxTokens` — but never below `minMessages`, so the most recent
@@ -131,13 +244,26 @@ export function trimContextToBudget(messages, {
   maxTokens = MAX_CONTEXT_TOKENS,
   maxMessages = MAX_CONTEXT_MESSAGES,
   minMessages = MIN_CONTEXT_MESSAGES,
+  targetTokens = TRIM_TARGET_TOKENS,
 } = {}) {
   if (!Array.isArray(messages) || messages.length === 0) return messages
   let trimmed = messages.length > maxMessages ? messages.slice(-maxMessages) : messages.slice()
   let total = trimmed.reduce((sum, m) => sum + estimateMessageTokens(m), 0)
-  while (total > maxTokens && trimmed.length > minMessages) {
-    total -= estimateMessageTokens(trimmed[0])
-    trimmed.shift()
+  // Hysteresis: only START evicting once OVER maxTokens, but then drain down to
+  // the lower targetTokens so the surviving prefix stays stable for many turns
+  // (a boundary-hugging trim-to-maxTokens would churn one message every turn and
+  // defeat incremental prompt caching). targetTokens is clamped to maxTokens so
+  // a caller passing a small maxTokens can't ask for a larger target.
+  if (total > maxTokens) {
+    // Age old tool_results before evicting whole messages — often shrinks
+    // `total` enough on its own to reduce or avoid eviction outright.
+    trimmed = ageOldToolResults(trimmed)
+    total = trimmed.reduce((sum, m) => sum + estimateMessageTokens(m), 0)
+    const floor = Math.min(targetTokens, maxTokens)
+    while (total > floor && trimmed.length > minMessages) {
+      total -= estimateMessageTokens(trimmed[0])
+      trimmed.shift()
+    }
   }
   while (trimmed.length > 1 && leadsWithToolResult(trimmed[0])) {
     trimmed.shift()
@@ -187,7 +313,6 @@ export class Room {
         _lastHistSig: null,
         _lastHistRepeat: 0,
         _destroyed: false,
-        _sessionStartHandled: false,
         _pendingContextMessages: [],
         _moderatorPool: [persona.config.display_name],
         _moderatorIndex: 0,
@@ -254,8 +379,6 @@ export class Room {
   set _consecutiveDegenerateCount(v) { this._a._consecutiveDegenerateCount = v }
   get _destroyed() { return this._a._destroyed }
   set _destroyed(v) { this._a._destroyed = v }
-  get _sessionStartHandled() { return this._a._sessionStartHandled }
-  set _sessionStartHandled(v) { this._a._sessionStartHandled = v }
   get _pendingContextMessages() { return this._a._pendingContextMessages }
   set _pendingContextMessages(v) { this._a._pendingContextMessages = v }
   get _moderatorPool() { return this._a._moderatorPool }
@@ -1055,7 +1178,7 @@ export class Room {
           context: dmContextOpt,
         },
       )
-      const prompt = replaceTimestamp(basePrompt)
+      const prompt = composeSystem(basePrompt, { state: this.state })
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, (event) => {
         if (event.type === 'text_delta') assistantText += event.text
@@ -1475,30 +1598,16 @@ export class Room {
         }
       }
 
-      // Session start: force open models to read memory/state before first response
-      if (!this._sessionStartHandled && orchestratorProvider.supportsIntentRouting) {
-        this._sessionStartHandled = true
-        this.messages.push({
-          role: 'user',
-          content: '[system: This is your first interaction this session. You MUST call get_state and read_memory on MEMORY.md before responding. Do this now — do not skip this step.]',
-        })
-      }
-
       // Non-Claude models get the hierarchical soul corpus, assembled fresh
       const activeIsClaude = orchestratorModel.startsWith('claude')
       const basePrompt = activeIsClaude
         ? this.systemPrompt
         : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
-      let prompt = replaceTimestamp(basePrompt)
-      // Append moderator duties to system prompt — NOT to messages (prevents echo leak)
-      if (moderatorAddendum) {
-        if (typeof prompt === 'string') {
-          prompt += moderatorAddendum
-        } else if (Array.isArray(prompt)) {
-          const last = prompt[prompt.length - 1]
-          prompt[prompt.length - 1] = { ...last, content: last.content + moderatorAddendum }
-        }
-      }
+      // Compose the system prompt: timestamp + moderator addendum + current state
+      // go in the volatile tail (Claude: separate uncached block; openai: end of
+      // the last layer), leaving the stable corpus cacheable. The moderator
+      // addendum stays OUT of the user messages to prevent echo leak.
+      const prompt = composeSystem(basePrompt, { addendum: moderatorAddendum, state: this.state })
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
@@ -1744,7 +1853,7 @@ export class Room {
       const basePrompt = activeIsClaude
         ? this.systemPrompt
         : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
-      const prompt = replaceTimestamp(basePrompt)
+      const prompt = composeSystem(basePrompt, { state: this.state })
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
       const result = await agentFn(prompt, idleMessages, this.tools, agentConfig, onEvent)
 

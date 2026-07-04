@@ -15,6 +15,7 @@
 //   candidate with `content.parts[]` containing text / thought / functionCall parts.
 
 import circuitBreaker, { CircuitOpenError } from '../circuit-breaker.js'
+import { flattenSystem } from './translate.js'
 
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
@@ -360,14 +361,12 @@ export function createGeminiProvider(config) {
       }
 
       if (system) {
-        // The caller may pass a single string (Anthropic path) or an array
-        // of {role:'system', content:'...'} objects (openai-compat path, the
-        // 4-layer system-message hierarchy). Flatten arrays to one joined
-        // string — Gemini's systemInstruction accepts a single Content block.
-        const systemText = Array.isArray(system)
-          ? system.map(s => (typeof s === 'string' ? s : s.content || '')).join('\n\n---\n\n')
-          : String(system)
-        body.systemInstruction = { parts: [{ text: systemText }] }
+        // The caller may pass any system shape: a plain string, the
+        // openai-compat 4-layer {role:'system'} hierarchy, or — via a mid-loop
+        // orchestrator fallback from Claude — an Anthropic {type:'text'} block
+        // array or a { static, dynamic } split. flattenSystem collapses all of
+        // them to the single Content block Gemini's systemInstruction expects.
+        body.systemInstruction = { parts: [{ text: flattenSystem(system) }] }
       }
 
       if (geminiTools.length > 0) {

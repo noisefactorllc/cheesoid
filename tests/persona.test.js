@@ -209,4 +209,45 @@ orchestrator: claude-opus-4-6
 `)
     await assert.rejects(() => loadPersona(dir), /cannot use both orchestrator and cognition\/attention/)
   })
+
+  it('warns about decorative config keys that the framework does not enforce', async () => {
+    const dir = await makePersona(`
+name: test-decorative
+model: claude-sonnet-4-6
+max_budget_usd: 6
+
+chat:
+  prompt: prompts/system.md
+  idle_timeout_minutes: 30
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    assert.ok(logs.some(l => l === '[test-decorative] WARN: max_budget_usd is set but not enforced by the framework'))
+    assert.ok(logs.some(l => l === '[test-decorative] WARN: chat.idle_timeout_minutes is set but not enforced by the framework'))
+  })
+
+  it('does not warn when decorative keys are absent', async () => {
+    const dir = await makePersona(`
+name: test-clean
+model: claude-sonnet-4-6
+
+chat:
+  prompt: prompts/system.md
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    assert.ok(!logs.some(l => l.includes('not enforced by the framework')))
+  })
 })

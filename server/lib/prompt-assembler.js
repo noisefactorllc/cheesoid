@@ -147,7 +147,7 @@ For older conversations beyond your context window, use the \`search_history\` t
 - You need to verify something that was said previously
 
 ## What Is Already In Your System Prompt
-Your SOUL.md (identity, voice, boundaries) is already loaded into this system prompt — do not try to read it with read_memory or read_file. Your memory files listed in auto_read are also already loaded above.`
+Your SOUL.md (identity, voice, boundaries) is already loaded into this system prompt — do not try to read it with read_memory or read_file. Your memory files listed in auto_read are also already loaded above. Your current state (the get_state payload) is preloaded too, under a "## Current State" section near the end of this prompt — you do not need to call get_state just to read the current values.`
 
 export function currentTimestamp() {
   const now = new Date()
@@ -174,12 +174,15 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
 
   // Collect raw sections first, then structure by provider
 
-  // Identity
+  // Identity. The timestamp is intentionally NOT included here: it is volatile
+  // (minute resolution) and must stay out of the cacheable system prefix. Each
+  // provider path re-attaches it at the very end — the Claude path in a
+  // separate dynamic tail, the openai-compat path at the end of layer 4 — so
+  // the stable prefix caches cleanly.
   const identityParts = []
   if (config.display_name) {
     identityParts.push(`Your name is ${config.display_name}.`)
   }
-  identityParts.push('{{CURRENT_TIMESTAMP}}')
 
   // Soul
   const soul = await readSafe(join(personaDir, 'SOUL.md'))
@@ -347,8 +350,12 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
     }
     layer3Parts.push(SOURCE_TRUST_HIERARCHY)
 
-    // Layer 4: Context — chat history + memory + tail reinforcement
-    const layer4Parts = [CHAT_HISTORY, ...contextSections, TAIL_REINFORCEMENT]
+    // Layer 4: Context — chat history + memory + tail reinforcement. The
+    // volatile timestamp sits at the very END so layers 1-3 (and the head of
+    // layer 4) form a stable prefix for provider-side automatic prefix caching.
+    // chat-session appends per-turn additions (moderator addendum, current
+    // state) after it, keeping all volatile content clustered at the tail.
+    const layer4Parts = [CHAT_HISTORY, ...contextSections, TAIL_REINFORCEMENT, '{{CURRENT_TIMESTAMP}}']
 
     return [
       { role: 'system', content: layer1Parts.join('\n\n---\n\n') },
@@ -358,12 +365,16 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
     ]
   }
 
-  // Anthropic (Claude) path — single joined string, no behavioral base
+  // Anthropic (Claude) path. Returns a { static, dynamic } split rather than a
+  // single string: chat-session sends `static` as a cache_control:ephemeral
+  // system block (the large, stable corpus) and keeps the volatile timestamp —
+  // plus any per-turn additions (moderator addendum, current state) — in the
+  // separate uncached `dynamic` tail. The timestamp is intentionally absent
+  // from `static` so a byte change there never invalidates the cached prefix.
   const sections = []
   if (config.display_name) {
     sections.push(`Your name is ${config.display_name}.`)
   }
-  sections.push('{{CURRENT_TIMESTAMP}}')
   if (soul) sections.push(soul)
   if (systemPromptContent) sections.push(systemPromptContent)
   sections.push(...operationalSections)
@@ -378,7 +389,7 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
   sections.push(...contextSections)
   sections.push(TAIL_REINFORCEMENT)
 
-  return sections.join('\n\n---\n\n')
+  return { static: sections.join('\n\n---\n\n'), dynamic: '{{CURRENT_TIMESTAMP}}' }
 }
 
 async function readSafe(path) {

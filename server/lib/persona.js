@@ -3,6 +3,24 @@ import { join } from 'node:path'
 import yaml from 'js-yaml'
 import { loadPlugins } from './plugins.js'
 
+// persona.yaml keys accepted here for operator readability but not read by any
+// code path in server/ (grep-verified) — false-confidence guardrails that look
+// enforced but aren't. `path` is the dotted lookup into the parsed config.
+const DECORATIVE_CONFIG_KEYS = [
+  { path: ['max_budget_usd'], label: 'max_budget_usd' },
+  { path: ['chat', 'idle_timeout_minutes'], label: 'chat.idle_timeout_minutes' },
+]
+
+function warnDecorativeKeys(config) {
+  const name = config.name || 'unknown'
+  for (const { path, label } of DECORATIVE_CONFIG_KEYS) {
+    const value = path.reduce((obj, key) => obj?.[key], config)
+    if (value !== undefined) {
+      console.log(`[${name}] WARN: ${label} is set but not enforced by the framework`)
+    }
+  }
+}
+
 export async function loadPersona(personaDir) {
   const configPath = join(personaDir, 'persona.yaml')
   let raw
@@ -15,6 +33,7 @@ export async function loadPersona(personaDir) {
   const config = yaml.load(raw)
   resolveEnvVars(config)
   normalizeTierLists(config)
+  warnDecorativeKeys(config)
   validateProviders(config)
 
   // Validate and degrade gracefully for openai-compat

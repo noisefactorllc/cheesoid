@@ -5,6 +5,18 @@ import { mkdtemp, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+// The Claude (Anthropic) path returns { static, dynamic } (a cacheable static
+// corpus + a volatile timestamp tail); most assertions here only care that a
+// section is present somewhere in the assembled prompt. flat() collapses any
+// shape — string | {role,content}[] | {static,dynamic} — to one string for
+// those content-presence checks. Tests that assert the split or the layered
+// array structure use the raw result directly.
+const flat = (r) => {
+  if (typeof r === 'string') return r
+  if (Array.isArray(r)) return r.map(s => s.content).join('\n\n')
+  return `${r.static}\n\n${r.dynamic}`
+}
+
 describe('assemblePrompt', () => {
   async function makePersona(files) {
     const dir = await mkdtemp(join(tmpdir(), 'cheesoid-test-'))
@@ -23,11 +35,11 @@ describe('assemblePrompt', () => {
       'memory/MEMORY.md': 'I remember things.',
     })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Test Agent',
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
-    })
+    }))
 
     assert.ok(result.includes('Your name is Test Agent.'))
     assert.ok(result.includes('I am the soul.'))
@@ -44,6 +56,33 @@ describe('assemblePrompt', () => {
     assert.ok(systemIdx < memoryIdx)
   })
 
+  it('Claude path returns { static, dynamic } with the timestamp only in the dynamic tail', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul corpus.',
+      'prompts/system.md': 'System corpus.',
+    })
+
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+    })
+
+    assert.equal(typeof result, 'object')
+    assert.ok(!Array.isArray(result))
+    assert.equal(typeof result.static, 'string')
+    assert.equal(typeof result.dynamic, 'string')
+    // The volatile timestamp placeholder lives ONLY in the dynamic tail so a
+    // per-turn timestamp change never invalidates the cached static prefix.
+    assert.ok(!result.static.includes('{{CURRENT_TIMESTAMP}}'),
+      'static corpus must not carry the volatile timestamp')
+    assert.ok(result.dynamic.includes('{{CURRENT_TIMESTAMP}}'),
+      'dynamic tail carries the timestamp placeholder')
+    // The stable corpus still holds identity/soul/system content.
+    assert.ok(result.static.includes('Your name is Test.'))
+    assert.ok(result.static.includes('Soul corpus.'))
+    assert.ok(result.static.includes('System corpus.'))
+  })
+
   it('works when memory files are missing', async () => {
     const dir = await makePersona({
       'SOUL.md': 'I am the soul.',
@@ -51,10 +90,10 @@ describe('assemblePrompt', () => {
     })
     await mkdir(join(dir, 'memory'), { recursive: true })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
-    })
+    }))
 
     assert.ok(result.includes('I am the soul.'))
     assert.ok(result.includes('System context.'))
@@ -68,10 +107,10 @@ describe('assemblePrompt', () => {
       'memory/topics.md': 'Topic notes.',
     })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: ['MEMORY.md', 'topics.md'] },
-    })
+    }))
 
     assert.ok(result.includes('Core memory.'))
     assert.ok(result.includes('Topic notes.'))
@@ -82,10 +121,10 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Soul.',
       'prompts/system.md': 'System.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: [] },
-    })
+    }))
 
     assert.ok(result.includes('Session Ephemerality'), 'header present')
     assert.ok(result.includes('redeployed at any time'), 'risk framing present')
@@ -112,6 +151,56 @@ describe('assemblePrompt', () => {
     assert.ok(allContent.includes("Don't fixate"))
   })
 
+  it('openai-compat path puts the timestamp at the end of the last layer, not in the identity head', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+    const result = await assemblePrompt(dir, {
+      display_name: 'Test',
+      provider: 'openai-compat',
+      chat: { prompt: 'prompts/system.md' },
+      memory: { dir: 'memory/', auto_read: [] },
+    }, [], { isClaude: false })
+
+    assert.ok(Array.isArray(result))
+    // Layers 1..n-1 must be a stable prefix for provider-side caching — no
+    // volatile timestamp placeholder anywhere in them (it used to sit in the
+    // identity head, layer 2).
+    for (let i = 0; i < result.length - 1; i++) {
+      assert.ok(!result[i].content.includes('{{CURRENT_TIMESTAMP}}'),
+        `layer ${i + 1} must not carry the volatile timestamp`)
+    }
+    const last = result[result.length - 1].content
+    assert.ok(last.includes('{{CURRENT_TIMESTAMP}}'), 'timestamp must live in the last layer')
+    assert.ok(last.trimEnd().endsWith('{{CURRENT_TIMESTAMP}}'),
+      'timestamp sits at the very end of the last layer')
+  })
+
+  it('mentions that current state is preloaded so prompt and reality agree', async () => {
+    const dir = await makePersona({
+      'SOUL.md': 'Soul.',
+      'prompts/system.md': 'System.',
+    })
+    const claude = flat(await assemblePrompt(dir, {
+      display_name: 'Test',
+      chat: { prompt: 'prompts/system.md' },
+    }))
+    assert.ok(claude.includes('preloaded'),
+      'Claude prompt must tell the agent its state is preloaded')
+    assert.ok(claude.includes('Current State'),
+      'Claude prompt must name the "## Current State" section it is injected under')
+
+    const layers = await assemblePrompt(dir, {
+      display_name: 'Test',
+      provider: 'openai-compat',
+      chat: { prompt: 'prompts/system.md' },
+      memory: { dir: 'memory/', auto_read: [] },
+    }, [], { isClaude: false })
+    const joined = layers.map(s => s.content).join('\n')
+    assert.ok(joined.includes('preloaded'), 'openai-compat prompt must mention preloaded state too')
+  })
+
   it('includes source trust hierarchy before memory', async () => {
     const dir = await makePersona({
       'SOUL.md': 'Soul.',
@@ -119,10 +208,10 @@ describe('assemblePrompt', () => {
       'memory/MEMORY.md': 'Memory content.',
     })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
-    })
+    }))
 
     assert.ok(result.includes('Source Trust Hierarchy'))
     assert.ok(result.includes('Live data'))
@@ -148,10 +237,10 @@ describe('assemblePrompt', () => {
       }],
     }]
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
-    }, plugins)
+    }, plugins))
 
     assert.ok(result.includes('# Test Skill'))
     assert.ok(result.includes('Follow the procedure.'))
@@ -173,12 +262,12 @@ describe('assemblePrompt', () => {
       'prompts/system.md': 'System.',
     })
 
-    const prompt = await assemblePrompt(dir, {
+    const prompt = flat(await assemblePrompt(dir, {
       name: 'host',
       display_name: 'Host',
       chat: { prompt: 'prompts/system.md' },
       agents: [{ name: 'Alice', secret: 's' }],
-    }, [])
+    }, []))
     assert.ok(prompt.includes('Multi-Agent Turn-Taking'))
     assert.ok(prompt.includes('moderator'))
   })
@@ -189,12 +278,12 @@ describe('assemblePrompt', () => {
       'prompts/system.md': 'System.',
     })
 
-    const prompt = await assemblePrompt(dir, {
+    const prompt = flat(await assemblePrompt(dir, {
       name: 'visitor',
       display_name: 'Visitor',
       chat: { prompt: 'prompts/system.md' },
       rooms: [{ name: 'alice', url: 'http://localhost:9999', secret: 's' }],
-    }, [])
+    }, []))
     assert.ok(prompt.includes('internal'))
     assert.ok(prompt.includes('backchannel'))
   })
@@ -206,10 +295,10 @@ describe('assemblePrompt', () => {
       'memory/MEMORY.md': 'Memory.',
     })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
       memory: { dir: 'memory/', auto_read: ['MEMORY.md'] },
-    })
+    }))
 
     assert.ok(result.includes('Soul.'))
     assert.ok(result.includes('System.'))
@@ -220,11 +309,11 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Soul.',
       'prompts/system.md': 'System.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
       rooms: [{ name: 'alice', url: 'http://localhost:3001', secret: 's' }],
-    })
+    }))
 
     assert.ok(result.includes('internal'), 'should reference internal tool')
     assert.ok(!result.includes('<thought>'), 'should not contain <thought> tag examples')
@@ -236,11 +325,11 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Soul.',
       'prompts/system.md': 'System.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Host',
       chat: { prompt: 'prompts/system.md' },
       agents: [{ name: 'Alice', secret: 's' }],
-    })
+    }))
 
     assert.ok(result.includes('internal'), 'should reference internal tool')
     assert.ok(!result.includes('<backchannel>'), 'should not contain <backchannel> tag examples')
@@ -251,10 +340,10 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Soul.',
       'prompts/system.md': 'System.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
-    })
+    }))
 
     assert.ok(result.includes('internal'))
   })
@@ -264,14 +353,14 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Test soul.',
       'prompts/system.md': 'System prompt.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
       attention: ['claude-haiku-4-5'],
       cognition: ['claude-sonnet-4-6'],
       reasoner: ['claude-opus-4-6'],
       memory: { dir: 'memory/', auto_read: [] },
-    })
+    }))
 
     assert.ok(result.includes('Reasoner'))
     assert.ok(result.includes('three gears'))
@@ -282,13 +371,13 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Test soul.',
       'prompts/system.md': 'System prompt.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
       attention: ['claude-haiku-4-5'],
       cognition: ['claude-sonnet-4-6'],
       memory: { dir: 'memory/', auto_read: [] },
-    })
+    }))
 
     assert.ok(result.includes('two gears'))
     assert.ok(!result.includes('Reasoner (deep analysis)'))
@@ -320,14 +409,14 @@ describe('assemblePrompt', () => {
       'SOUL.md': 'Test soul.',
       'prompts/system.md': 'System prompt.',
     })
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       display_name: 'Test',
       chat: { prompt: 'prompts/system.md' },
       attention: ['claude-haiku-4-5'],
       cognition: ['claude-sonnet-4-6'],
       reasoner: ['claude-opus-4-6'],
       memory: { dir: 'memory/', auto_read: [] },
-    })
+    }))
 
     assert.ok(!result.includes('deep_think'))
   })
@@ -376,11 +465,13 @@ describe('assemblePrompt', () => {
     }
 
     const result = await assemblePrompt(dir, config, [])
-    assert.ok(typeof result === 'string')
-    assert.ok(result.includes('Attention (resting state)'), 'should include attention mode docs')
-    assert.ok(result.includes('Cognition (full engagement)'), 'should include cognition mode docs')
-    assert.ok(result.includes('step_up'), 'should mention step_up tool')
-    assert.ok(result.includes('step_down'), 'should mention step_down tool')
+    assert.ok(result && typeof result === 'object' && !Array.isArray(result) && typeof result.static === 'string',
+      'Claude path returns a { static, dynamic } object')
+    const prompt = flat(result)
+    assert.ok(prompt.includes('Attention (resting state)'), 'should include attention mode docs')
+    assert.ok(prompt.includes('Cognition (full engagement)'), 'should include cognition mode docs')
+    assert.ok(prompt.includes('step_up'), 'should mention step_up tool')
+    assert.ok(prompt.includes('step_down'), 'should mention step_down tool')
   })
 
   it('defaults to room context with shared-room framing', async () => {
@@ -389,9 +480,9 @@ describe('assemblePrompt', () => {
       'prompts/system.md': 'Persona voice here.',
     })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
-    })
+    }))
 
     assert.ok(result.includes('shared room'), 'should include shared-room framing by default')
     assert.ok(!result.includes('private 1:1 DM'), 'should NOT include DM framing by default')
@@ -403,9 +494,9 @@ describe('assemblePrompt', () => {
       'prompts/system.md': 'Persona voice here.',
     })
 
-    const result = await assemblePrompt(dir, {
+    const result = flat(await assemblePrompt(dir, {
       chat: { prompt: 'prompts/system.md' },
-    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } })
+    }, [], { context: { mode: 'dm', dmPartner: 'Alice' } }))
 
     assert.ok(result.includes('private 1:1 DM'), 'should include DM framing')
     assert.ok(result.includes('Alice'), 'should name the DM partner')

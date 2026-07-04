@@ -239,7 +239,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       result = await provider.streamMessage(
         {
           model: config.model,
-          maxTokens: 16384,
+          maxTokens: config.maxOutputTokens || 16384,
           system: systemPrompt,
           messages,
           tools: toolChoice === 'none' ? [] : tools.definitions,
@@ -305,16 +305,18 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
       return block
     })
 
-    // Strip thinking blocks — they cause 400 errors when replayed in history
-    const cleanedContent = assistantContent.filter(b => b.type !== 'thinking')
-    messages.push({ role: 'assistant', content: cleanedContent })
+    // Keep thinking blocks in the in-flight history: Anthropic requires the
+    // signed thinking block to accompany tool_use when the matching tool_results
+    // are replayed in the same tool loop. They are removed at loop exit (see
+    // stripThinkingBlocks) so cross-turn history stays thinking-free.
+    messages.push({ role: 'assistant', content: assistantContent })
 
     // Emit per-turn text and native thinking as standalone events so downstream
     // listeners (chat-session) can persist them to history the same way they do
     // for runHybridAgent. Without these events, a single-model persona streams
     // text deltas live to clients but never writes chat messages to durable
     // history, and a page refresh loses everything the agent said.
-    const turnText = cleanedContent
+    const turnText = assistantContent
       .filter(b => b.type === 'text' && b.text?.trim())
       .map(b => b.text)
       .join('\n')
@@ -373,6 +375,12 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     messages.push({ role: 'user', content: toolResults })
     iterations++
   }
+
+  // Tool loop done — drop thinking blocks from history now. They had to survive
+  // inside the loop (Anthropic requires the signed block alongside tool_use) but
+  // must not persist: the caller reuses these messages as durable history, and
+  // _nudgeIfEmpty re-sends them with thinking disabled and no tools.
+  stripThinkingBlocks(messages)
 
   // If the model ended with no text after tool results, make one more call
   // with tools disabled so it summarizes in its own voice.
@@ -531,6 +539,21 @@ function repairToolUseGaps(messages) {
   }
 
   return repairedCount
+}
+
+/**
+ * Remove thinking / redacted_thinking blocks from every assistant message.
+ * Thinking blocks must survive *within* a tool loop (the Anthropic API requires
+ * the signed block alongside tool_use when its tool_results are replayed), but
+ * they must not persist across turns: the caller reuses these messages as
+ * durable history and _nudgeIfEmpty re-sends them with thinking disabled.
+ */
+function stripThinkingBlocks(messages) {
+  for (const msg of messages) {
+    if (msg.role === 'assistant' && Array.isArray(msg.content)) {
+      msg.content = msg.content.filter(b => b.type !== 'thinking' && b.type !== 'redacted_thinking')
+    }
+  }
 }
 
 const EXECUTOR_SYSTEM = `You are a tool executor for an English-language business application. You receive tool results and may need to call follow-up tools.
@@ -734,7 +757,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       config,
       {
         model: config.model,
-        maxTokens: 16384,
+        maxTokens: config.maxOutputTokens || 16384,
         system: systemPrompt,
         messages,
         tools: toolChoice === 'none' ? [] : tools.definitions,
@@ -811,16 +834,18 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       return block
     })
 
-    // Strip thinking blocks — they cause 400 errors when replayed in history
-    const cleanedAssistant = assistantContent.filter(b => b.type !== 'thinking')
-    messages.push({ role: 'assistant', content: cleanedAssistant })
+    // Keep thinking blocks in the in-flight history: Anthropic requires the
+    // signed thinking block to accompany tool_use when the matching tool_results
+    // are replayed in the same tool loop. They are removed at loop exit (see
+    // stripThinkingBlocks) so cross-turn history stays thinking-free.
+    messages.push({ role: 'assistant', content: assistantContent })
 
     // Emit this turn's text as a standalone event so downstream listeners
     // (chat-session) can persist to history incrementally, independent of
     // whether subsequent tool execution hangs, errors, or completes. Without
     // this, a stalled tool (e.g. deep_think mid-stream) would delay text
     // persistence until the entire orchestrator loop returns.
-    const turnText = cleanedAssistant
+    const turnText = assistantContent
       .filter(b => b.type === 'text' && b.text?.trim())
       .map(b => b.text)
       .join('\n')
@@ -938,7 +963,13 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     const allOrchestratorOnly = orchestratorToolNames.length > 0
       && orchestratorToolNames.every(n => ORCHESTRATOR_ONLY_TOOLS.has(n))
 
-    if (executor && executorModel && executorTools.length > 0 && !allOrchestratorOnly) {
+    // The executor is a shim for weak orchestrators that can't chain tools.
+    // Claude orchestrators chain natively, so skip the executor entirely for
+    // them — its junk follow-up calls only poison the orchestrator's context.
+    // Read config.model fresh here (step_up may have reassigned it mid-loop).
+    const orchestratorIsClaude = typeof config.model === 'string' && config.model.startsWith('claude')
+
+    if (executor && executorModel && executorTools.length > 0 && !allOrchestratorOnly && !orchestratorIsClaude) {
 
       // Latest results start as the orchestrator's tool results
       let latestResultText = toolResults.map(r => r.content).join('\n\n')
@@ -968,7 +999,11 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
                   tools: executorTools,
                   serverTools: [],
                   thinkingBudget: null,
-                  toolChoice: 'required',
+                  // 'auto', not 'required': EXECUTOR_SYSTEM lets the executor
+                  // answer "done" when no follow-up is needed. Forcing a tool
+                  // call makes it invent placeholder calls (e.g.
+                  // read_file('path/to/file')) that poison the orchestrator.
+                  toolChoice: 'auto',
                 },
                 (event) => {
                   if (event.type === 'tool_start' || event.type === 'tool_result') {
@@ -1088,6 +1123,12 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
       break
     }
   }
+
+  // Tool loop done — drop thinking blocks from history now. They had to survive
+  // inside the loop (Anthropic requires the signed block alongside tool_use) but
+  // must not persist: the caller reuses these messages as durable history, and
+  // _nudgeIfEmpty re-sends them with thinking disabled and no tools.
+  stripThinkingBlocks(messages)
 
   // If the orchestrator ended with no text after tool results, make one more call
   // with tools disabled so it summarizes in its own voice.

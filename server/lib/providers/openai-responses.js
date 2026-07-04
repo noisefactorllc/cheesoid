@@ -6,6 +6,8 @@
  * Different streaming event format and message structure.
  */
 
+import { flattenSystem } from './translate.js'
+
 /**
  * Translate Anthropic tool defs to Responses API format.
  * Responses API wants { type, name, description, parameters } flat,
@@ -218,10 +220,10 @@ export function createOpenAIResponsesProvider(config) {
       const input = translateToResponsesInput(messages)
       const openaiTools = translateToolDefsForResponses(tools)
 
-      // Flatten system prompt array
-      const instructions = Array.isArray(system)
-        ? system.map(s => s.content || s).join('\n\n---\n\n')
-        : system
+      // Flatten any system-prompt shape (string, openai layers, or a
+      // Claude-shaped block array / { static, dynamic } arriving via mid-loop
+      // fallback) into the single instructions string the Responses API wants.
+      const instructions = flattenSystem(system)
 
       const body = {
         model,
