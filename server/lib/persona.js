@@ -1,6 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
-import yaml from 'js-yaml'
+import { load as loadYaml } from 'js-yaml'
 import { loadPlugins } from './plugins.js'
 
 // persona.yaml keys accepted here for operator readability but not read by any
@@ -30,7 +30,7 @@ export async function loadPersona(personaDir) {
     throw new Error(`Could not read persona.yaml at ${configPath}: ${err.message}`)
   }
 
-  const config = yaml.load(raw)
+  const config = loadYaml(raw)
   resolveEnvVars(config)
   normalizeTierLists(config)
   warnDecorativeKeys(config)
