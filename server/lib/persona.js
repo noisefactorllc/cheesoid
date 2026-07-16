@@ -49,6 +49,49 @@ function providerHonorsThinkingBudget(providerName, config) {
 }
 
 /**
+ * Resolve each tier's active model to the provider name that will serve it.
+ * @returns {Map<string, string[]>} provider name -> tier labels it serves
+ */
+function providersByTier(config) {
+  const knownProviders = new Set([...Object.keys(config.providers || {}), 'anthropic'])
+  const defaultProvider = config.provider && config.provider !== 'anthropic' ? config.provider : 'anthropic'
+  const byProvider = new Map()
+  for (const [key, label] of TIER_LABELS) {
+    const activeModel = config[key]?.[0]
+    if (!activeModel) continue
+    const { providerName } = resolveModel(activeModel, knownProviders)
+    const resolved = providerName || defaultProvider
+    if (!byProvider.has(resolved)) byProvider.set(resolved, [])
+    byProvider.get(resolved).push(label)
+  }
+  return byProvider
+}
+
+/**
+ * Only the anthropic provider implements native server_tools; openai-compat
+ * endpoints drop them. web-search.js can fill the gap via OpenRouter's plugin,
+ * but only for a provider that opts in with `web_search`. Declaring the tool
+ * without either of those means the model never gets it — silently.
+ */
+function warnUnsuppliedWebSearch(config) {
+  const declared = (config.server_tools || []).find(
+    t => String(t.type || '').startsWith('web_search') || t.name === 'web_search',
+  )
+  if (!declared) return
+  if (Object.values(config.providers || {}).some(p => p.web_search)) return
+
+  const name = config.name || 'unknown'
+  const dropped = [...providersByTier(config).keys()].filter(p => p !== 'anthropic')
+  if (!dropped.length) return // every tier is native anthropic — server_tools work
+
+  console.log(
+    `[${name}] WARN: server_tools declares web_search but no provider supplies it, and ` +
+    `${dropped.map(p => `"${p}"`).join(', ')} cannot serve it natively — the model gets no web search. ` +
+    `Set web_search: true on an openai-compat provider to back it with OpenRouter's web plugin`,
+  )
+}
+
+/**
  * chat.thinking_budget is documented as an extended-thinking token budget, but
  * whether it reaches the backend depends on which provider serves each tier.
  * Warn per-provider rather than letting a tier silently reason unbounded.
@@ -58,20 +101,8 @@ function warnUnhonoredThinkingBudget(config) {
   if (!budget) return
 
   const name = config.name || 'unknown'
-  const knownProviders = new Set([...Object.keys(config.providers || {}), 'anthropic'])
-  const defaultProvider = config.provider && config.provider !== 'anthropic' ? config.provider : 'anthropic'
-
-  // provider name -> tier labels it serves that will drop the budget
-  const offenders = new Map()
-  for (const [key, label] of TIER_LABELS) {
-    const activeModel = config[key]?.[0]
-    if (!activeModel) continue
-    const { providerName } = resolveModel(activeModel, knownProviders)
-    const resolved = providerName || defaultProvider
-    if (providerHonorsThinkingBudget(resolved, config)) continue
-    if (!offenders.has(resolved)) offenders.set(resolved, [])
-    offenders.get(resolved).push(label)
-  }
+  const offenders = [...providersByTier(config)]
+    .filter(([providerName]) => !providerHonorsThinkingBudget(providerName, config))
 
   for (const [providerName, tiers] of offenders) {
     const type = providerName === 'anthropic'
@@ -120,6 +151,7 @@ export async function loadPersona(personaDir) {
   }
 
   warnUnhonoredThinkingBudget(config)
+  warnUnsuppliedWebSearch(config)
 
   const plugins = await loadPlugins(config.plugins || [])
   return { dir: personaDir, config, plugins }

@@ -309,6 +309,81 @@ chat:
     assert.ok(!logs.some(l => l.includes('thinking_budget') && l.includes('WARN')))
   })
 
+  it('warns when server_tools declares web_search but no provider supplies it', async () => {
+    const dir = await makePersona(`
+name: test-ws-drop
+providers:
+  orx:
+    type: openai-compat
+    base_url: https://orx.test/v1
+    api_key: k
+attention: some-model:orx
+cognition: some-model:orx
+
+server_tools:
+  - type: web_search_20250305
+    name: web_search
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    const warn = logs.find(l => l.includes('web_search') && l.includes('WARN'))
+    assert.ok(warn, `expected a web_search warning, got:\n${logs.join('\n')}`)
+    assert.ok(warn.includes('orx'), 'warning should name the provider that drops it')
+  })
+
+  it('does not warn about web_search when a provider supplies it', async () => {
+    const dir = await makePersona(`
+name: test-ws-ok
+providers:
+  router:
+    type: openai-compat
+    base_url: https://openrouter.test/api/v1
+    api_key: k
+    web_search: true
+attention: some-model:router
+cognition: some-model:router
+
+server_tools:
+  - type: web_search_20250305
+    name: web_search
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    assert.ok(!logs.some(l => l.includes('web_search') && l.includes('WARN')))
+  })
+
+  it('does not warn about web_search on a native anthropic persona', async () => {
+    const dir = await makePersona(`
+name: test-ws-native
+model: claude-sonnet-4-6
+
+server_tools:
+  - type: web_search_20250305
+    name: web_search
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    assert.ok(!logs.some(l => l.includes('web_search') && l.includes('WARN')))
+  })
+
   it('does not warn when decorative keys are absent', async () => {
     const dir = await makePersona(`
 name: test-clean
