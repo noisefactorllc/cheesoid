@@ -236,3 +236,81 @@ describe('circuit breaker integration', () => {
     }
   })
 })
+
+// Stub fetch and capture the outgoing request body, replying with a minimal
+// valid SSE stream so streamMessage runs to completion.
+function stubFetchCapturingBody() {
+  const captured = {}
+  const originalFetch = globalThis.fetch
+  globalThis.fetch = async (url, opts) => {
+    captured.url = url
+    captured.body = JSON.parse(opts.body)
+    const sse =
+      'data: {"choices":[{"delta":{"content":"hi"},"finish_reason":null}]}\n\n' +
+      'data: {"choices":[{"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":1,"completion_tokens":1}}\n\n' +
+      'data: [DONE]\n\n'
+    const bytes = new TextEncoder().encode(sse)
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      text: async () => '',
+      body: {
+        async *[Symbol.asyncIterator]() { yield bytes },
+        cancel: async () => {},
+      },
+    }
+  }
+  return { captured, restore: () => { globalThis.fetch = originalFetch } }
+}
+
+describe('openai-compat thinking budget', () => {
+  const callWith = async (config, thinkingBudget) => {
+    const provider = createOpenAICompatProvider(config)
+    const { captured, restore } = stubFetchCapturingBody()
+    try {
+      await provider.streamMessage({
+        model: 'test-model',
+        maxTokens: 100,
+        system: 'sys',
+        messages: [{ role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+        tools: [],
+        serverTools: [],
+        thinkingBudget,
+      }, () => {})
+    } finally {
+      restore()
+      circuitBreaker.recordSuccess(config.base_url.replace(/\/$/, ''))
+    }
+    return captured.body
+  }
+
+  it('sends reasoning.max_tokens when the backend declares supports_reasoning_budget', async () => {
+    const body = await callWith({
+      base_url: 'https://openrouter.test/api/v1',
+      api_key: 'k',
+      supports_reasoning_budget: true,
+    }, 16000)
+
+    assert.deepEqual(body.reasoning, { max_tokens: 16000 })
+  })
+
+  it('omits reasoning when the backend does not declare support (protects strict backends)', async () => {
+    const body = await callWith({
+      base_url: 'https://strict-backend.test/v1',
+      api_key: 'k',
+    }, 16000)
+
+    assert.equal(body.reasoning, undefined, 'must not send reasoning to a backend that never opted in')
+  })
+
+  it('omits reasoning when no thinking budget is requested', async () => {
+    const body = await callWith({
+      base_url: 'https://openrouter2.test/api/v1',
+      api_key: 'k',
+      supports_reasoning_budget: true,
+    }, null)
+
+    assert.equal(body.reasoning, undefined)
+  })
+})

@@ -2,6 +2,7 @@ import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 import { loadPlugins } from './plugins.js'
+import { resolveModel } from './providers/resolve.js'
 
 // persona.yaml keys accepted here for operator readability but not read by any
 // code path in server/ (grep-verified) — false-confidence guardrails that look
@@ -18,6 +19,71 @@ function warnDecorativeKeys(config) {
     if (value !== undefined) {
       console.log(`[${name}] WARN: ${label} is set but not enforced by the framework`)
     }
+  }
+}
+
+// Tier config key -> the name operators use for it in persona.yaml.
+// normalizeTierLists() folds `execution` into `model`, so map it back.
+const TIER_LABELS = [
+  ['attention', 'attention'],
+  ['cognition', 'cognition'],
+  ['reasoner', 'reasoner'],
+  ['model', 'execution'],
+]
+
+/**
+ * Whether a provider forwards chat.thinking_budget to its backend.
+ * anthropic and gemini honor it natively. openai-compat can, but only against a
+ * backend that understands OpenRouter-style `reasoning.max_tokens` — so it must
+ * opt in. openai-responses cannot: OpenAI's reasoning param takes an effort
+ * level, not a token budget.
+ */
+function providerHonorsThinkingBudget(providerName, config) {
+  if (providerName === 'anthropic') return true
+  const providerConfig = config.providers?.[providerName]
+  if (!providerConfig) return false
+  const type = providerConfig.type || 'openai-compat'
+  if (type === 'anthropic' || type === 'gemini') return true
+  if (type === 'openai-compat') return providerConfig.supports_reasoning_budget === true
+  return false
+}
+
+/**
+ * chat.thinking_budget is documented as an extended-thinking token budget, but
+ * whether it reaches the backend depends on which provider serves each tier.
+ * Warn per-provider rather than letting a tier silently reason unbounded.
+ */
+function warnUnhonoredThinkingBudget(config) {
+  const budget = config.chat?.thinking_budget
+  if (!budget) return
+
+  const name = config.name || 'unknown'
+  const knownProviders = new Set([...Object.keys(config.providers || {}), 'anthropic'])
+  const defaultProvider = config.provider && config.provider !== 'anthropic' ? config.provider : 'anthropic'
+
+  // provider name -> tier labels it serves that will drop the budget
+  const offenders = new Map()
+  for (const [key, label] of TIER_LABELS) {
+    const activeModel = config[key]?.[0]
+    if (!activeModel) continue
+    const { providerName } = resolveModel(activeModel, knownProviders)
+    const resolved = providerName || defaultProvider
+    if (providerHonorsThinkingBudget(resolved, config)) continue
+    if (!offenders.has(resolved)) offenders.set(resolved, [])
+    offenders.get(resolved).push(label)
+  }
+
+  for (const [providerName, tiers] of offenders) {
+    const type = providerName === 'anthropic'
+      ? 'anthropic'
+      : (config.providers?.[providerName]?.type || 'openai-compat')
+    const hint = type === 'openai-compat'
+      ? ' — set supports_reasoning_budget: true on it if the backend accepts reasoning.max_tokens'
+      : ''
+    console.log(
+      `[${name}] WARN: chat.thinking_budget is set but provider "${providerName}" (${type}) drops it, ` +
+      `so these tiers reason unbounded: ${tiers.join(', ')}${hint}`,
+    )
   }
 }
 
@@ -52,6 +118,8 @@ export async function loadPersona(personaDir) {
   if (config.reasoner) {
     validateReasoner(config)
   }
+
+  warnUnhonoredThinkingBudget(config)
 
   const plugins = await loadPlugins(config.plugins || [])
   return { dir: personaDir, config, plugins }

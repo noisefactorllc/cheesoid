@@ -232,6 +232,83 @@ chat:
     assert.ok(logs.some(l => l === '[test-decorative] WARN: chat.idle_timeout_minutes is set but not enforced by the framework'))
   })
 
+  it('warns when thinking_budget is set but the tier provider silently drops it', async () => {
+    const dir = await makePersona(`
+name: test-tb-drop
+providers:
+  orx:
+    type: openai-compat
+    base_url: https://orx.test/v1
+    api_key: k
+attention: some-model:orx
+cognition: claude-sonnet-4-6
+
+chat:
+  prompt: prompts/system.md
+  thinking_budget: 16000
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    const warn = logs.find(l => l.includes('thinking_budget') && l.includes('WARN'))
+    assert.ok(warn, `expected a thinking_budget warning, got:\n${logs.join('\n')}`)
+    assert.ok(warn.includes('orx'), 'warning should name the offending provider')
+    assert.ok(warn.includes('attention'), 'warning should name the affected tier')
+    assert.ok(!warn.includes('cognition'), 'must not blame tiers whose provider honors the budget')
+  })
+
+  it('does not warn about thinking_budget when the openai-compat backend opts in', async () => {
+    const dir = await makePersona(`
+name: test-tb-optin
+providers:
+  router:
+    type: openai-compat
+    base_url: https://openrouter.test/api/v1
+    api_key: k
+    supports_reasoning_budget: true
+attention: some-model:router
+cognition: some-model:router
+
+chat:
+  prompt: prompts/system.md
+  thinking_budget: 16000
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    assert.ok(!logs.some(l => l.includes('thinking_budget') && l.includes('WARN')))
+  })
+
+  it('does not warn about thinking_budget when every tier honors it', async () => {
+    const dir = await makePersona(`
+name: test-tb-native
+model: claude-sonnet-4-6
+
+chat:
+  prompt: prompts/system.md
+  thinking_budget: 16000
+`)
+    const logs = []
+    const origLog = console.log
+    console.log = (...a) => { logs.push(a.join(' ')) }
+    try {
+      await loadPersona(dir)
+    } finally {
+      console.log = origLog
+    }
+    assert.ok(!logs.some(l => l.includes('thinking_budget') && l.includes('WARN')))
+  })
+
   it('does not warn when decorative keys are absent', async () => {
     const dir = await makePersona(`
 name: test-clean

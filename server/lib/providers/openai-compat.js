@@ -146,6 +146,10 @@ export function createOpenAICompatProvider(config) {
   const apiKey = config.api_key
   const useMaxCompletionTokens = config.max_completion_tokens === true
   const reasoningEffort = config.reasoning_effort || null
+  // Opt-in: `reasoning` is an OpenRouter extension, not part of the OpenAI
+  // schema. Strict backends reject unknown top-level keys, so a provider has
+  // to declare support before a thinking budget is forwarded.
+  const supportsReasoningBudget = config.supports_reasoning_budget === true
   return {
     supportsIntentRouting: true,
 
@@ -237,6 +241,13 @@ export function createOpenAICompatProvider(config) {
       // from leaking into the visible content stream).
       if (reasoningEffort) {
         body.reasoning_effort = reasoningEffort
+      }
+
+      // chat.thinking_budget reaches openai-compat as thinkingBudget but has
+      // no OpenAI-schema equivalent, so it was dropped on the floor. Backends
+      // that declare support take it as a reasoning token allowance.
+      if (supportsReasoningBudget && thinkingBudget) {
+        body.reasoning = { max_tokens: thinkingBudget }
       }
 
       if (openaiTools.length > 0) {
