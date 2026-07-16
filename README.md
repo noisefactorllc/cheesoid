@@ -71,15 +71,22 @@ tools: tools/tools.js           # path to custom tools (optional)
 
 chat:
   prompt: prompts/system.md
-  thinking_budget: 16000        # extended thinking token budget
+  thinking_budget: 16000        # extended thinking token budget — see note below
   max_turns: 20                 # max tool-use turns per response
-  idle_timeout_minutes: 30      # time before idle thought triggers
 
 memory:
   dir: memory/
   auto_read:
     - MEMORY.md                 # loaded into system prompt automatically
 ```
+
+**`thinking_budget` is provider-dependent.** `anthropic` and `gemini` honor it natively.
+An `openai-compat` provider only forwards it when you also set
+`supports_reasoning_budget: true` on that provider — `reasoning.max_tokens` is an OpenRouter
+extension, and strict OpenAI-compatible backends reject unknown keys. `openai-responses`
+cannot honor it at all, since OpenAI's reasoning parameter takes an effort level rather than a
+token budget. Any tier whose provider drops the budget reasons unbounded, and the framework
+warns about it by name at startup.
 
 ### SOUL.md
 

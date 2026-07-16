@@ -12,7 +12,6 @@ chat:
   prompt: prompts/system.md
   thinking_budget: 16000
   max_turns: 20
-  idle_timeout_minutes: 60
 
 ## Give him the keys to your production infrastructure, if you dare.
 ## Configure SSH, monitoring APIs, and docker access via environment variables and tools.
