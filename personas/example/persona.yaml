@@ -29,7 +29,6 @@ fallback_models:
   - some-other-model:my-provider
   - gpt-5.4-mini:openai
   - claude-haiku-4-5
-max_budget_usd: 6
 
 theme: synthwave
 data_theme: synthwave

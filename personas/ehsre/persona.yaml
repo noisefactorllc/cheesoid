@@ -1,7 +1,6 @@
 name: ehsre
 display_name: "Emergency Holographic SRE"
 model: claude-sonnet-4-6
-max_budget_usd: 10
 
 tools: tools/tools.js
 

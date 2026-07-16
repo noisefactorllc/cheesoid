@@ -1,7 +1,6 @@
 name: brad
 display_name: "Brad from Monetization"
 model: claude-sonnet-4-6
-max_budget_usd: 6
 
 tools: tools/tools.js
 
