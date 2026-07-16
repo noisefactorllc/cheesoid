@@ -1,6 +1,7 @@
 node_modules/
 *.log
 .env*
+.openrouter
 .DS_Store
 personas/*/memory/
 personas/*/history/
