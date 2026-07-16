@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { trimContextToBudget, estimateMessageTokens } from '../server/lib/chat-session.js'
+import { trimContextToBudget, estimateMessageTokens, resolveContextBudget } from '../server/lib/chat-session.js'
 
 const big = (bytes) => 'x'.repeat(bytes)
 const tokensOf = (msgs) => msgs.reduce((s, m) => s + estimateMessageTokens(m), 0)
@@ -113,6 +113,54 @@ describe('trimContextToBudget', () => {
   it('handles empty / non-array input safely', () => {
     assert.deepStrictEqual(trimContextToBudget([]), [])
     assert.equal(trimContextToBudget(null), null)
+  })
+
+  it('scales the trim target to a custom budget, so a small budget still drains below its trigger', () => {
+    // A caller passing only a small maxTokens used to inherit the fixed 48K
+    // target, which clamps to maxTokens (floor = min(48K, 16K) = 16K). Target
+    // == trigger means every turn shaves one message and re-trips the trigger:
+    // the exact prefix churn the hysteresis exists to avoid. The target must
+    // stay proportional to whatever budget the caller asked for.
+    const msgs = []
+    for (let i = 0; i < 20; i++) msgs.push({ role: 'user', content: 'x'.repeat(4000) }) // ~1008 tok each
+    const total = tokensOf(msgs)
+    assert.ok(total > 16_000, `precondition: ${total} exceeds the 16K trigger`)
+
+    const out = trimContextToBudget(msgs, { maxTokens: 16_000, minMessages: 4 })
+
+    // 60% of 16K = 9.6K target. Clamping to the trigger instead would stop at ~15K.
+    assert.ok(tokensOf(out) <= 9_600 + 1_100, `trimmed=${tokensOf(out)} should drain to the ~9.6K target, not stop at the 16K trigger`)
+    // The point of draining past the trigger: the next turn does not re-trim.
+    assert.ok(tokensOf(out) < 16_000, 'must land strictly under the trigger so the prefix stays stable')
+    assert.deepStrictEqual(out[out.length - 1], msgs[msgs.length - 1], 'newest turn survives')
+  })
+
+  it('keeps the default budget at 80K/48K exactly (Claude-tier agents must not regress)', () => {
+    const msgs = []
+    for (let i = 0; i < 200; i++) msgs.push({ role: 'user', content: 'x'.repeat(4000) })
+    const out = trimContextToBudget(msgs, { minMessages: 4 })
+    // Deriving the target as a ratio must reproduce the historical 48K target.
+    assert.ok(tokensOf(out) <= 48_000 + 1_100, `trimmed=${tokensOf(out)} should drain to the historical 48K target`)
+    assert.ok(tokensOf(out) > 40_000, `trimmed=${tokensOf(out)} should not overshoot below the 48K target`)
+  })
+})
+
+describe('resolveContextBudget', () => {
+  it('defaults to the 80K Claude-tier budget when unset', () => {
+    assert.equal(resolveContextBudget({}), 80_000)
+    assert.equal(resolveContextBudget({ chat: {} }), 80_000)
+    assert.equal(resolveContextBudget(null), 80_000)
+  })
+
+  it('honors chat.context_budget_tokens', () => {
+    assert.equal(resolveContextBudget({ chat: { context_budget_tokens: 16_000 } }), 16_000)
+  })
+
+  it('ignores values that are not a positive number', () => {
+    // A typo must not silently produce a 0-token context or a NaN budget.
+    for (const bad of [0, -5, 'lots', null, {}, NaN]) {
+      assert.equal(resolveContextBudget({ chat: { context_budget_tokens: bad } }), 80_000, `bad value: ${JSON.stringify(bad)}`)
+    }
   })
 })
 

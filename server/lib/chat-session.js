@@ -115,13 +115,29 @@ const MAX_CONTEXT_MESSAGES = 40 // max messages in the live agent context
 // oldest messages until the live context fits, regardless of per-message size.
 // ~80K for messages + ~35K system prompt stays under where the model was last
 // observed healthy (~122K total).
+//
+// That 80K is a QUALITY ceiling, and it assumes a fast-prefill backend. It says
+// nothing about how long a prompt that size takes to prefill, which is a
+// property of the model and provider, not of the framework. On Claude tiers an
+// ~100K prompt prefills in seconds and caches across turns, so the ceiling costs
+// nothing. On a small open-weights model served over OpenRouter there is no
+// prompt caching and prefill is measured in minutes: google/gemma-4-31b-it
+// prefills ~95K tokens in 43-52s (measured 2026-07-16, ~2.2K tok/s), while the
+// same model answers a ~10K prompt in ~1.2s. Brad hit exactly this after moving
+// to OpenRouter — a routine ~100K-token turn cost 93.5s, which reads to a human
+// as the agent ignoring them. Personas on slow-prefill tiers set
+// chat.context_budget_tokens to trade context depth for response time.
 const MAX_CONTEXT_TOKENS = 80_000
-// Trim hysteresis: eviction TRIGGERS at MAX_CONTEXT_TOKENS but, once it fires,
-// evicts down to this lower TARGET. Trimming only to the trigger would shave one
-// message per turn and churn the message-array prefix continuously (busting
-// incremental prompt caching every turn); dropping to the target instead leaves
-// the prefix stable for many turns before the next eviction.
-const TRIM_TARGET_TOKENS = 48_000
+// Trim hysteresis: eviction TRIGGERS at the budget but, once it fires, evicts
+// down to a lower TARGET. Trimming only to the trigger would shave one message
+// per turn and churn the message-array prefix continuously (busting incremental
+// prompt caching every turn); dropping to the target instead leaves the prefix
+// stable for many turns before the next eviction. Expressed as a RATIO of the
+// budget rather than a constant: a fixed target clamps to any smaller custom
+// budget (floor = min(target, budget)), collapsing target onto trigger and
+// reinstating the very churn this exists to prevent. 0.6 * 80K reproduces the
+// historical 48K target exactly.
+const TRIM_TARGET_RATIO = 0.6
 const MIN_CONTEXT_MESSAGES = 4 // never trim below this — the latest turn must survive even if large
 // Tool-result aging: when a trim event fires, old tool_results are shrunk in
 // place BEFORE any message is evicted. This is a second defense against the
@@ -244,7 +260,7 @@ export function trimContextToBudget(messages, {
   maxTokens = MAX_CONTEXT_TOKENS,
   maxMessages = MAX_CONTEXT_MESSAGES,
   minMessages = MIN_CONTEXT_MESSAGES,
-  targetTokens = TRIM_TARGET_TOKENS,
+  targetTokens = Math.round(maxTokens * TRIM_TARGET_RATIO),
 } = {}) {
   if (!Array.isArray(messages) || messages.length === 0) return messages
   let trimmed = messages.length > maxMessages ? messages.slice(-maxMessages) : messages.slice()
@@ -269,6 +285,25 @@ export function trimContextToBudget(messages, {
     trimmed.shift()
   }
   return trimmed
+}
+
+/**
+ * The live-context token budget for a persona: chat.context_budget_tokens when
+ * set to a positive number, else the MAX_CONTEXT_TOKENS default.
+ *
+ * Lower it for personas whose tiers prefill slowly (see MAX_CONTEXT_TOKENS).
+ * The budget is per-persona rather than per-tier because one message array is
+ * shared across all four tiers, so the slowest-prefill tier a persona routes to
+ * sets the ceiling for all of them.
+ *
+ * A non-positive or non-numeric value falls back to the default rather than
+ * being trusted: a typo'd budget that coerced to 0 or NaN would trim every
+ * persona down to MIN_CONTEXT_MESSAGES and quietly lobotomize the agent.
+ */
+export function resolveContextBudget(config) {
+  const budget = config?.chat?.context_budget_tokens
+  if (typeof budget !== 'number' || !Number.isFinite(budget) || budget <= 0) return MAX_CONTEXT_TOKENS
+  return budget
 }
 
 /**
@@ -335,6 +370,7 @@ export class Room {
   }
 
   // Agent state accessors — all rooms see the same values
+  get contextBudget() { return resolveContextBudget(this.persona.config) }
   get clients() { return this._a.clients }
   set clients(v) { this._a.clients = v }
   get participants() { return this._a.participants }
@@ -1187,7 +1223,7 @@ export class Room {
       })
       this.messages = result.messages
       // Trim context to prevent unbounded growth
-      this.messages = trimContextToBudget(this.messages)
+      this.messages = trimContextToBudget(this.messages, { maxTokens: this.contextBudget })
 
       // Route response back as a DM — strip any DM prefix the agent may have echoed
       let dmResponse = assistantText.trim()
@@ -1612,7 +1648,7 @@ export class Room {
       const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
       this.messages = result.messages
       // Trim context to prevent unbounded growth
-      this.messages = trimContextToBudget(this.messages)
+      this.messages = trimContextToBudget(this.messages, { maxTokens: this.contextBudget })
 
       // Delegation-check recovery: the host was asked to scan the user's
       // message for additional agents beyond the parser's floor pick. If the
@@ -1870,7 +1906,7 @@ export class Room {
 
       this.messages = result.messages
       // Trim context to prevent unbounded growth
-      this.messages = trimContextToBudget(this.messages)
+      this.messages = trimContextToBudget(this.messages, { maxTokens: this.contextBudget })
       const parkedToolThoughts = (this._idleToolThoughts || []).map(s => s.trim()).filter(Boolean)
       if (idleText || parkedToolThoughts.length > 0) {
         // Idle turns are thought-lane by design. Split the text to keep raw
