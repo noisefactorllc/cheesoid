@@ -2,16 +2,18 @@ import { pathToFileURL } from 'node:url'
 import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { buildSharedWorkspaceTools } from './shared-workspace.js'
+import { buildWebSearchTools } from './web-search.js'
 import { MEMORY_COMPACT_WARN_BYTES, MEMORY_READ_CAP_BYTES } from './memory.js'
 
 /**
  * Build the full tool set for a persona: memory tools + persona-specific tools.
  * Returns { definitions: [...], execute: async (name, input) => result }
  */
-export async function loadTools(personaDir, config, memory, state, room, registry, modality) {
+export async function loadTools(personaDir, config, memory, state, room, registry, modality, deps = {}) {
   const memoryTools = buildMemoryTools(memory, state)
   const sharedTools = buildSharedWorkspaceTools(process.env.SHARED_WORKSPACE_PATH || '/shared')
   const roomTools = buildRoomTools(room, config)
+  const webSearchTools = buildWebSearchTools(config, deps)
   let personaTools = { definitions: [], execute: async () => ({ error: 'unknown tool' }) }
 
   if (config.tools) {
@@ -27,7 +29,7 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   // Modality tools (attention/cognition gear shifting)
   const modalityTools = buildModalityTools(modality)
 
-  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...personaTools.definitions]
+  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...webSearchTools.definitions, ...personaTools.definitions]
 
   async function execute(name, input, options) {
     if (memoryTools.handles(name)) {
@@ -38,6 +40,9 @@ export async function loadTools(personaDir, config, memory, state, room, registr
     }
     if (roomTools.handles(name)) {
       return roomTools.execute(name, input, options)
+    }
+    if (webSearchTools.handles(name)) {
+      return webSearchTools.execute(name, input, options)
     }
     if (modalityTools.handles(name)) {
       return modalityTools.execute(name, input, options)
