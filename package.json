@@ -12,7 +12,7 @@
   "dependencies": {
     "@anthropic-ai/sdk": "^0.112.3",
     "express": "^5.2.1",
-    "js-yaml": "^5.2.1"
+    "js-yaml": "^5.2.2"
   },
   "devDependencies": {
     "@playwright/test": "^1.61.1",
