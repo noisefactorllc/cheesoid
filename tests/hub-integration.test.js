@@ -106,9 +106,16 @@ describe('Hub integration', () => {
       body: JSON.stringify({ message: 'hello dev', name: 'bob', room: '#dev' }),
     })
 
-    await new Promise(r => setTimeout(r, 100))
-
-    const history = rooms.get('#general').getScrollback()
+    // Poll rather than fixed-sleep: first-message room initialization does
+    // real I/O (memory, chat log, harness stores) and a fixed 100ms loses
+    // races under full-suite parallel load.
+    let history = []
+    const deadline = Date.now() + 5000
+    while (Date.now() < deadline) {
+      history = rooms.get('#general').getScrollback()
+      if (history.find(h => h.text === 'hello general') && history.find(h => h.text === 'hello dev')) break
+      await new Promise(r => setTimeout(r, 50))
+    }
     const general = history.find(h => h.text === 'hello general')
     const dev = history.find(h => h.text === 'hello dev')
     assert.ok(general, 'general message in shared history')

@@ -93,7 +93,7 @@ export class RoomManager {
       timestamp: Date.now(),
     }
     if (model) event.model = model
-    const data = redactKeys(`data: ${JSON.stringify(event)}\n\n`)
+    const data = redactKeys(`data: ${JSON.stringify(event)}\n\n`, this.resolve()?.harness?.secrets?.values?.())
 
     for (const name of [from, to]) {
       const clients = this._dmClients.get(name)

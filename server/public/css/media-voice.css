@@ -1,0 +1,275 @@
+/* media-voice.css — styling for media-ui.js and voice-ui.js.
+ * Loaded alongside style.css; reuses its --hf-* custom properties and the
+ * shared .hidden utility so these controls read as part of the same system
+ * rather than a bolted-on widget.
+ */
+
+/* ============================================================
+ * Pending attachment tray (media-ui.js)
+ * ============================================================ */
+.media-pending-tray {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--hf-space-2);
+  padding: var(--hf-space-2) var(--hf-space-4);
+  background: var(--hf-bg-surface);
+}
+
+.media-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hf-space-1);
+  max-width: 200px;
+  padding: 4px var(--hf-space-2);
+  background: var(--hf-color-2);
+  border: 1px solid var(--hf-color-4);
+  border-radius: var(--hf-radius-full);
+  font-size: var(--hf-size-xs);
+  color: var(--hf-text-normal);
+}
+
+.media-chip-thumb {
+  width: 22px;
+  height: 22px;
+  border-radius: var(--hf-radius-sm);
+  object-fit: cover;
+  flex-shrink: 0;
+}
+
+.media-chip-icon {
+  font-size: 16px;
+  width: 16px;
+  height: 16px;
+  color: var(--hf-text-dim);
+  flex-shrink: 0;
+}
+
+.media-chip-name {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 130px;
+}
+
+.media-chip-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  border: none;
+  background: transparent;
+  color: var(--hf-text-muted);
+  cursor: pointer;
+  border-radius: var(--hf-radius-full);
+  flex-shrink: 0;
+}
+
+.media-chip-remove:hover {
+  color: var(--hf-text-bright);
+  background: var(--hf-color-4);
+}
+
+.media-chip-remove .hf-icon {
+  font-size: 13px;
+  width: 13px;
+  height: 13px;
+}
+
+.media-chip-spinner {
+  width: 13px;
+  height: 13px;
+  flex-shrink: 0;
+  border-radius: var(--hf-radius-full);
+  border: 2px solid var(--hf-color-4);
+  border-top-color: var(--hf-accent);
+  animation: media-spin 0.7s linear infinite;
+}
+
+@keyframes media-spin {
+  to { transform: rotate(360deg); }
+}
+
+/* ============================================================
+ * Drag-and-drop highlight on the message list (media-ui.js)
+ * ============================================================ */
+#messages.media-drag-over {
+  position: relative;
+  outline: 2px dashed var(--hf-accent);
+  outline-offset: -4px;
+  background: color-mix(in srgb, var(--hf-accent) 6%, transparent);
+}
+
+#messages.media-drag-over::after {
+  content: 'Drop to attach';
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: none;
+  font-size: var(--hf-size-base);
+  font-weight: var(--hf-weight-semibold);
+  color: var(--hf-accent);
+  background: color-mix(in srgb, var(--hf-bg-base) 70%, transparent);
+}
+
+/* ============================================================
+ * Attachments rendered onto a sent message (media-ui.js)
+ * ============================================================ */
+.message-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-start;
+  gap: var(--hf-space-2);
+  margin-top: var(--hf-space-2);
+}
+
+.attachment-image-link {
+  display: inline-block;
+  line-height: 0;
+}
+
+.attachment-image {
+  display: block;
+  max-width: 320px;
+  max-height: 320px;
+  width: auto;
+  height: auto;
+  border-radius: var(--hf-radius-md);
+  border: 1px solid var(--hf-border);
+  cursor: pointer;
+}
+
+.attachment-audio {
+  display: block;
+  max-width: 320px;
+  width: 100%;
+  height: 32px;
+}
+
+.attachment-file-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--hf-space-2);
+  padding: var(--hf-space-1) var(--hf-space-3);
+  background: var(--hf-color-2);
+  border: 1px solid var(--hf-color-4);
+  border-radius: var(--hf-radius-sm);
+  color: var(--hf-text-normal);
+  text-decoration: none;
+  font-size: var(--hf-size-sm);
+}
+
+.attachment-file-chip:hover {
+  background: var(--hf-color-3);
+  border-color: var(--hf-text-muted);
+}
+
+.attachment-file-chip .hf-icon {
+  color: var(--hf-text-dim);
+}
+
+.attachment-file-size {
+  color: var(--hf-text-muted);
+  font-size: var(--hf-size-xs);
+}
+
+/* ============================================================
+ * Mic + TTS buttons (voice-ui.js)
+ * ============================================================ */
+#voice-mic-btn.voice-recording {
+  color: var(--hf-red, #d04242);
+  border-color: var(--hf-red, #d04242);
+  animation: voice-pulse 1.2s ease-in-out infinite;
+}
+
+@keyframes voice-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--hf-red, #d04242) 45%, transparent); }
+  50% { box-shadow: 0 0 0 6px color-mix(in srgb, var(--hf-red, #d04242) 0%, transparent); }
+}
+
+#voice-mic-btn.voice-hands-free {
+  outline: 2px solid var(--hf-accent);
+  outline-offset: 2px;
+}
+
+#voice-mic-btn.voice-busy {
+  opacity: 0.6;
+  animation: voice-busy-fade 0.9s ease-in-out infinite;
+}
+
+@keyframes voice-busy-fade {
+  0%, 100% { opacity: 0.4; }
+  50% { opacity: 0.8; }
+}
+
+#voice-tts-btn.active {
+  color: var(--hf-accent);
+  background: color-mix(in srgb, var(--hf-accent) 12%, var(--hf-bg-elevated, var(--hf-color-2)));
+  border-color: var(--hf-accent);
+}
+
+/* ============================================================
+ * Toasts (shared by media-ui.js and voice-ui.js)
+ * ============================================================ */
+.cheesoid-toast-tray {
+  position: fixed;
+  right: var(--hf-space-4);
+  bottom: var(--hf-space-4);
+  display: flex;
+  flex-direction: column;
+  gap: var(--hf-space-2);
+  z-index: 1000;
+  pointer-events: none;
+  max-width: min(320px, calc(100vw - var(--hf-space-4) * 2));
+}
+
+.cheesoid-toast {
+  padding: var(--hf-space-2) var(--hf-space-3);
+  background: var(--hf-color-2);
+  border: 1px solid var(--hf-color-4);
+  border-left: 3px solid var(--hf-warn, #b8860b);
+  border-radius: var(--hf-radius-sm);
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
+  color: var(--hf-text-normal);
+  font-size: var(--hf-size-sm);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+}
+
+.cheesoid-toast.show {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+/* ============================================================
+ * Mobile
+ * ============================================================ */
+@media (max-width: 768px) {
+  .media-pending-tray {
+    padding: var(--hf-space-2) var(--hf-space-3);
+  }
+
+  .media-chip {
+    max-width: 150px;
+  }
+
+  .media-chip-name {
+    max-width: 90px;
+  }
+
+  .attachment-image,
+  .attachment-audio {
+    max-width: 240px;
+  }
+
+  .cheesoid-toast-tray {
+    left: var(--hf-space-3);
+    right: var(--hf-space-3);
+    max-width: none;
+  }
+}

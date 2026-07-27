@@ -9,9 +9,15 @@ import { RoomManager } from './lib/room-manager.js'
 import chatRouter from './routes/chat.js'
 import healthRouter from './routes/health.js'
 import webhookRouter from './routes/webhook.js'
+import harnessRouter from './routes/harness.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
+
+// Deployments sit behind a reverse proxy (Caddy + auth proxy) — without
+// this, req.ip is the proxy address and per-IP throttles become one
+// global bucket.
+app.set('trust proxy', 1)
 
 app.use(express.json())
 
@@ -21,11 +27,14 @@ const personaDir = join(__dirname, '..', 'personas', personaName)
 const persona = await loadPersona(personaDir)
 console.log(`Loaded persona: ${persona.config.display_name} (${persona.config.name})`)
 
-// Only require ANTHROPIC_API_KEY if anthropic is actually needed
-// (no providers block and no non-anthropic provider set)
-const needsAnthropic = !persona.config.providers && (persona.config.provider || 'anthropic') === 'anthropic'
+// Only require ANTHROPIC_API_KEY if anthropic is actually needed: no
+// providers block, no non-anthropic provider, and no OpenRouter key (which
+// auto-registers a provider and lets the model policy fill every tier).
+const needsAnthropic = !persona.config.providers
+  && (persona.config.provider || 'anthropic') === 'anthropic'
+  && !process.env.OPENROUTER_API_KEY
 if (needsAnthropic && !process.env.ANTHROPIC_API_KEY) {
-  console.error('Error: ANTHROPIC_API_KEY not set')
+  console.error('Error: ANTHROPIC_API_KEY not set (set it, or set OPENROUTER_API_KEY to run on evaluated OpenRouter defaults)')
   process.exit(1)
 }
 
@@ -49,7 +58,9 @@ await app.locals.rooms.initialize()
 Object.defineProperty(app.locals, 'room', {
   get() { return app.locals.rooms.resolve() },
 })
-app.locals.authMiddleware = createAuthMiddleware(persona.config.agents || null)
+// Runtime ad-hoc peers authenticate alongside config-declared agents.
+const peerStore = app.locals.rooms.resolve()?.harness?.peers || null
+app.locals.authMiddleware = createAuthMiddleware(persona.config.agents || null, peerStore)
 
 const requiredPaths = persona.config.startup_checks?.required_paths || []
 app.locals.startupCheckResults = runStartupChecks(requiredPaths)
@@ -58,6 +69,7 @@ app.locals.startupCheckResults = runStartupChecks(requiredPaths)
 app.use(chatRouter)
 app.use(healthRouter)
 app.use(webhookRouter)
+app.use(harnessRouter)
 
 // Start
 const port = process.env.PORT || 3000

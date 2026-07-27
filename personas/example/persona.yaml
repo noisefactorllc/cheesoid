@@ -1,75 +1,115 @@
 name: example
 display_name: "Example Agent"
 
-## Provider registry — define named providers for use in model strings
-providers:
-  my-provider:
-    type: openai-compat
-    base_url: https://api.example.com/v1
-    api_key: ${MY_PROVIDER_API_KEY}
-  openai:
-    type: openai-responses
-    base_url: ${OPENAI_BASE_URL}
-    api_key: ${OPENAI_API_KEY}
-    reasoning_effort: high
-
-execution: some-fast-model:my-provider
-
-orchestrator: gpt-5.4:openai
-
-## Modal mode: attention/cognition gear shifting (replaces orchestrator)
-## The agent starts in attention mode (cheap) and shifts to cognition (frontier)
-## when directly engaged. Both modes share the same tools and prompt.
-# cognition: claude-sonnet-4-6              # frontier model, full engagement
-# attention: claude-haiku-4-5               # capable model, monitoring
-# cognition_fallback_models:
-#   - claude-sonnet-4-6
-
-fallback_models:
-  - some-other-model:my-provider
-  - gpt-5.4-mini:openai
-  - claude-haiku-4-5
+## Zero-config quick start ####################################################
+##
+## With OPENROUTER_API_KEY set, this persona needs NOTHING below — the model
+## policy fills every tier with live-evaluated defaults (see docs/models.md):
+##   attention / cognition / reasoner / execution  — the conversation loop
+##   reflection    — sleep-cycle distillation
+##   transcription — voice input
+##   subagent      — background workers
+##
+##   OPENROUTER_API_KEY=sk-or-... npm run dev
+##
+## Alternatively set ANTHROPIC_API_KEY and pin models yourself (see the
+## tier examples below).
 
 theme: synthwave
 data_theme: synthwave
-
-tools: tools/tools.js
-
-server_tools:
-  - type: web_search_20250305
-    name: web_search
 
 chat:
   prompt: prompts/system.md
   thinking_budget: 16000
   max_turns: 20
 
-## Legacy style also works (no providers block needed):
-# provider: openai-compat
-# base_url: https://api.example.com/v1
-# api_key: ${MY_PROVIDER_API_KEY}
-# model: some-fast-model
-#
-# orchestrator:
-#   provider: anthropic
-#   model: claude-sonnet-4-6
-
-## Uncomment if running behind an auth proxy (e.g. groundsquirrel):
-# auth_proxy: true
-
-## Uncomment to accept connections from other agents:
-# agents:
-#   - name: other-agent
-#     secret: ${AGENT_SECRET_OTHER}
-
-## Uncomment to join another cheesoid room:
-# rooms:
-#   - url: http://other-cheesoid:3000
-#     name: other-room
-#     domain: other-room.example.com
-#     secret: ${ROOM_SECRET_OTHER}
-
 memory:
   dir: memory/
   auto_read:
     - MEMORY.md
+
+## Model policy ###############################################################
+## Adjust the evaluated defaults without taking over every tier:
+# model_policy:
+#   cognition: openai/gpt-5.6-terra:openrouter      # swap one tier
+#   allow:                                          # extra models set_model may pin
+#     - moonshotai/kimi-k3:openrouter
+## Or opt out entirely and configure tiers by hand:
+# model_policy: none
+
+## Explicit tiers (each accepts a string or a fallback-chain array) ###########
+# cognition: thinkingmachines/inkling:openrouter    # engaged reasoning
+# attention: google/gemma-4-31b-it:openrouter       # ambient monitoring
+# reasoner: moonshotai/kimi-k3:openrouter           # hard-problem escalation
+# execution: xiaomi/mimo-v2.5:openrouter            # tool chains
+# reflection: deepseek/deepseek-v4-flash:openrouter # sleep-cycle digests
+# transcription: google/gemini-3.5-flash-lite:openrouter    # voice input
+# subagent: xiaomi/mimo-v2.5:openrouter             # background workers
+
+## Providers (only needed for non-OpenRouter backends or custom endpoints) ####
+# providers:
+#   my-provider:
+#     type: openai-compat
+#     base_url: https://api.example.com/v1
+#     api_key: ${MY_PROVIDER_API_KEY}
+#   openai:
+#     type: openai-responses
+#     base_url: ${OPENAI_BASE_URL}
+#     api_key: ${OPENAI_API_KEY}
+#     reasoning_effort: high
+#   gemini:
+#     type: gemini
+#     api_key: ${GEMINI_API_KEY}
+
+## Harness ####################################################################
+## How much initiative the agent takes on self-directed turns (idle, sleep,
+## scheduled): low = observe and remember only; medium (default) = may start
+## tasks, schedule work, speak unprompted; high = may also join peer rooms
+## and re-pin its own models.
+# autonomy: medium
+
+## Opt-in built-in tools. `shell` gives the agent bash in its persona
+## directory with operator-dropped secrets in the environment — grant it the
+## way you would grant a person production access.
+# builtin_tools:
+#   - shell
+
+## Sleep cycle: nightly reflection + context compaction. On by default at
+## 04:00 server time; retime or disable:
+# sleep:
+#   schedule: "0 5 * * *"
+# sleep: false
+
+## Custom tools (module exporting `definitions` + `execute`):
+# tools: tools/tools.js
+
+## Web search via OpenRouter's plugin (native on Anthropic tiers):
+# server_tools:
+#   - type: web_search_20250305
+#     name: web_search
+
+## Multi-agent ################################################################
+## Host rooms for others (hub mode):
+# hosted_rooms:
+#   - "#general"
+## Accept configured agents (static peers — ad-hoc peers join at runtime via
+## the Peers panel or POST /api/peer/join and require in-room approval):
+# agents:
+#   - name: other-agent
+#     secret: ${AGENT_SECRET_OTHER}
+## Join other cheesoids at boot (ad-hoc joins also work at runtime):
+# rooms:
+#   - url: http://other-cheesoid:3000
+#     name: other-room
+#     secret: ${ROOM_SECRET_OTHER}
+
+## Scheduled wakeups (config-owned; the agent manages its own runtime
+## schedules with the schedule_create tool):
+# wakeups:
+#   - name: morning-review
+#     mode: cron
+#     schedule: "0 8 * * 1-5"
+#     prompt: prompts/wakeup.md
+
+## Behind an auth proxy (e.g. groundsquirrel):
+# auth_proxy: true

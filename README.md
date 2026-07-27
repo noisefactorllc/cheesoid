@@ -37,12 +37,16 @@ The quick start below runs on localhost only, which is safe. Do not change the p
 git clone <this-repo>
 cd cheesoid
 npm install
-ANTHROPIC_API_KEY=sk-... npm run dev
+OPENROUTER_API_KEY=sk-or-... npm run dev   # or ANTHROPIC_API_KEY=sk-...
 ```
 
 Open `http://localhost:3000`. Enter a name, start chatting.
 
-The `example` persona loads by default — it's a minimal agent with memory and state tools but no custom tools. Good for verifying the setup works. Build your own persona from there.
+The `example` persona loads by default. With an OpenRouter key and no model
+config, every tier (conversation, monitoring, escalation, tool execution,
+reflection, transcription, subagents) runs on live-evaluated defaults — see
+[docs/models.md](docs/models.md). Pin your own models per tier any time;
+explicit config always wins.
 
 ## Creating a Persona
 
@@ -154,9 +158,21 @@ Every persona automatically gets these built-in tools (no need to define them):
 
 - `read_memory` / `write_memory` / `append_memory` / `list_memory` — persistent memory
 - `get_state` / `update_state` — persistent cognitive state (mood, energy, focus, open threads)
+- `search_memory` — unified substring search across memory files AND wiki pages
 - `search_history` — search full chat history across all sessions by keyword
+- `wiki_read` / `wiki_write` / `wiki_delete` / `wiki_list` / `wiki_search` — the agent's private knowledge wiki, with `[[memory:file.md]]` drill-down links
+- `task_start` / `task_list` / `task_status` / `task_stop` — background shell/subagent work
+- `schedule_create` / `schedule_list` / `schedule_delete` — the agent's own calendar
+- `spawn_subagent` — delegate self-contained work to a fresh worker context
+- `read_thread` / `reply_to_message` / `react_to_message` — thread-aware conversation
+- `share_media` / `read_media` — media in and out of the room
+- `list_peers` / `remove_peer` / `join_room` — ad-hoc federation (join_room needs `autonomy: high` on self-directed turns)
+- `list_secrets` — names of operator-dropped secrets (values are never readable)
+- `set_model` — pin a tier's model within the allow list
+- `fetch_url` — read a public web page as text
 - `send_chat_message` — send a message to the chat room
 - `list_shared` / `read_shared` / `write_shared` — shared workspace file access (when `/shared` is mounted)
+- `shell` — opt-in via `builtin_tools: [shell]`: bash in the persona directory with secrets in the environment
 
 ### Configuring tool access
 
@@ -250,14 +266,27 @@ docker run -p 3000:3000 \
 ## Features
 
 - **Persistent memory** — the agent reads and writes its own memory files across sessions
+- **Private knowledge wiki** — agent-maintained topic pages with `[[links]]`, searchable, user-readable
+- **Search-first recall** — in-context memory is treated as a sparse cache; unified search across memory, wiki, and full chat history
+- **Background tasks & subagents** — shell jobs and delegated workers run while the conversation continues; completion reports arrive in-room
+- **Schedules** — the agent keeps its own calendar (cron + one-shots) alongside operator-configured wakeups
+- **Media sharing** — attach images/audio/pdf/text in chat; images reach vision-capable models; the agent shares files back
+- **Threads** — replies chain into first-class threads the agent can reconstruct after they scroll away
+- **Voice** — spoken input (evaluated transcription tier) and browser TTS out, with a hands-free mode
+- **Sleep cycle** — nightly reflection distills the day into journal/wiki/memory, then compacts live context
+- **Write-only secrets** — drop credentials from the UI; values inject into tool environments and are never readable back
+- **Ad-hoc peering** — any cheesoid joins any other with a URL + shared key, gated by in-room human approval
+- **Dynamic models** — seven evaluated model tiers over OpenRouter with zero config, per-tier overrides, and agent-side `set_model` within an allow list
 - **Persistent state** — mood, energy, focus, open threads survive restarts
 - **Multi-user chat** — multiple people in the same room, agent sees who's talking
 - **Scrollback** — reconnecting users see the last 50 messages
 - **Idle thoughts** — after inactivity, the agent reflects and may write to memory
 - **Webhooks** — external systems can trigger the agent on a schedule or via events
-- **Collapsible sidebar** — shows persona status and connected participants
-- **Chat history search** — search past conversations across all sessions
 - **Custom tools** — give your persona abilities beyond conversation
+
+The harness subsystems are documented in [docs/harness.md](docs/harness.md);
+model selection and the evaluation behind the defaults in
+[docs/models.md](docs/models.md).
 
 ## Idle Thoughts
 
@@ -371,10 +400,14 @@ Or override the mount path with the `SHARED_WORKSPACE_PATH` environment variable
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `ANTHROPIC_API_KEY` | (required) | Your Anthropic API key |
+| `OPENROUTER_API_KEY` | — | Enables zero-config model tiers, auto-registers the `openrouter` provider, backs voice transcription |
+| `ANTHROPIC_API_KEY` | — | Required only when a tier resolves to the native Anthropic provider |
 | `PERSONA` | `example` | Persona directory name under `personas/` |
 | `PORT` | `3000` | HTTP port |
 | `SHARED_WORKSPACE_PATH` | `/shared` | Mount path for shared workspace volume |
+| `WEBHOOK_SECRET` | (disabled) | Shared secret for `POST /webhook` |
+
+One of the two API keys is required.
 
 ## Project Structure
 
@@ -383,19 +416,35 @@ server/
   index.js              # Express app, persona loading
   lib/
     chat-session.js     # Room class — shared chat room
-    agent.js            # Claude API integration
+    agent.js            # Provider-agnostic agent loop (single + hybrid)
+    harness.js          # Composes tasks/schedules/secrets/wiki/peers/media/subagents
+    tools.js            # Tool loading and built-in tools
+    tools-harness.js    # Harness tool surface (tasks, wiki, peering, media, …)
+    model-policy.js     # Evaluated OpenRouter tier defaults (docs/models.md)
+    task-manager.js     # Background shell/subagent jobs
+    schedule-store.js   # Runtime schedules (agent-managed cron/one-shots)
+    subagent.js         # Fresh-context worker runs
+    secrets.js          # Write-only secret store
+    wiki.js             # Private knowledge wiki
+    peering.js          # Ad-hoc peer registry (hashed secrets, approval flow)
+    media.js            # Media store for chat attachments
+    sleep.js            # Sleep cycle: reflection + context compaction
+    autonomy.js         # Initiative gate for self-directed turns
+    thread-utils.js     # Reply-chain → thread resolution
+    voice.js            # Speech-to-text via the transcription tier
     memory.js           # Memory file operations
     state.js            # Persistent state
     persona.js          # Persona config loader
     prompt-assembler.js # System prompt construction
-    tools.js            # Tool loading and built-in tools
     shared-workspace.js # Shared workspace tools
     chat-log.js         # Chat history persistence and search
-    auth.js             # Auth middleware
+    auth.js             # Auth middleware (config agents + runtime peers)
+    providers/          # anthropic, openai-compat, openrouter, openai-responses, gemini
   routes/
     chat.js             # SSE stream, send, reset
+    harness.js          # Secrets, tasks, schedules, peers, media, voice, wiki, threads
     health.js           # Health check, presence API
-  public/               # Web UI (vanilla JS)
+  public/               # Web UI (vanilla JS + harness panels, media, voice modules)
 personas/
-  example/              # Default test persona
+  example/              # Default test persona (zero-config showcase)
 ```

@@ -1,6 +1,7 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { capUtf8Bytes, MEMORY_READ_CAP_BYTES, MEMORY_COMPACT_WARN_BYTES } from './memory.js'
+import { createAutonomy } from './autonomy.js'
 
 // Framework-level memory-hygiene doctrine, injected for every persona so
 // individual persona prompts never need to restate limits or compaction
@@ -297,12 +298,15 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
     `- React sparingly. Reactions carry more weight when they are rare. Prefer reacting when others are already reacting — you are joining a moment, not starting one.`,
     `- Do not react to your own messages. One reaction per message maximum.`,
     ``,
-    `### Replies`,
+    `### Replies and Threads`,
     ``,
     `A REPLY is a message with a visible thread link back to an earlier message. The only way to create a reply is to call the \`reply_to_message\` tool. A normal response to the most recent message is NOT a reply — it is just a message.`,
     ``,
+    `Replies chain into THREADS: every reply belongs to the thread rooted at the first message of its chain. When someone replies to an old message, do not answer from vibes — call \`read_thread\` with the message id to recover the full chain, then respond inside that context.`,
+    ``,
     `Rules:`,
     `- Use \`reply_to_message\` ONLY for thread revival — returning to a topic that has scrolled away. For normal responses to the latest message, just respond normally without the reply tool.`,
+    `- When you use it, reply to the message that ROOTS the topic so the thread stays coherent.`,
     `- Replies add clarity by linking back to earlier context. Do not use them for every response.`,
   ].join('\n')
 
@@ -321,6 +325,39 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
   operationalSections.push(SESSION_EPHEMERALITY)
 
   operationalSections.push(MEMORY_DOCTRINE)
+
+  const SEARCH_FIRST = [
+    `## Search First — Your Context Is a Sparse Cache`,
+    ``,
+    `What you can see right now is a small, recent slice. Your real knowledge lives in files and history, reached through search. Treat in-context memory as a cache that is usually stale and always incomplete.`,
+    ``,
+    `Before answering ANYTHING that depends on the past — a person, a decision, a number, a promise, an earlier conversation — search first:`,
+    `- \`search_memory\` — one call searches all memory files AND wiki pages, returns matching lines with locations.`,
+    `- \`search_history\` — full chat history across all sessions.`,
+    `- \`read_thread\` — a full reply chain when a thread's origin has scrolled away.`,
+    ``,
+    `"I don't see it in context" is never the answer; it is the trigger to search. If search comes up empty, say plainly that you found nothing — never fill the gap with something plausible.`,
+    ``,
+    `### Your Wiki`,
+    ``,
+    `Your wiki (\`wiki_read\` / \`wiki_write\` / \`wiki_search\` / \`wiki_list\` / \`wiki_delete\`) is your long-term structured knowledge: one page per topic — people, projects, systems, decisions — linked with [[slugs]]. Cite supporting memory files as [[memory:filename.md]]; users reading your wiki can click both link forms to drill down, so link generously. The index below shows page titles only; content stays on disk until you fetch it. Memory files are for working notes and standing directives; the wiki is for what you have LEARNED. Compact the wiki the way you compact memory: rewrite bloated pages, merge overlap, delete what is no longer true. Users can read your wiki. Maintain it like it will outlive this conversation, because it will.`,
+  ].join('\n')
+
+  operationalSections.push(SEARCH_FIRST)
+
+  const HARNESS_TOOLS = [
+    `## Background Work, Schedules, Subagents`,
+    ``,
+    `You are not limited to answering in the moment:`,
+    `- \`task_start\` runs shell commands or delegated subagent work in the background — you are notified in-room when it finishes. Never sit idle "waiting" for slow work; background it.`,
+    `- \`schedule_create\` is your calendar: reminders, recurring reviews, deferred work ("remind me tomorrow at 9" = one call with \`at\`).`,
+    `- \`spawn_subagent\` delegates self-contained work to a fresh worker with its own context — foreground for quick lookups, background for slow research.`,
+    `- \`set_model\` (if permitted) pins a stronger or cheaper model for a tier when the work clearly calls for it.`,
+    ``,
+    `${createAutonomy(config).describe()}`,
+  ].join('\n')
+
+  operationalSections.push(HARNESS_TOOLS)
 
   // Plugin skills
   for (const plugin of plugins) {
@@ -361,6 +398,14 @@ export async function assemblePrompt(personaDir, config, plugins = [], {
       console.log(`[${config.name || 'unknown'}] WARN: auto_read ${filename} is ${totalKB}KB — truncated to ${capKB}KB in the system prompt; compact it into topic files`)
     }
     contextSections.push(`${text}\n\n… [preload truncated: showing the first ${capKB}KB of ${totalKB}KB of ${filename} — a memory file this large degrades your context on every turn. Compact ${filename}: keep it a tight index of durable facts and move the rest into topic files.]`)
+  }
+
+  // Wiki index — page titles only, cheap orientation for search-first
+  // recall. Content stays on disk until the agent fetches it.
+  const wikiIndex = await readSafe(join(personaDir, 'wiki', 'index.md'))
+  if (wikiIndex) {
+    const { text } = capUtf8Bytes(wikiIndex, 4096)
+    contextSections.push(`## Wiki Index (titles only — use wiki_read for content)\n\n${text}`)
   }
 
   // Tool journal — recent tool use summaries for cross-session awareness

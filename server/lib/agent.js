@@ -481,12 +481,14 @@ function repairToolUseGaps(messages) {
       if (b.type === 'tool_result') existingResultIds.add(b.tool_use_id)
     }
 
-    // Forward: add synthetic results for tool_use blocks missing results
+    // Forward: add synthetic results for tool_use blocks missing results.
+    // unshift, not push — tool_result blocks must lead the user message, and
+    // the next message may now carry text/image blocks (media attachments).
     const missingResults = [...toolUseIds].filter(id => !existingResultIds.has(id))
     if (missingResults.length > 0) {
       console.log(`[hybrid] repairing ${missingResults.length} orphaned tool_use blocks at message ${i}`)
       repairedCount += missingResults.length
-      next.content.push(...missingResults.map(id => ({
+      next.content.unshift(...missingResults.map(id => ({
         type: 'tool_result',
         tool_use_id: id,
         content: '{"output":"[tool result unavailable — previous session interrupted]","is_error":true}',

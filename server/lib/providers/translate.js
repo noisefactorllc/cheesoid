@@ -78,7 +78,10 @@ export function translateMessages(systemPrompt, messages) {
       if (typeof msg.content === 'string') {
         result.push({ role: 'user', content: msg.content })
       } else if (Array.isArray(msg.content)) {
-        // Content blocks — tool_result blocks become tool role messages
+        // Content blocks — tool_result blocks become tool role messages;
+        // text + image blocks (media attachments) survive as a multimodal
+        // user message rather than being dropped.
+        const parts = []
         for (const block of msg.content) {
           if (block.type === 'tool_result') {
             result.push({
@@ -86,7 +89,18 @@ export function translateMessages(systemPrompt, messages) {
               tool_call_id: block.tool_use_id,
               content: block.content,
             })
+          } else if (block.type === 'text') {
+            parts.push({ type: 'text', text: block.text })
+          } else if (block.type === 'image' && block.source?.type === 'base64') {
+            parts.push({
+              type: 'image_url',
+              image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` },
+            })
           }
+        }
+        if (parts.length > 0) {
+          const allText = parts.every(p => p.type === 'text')
+          result.push({ role: 'user', content: allText ? parts.map(p => p.text).join('\n') : parts })
         }
       }
     } else if (msg.role === 'assistant') {

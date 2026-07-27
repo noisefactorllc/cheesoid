@@ -19,12 +19,48 @@ import { ProviderRegistry } from './providers/index.js'
 import { Modality } from './modality.js'
 import { RoomClient } from './room-client.js'
 import { WakeupScheduler } from './wakeup.js'
+import { createHarness } from './harness.js'
+import { runSleepCycle } from './sleep.js'
+
+// Message sources that are framework plumbing rather than people: no message
+// ids, no UI broadcast as user chat, hidden from scrollback.
+const INTERNAL_SOURCES = new Set(['system', 'webhook', 'wakeup', 'schedule', 'task'])
 
 // Matches common API key patterns: sk-*, key-*, vendor_sk_*, Bearer tokens, hex/base64 strings 32+ chars
 const API_KEY_PATTERN = /\b(sk-[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9]+_sk_[a-zA-Z0-9_-]{20,}|key-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{36,}|ghu_[a-zA-Z0-9]{36,}|xoxb-[a-zA-Z0-9-]{20,}|xoxp-[a-zA-Z0-9-]{20,}|AKIA[A-Z0-9]{16}|eyJ[a-zA-Z0-9_-]{40,}\.[a-zA-Z0-9_-]{40,}|[a-zA-Z0-9_-]{40,}(?=["'\s,}\]\\]))/g
 
-export function redactKeys(str) {
-  return str.replace(API_KEY_PATTERN, '**[Redacted by Cheesoid]**')
+/**
+ * Redact a history entry's text fields (including the reply quote) for
+ * serving over any JSON endpoint. Returns the entry unchanged when clean.
+ */
+export function redactHistoryEntry(entry, extraValues = null) {
+  if (!entry) return entry
+  let out = entry
+  if (typeof entry.text === 'string') {
+    const text = redactKeys(entry.text, extraValues)
+    if (text !== entry.text) out = { ...out, text }
+  }
+  if (entry.replyToPreview?.text) {
+    const previewText = redactKeys(entry.replyToPreview.text, extraValues)
+    if (previewText !== entry.replyToPreview.text) {
+      out = { ...out, replyToPreview: { ...entry.replyToPreview, text: previewText } }
+    }
+  }
+  return out
+}
+
+export function redactKeys(str, extraValues = null) {
+  let out = str.replace(API_KEY_PATTERN, '**[Redacted by Cheesoid]**')
+  // Operator-dropped secret values are redacted verbatim wherever they
+  // appear — the write-only guarantee holds even if a tool echoes one.
+  if (extraValues) {
+    for (const value of extraValues) {
+      if (value && value.length >= 6 && out.includes(value)) {
+        out = out.split(value).join('**[Redacted by Cheesoid]**')
+      }
+    }
+  }
+  return out
 }
 
 function replaceTimestamp(prompt) {
@@ -230,6 +266,13 @@ function ageOldToolResults(messages, protectTurns = TOOL_RESULT_AGE_PROTECT_TURN
     if (i >= cutoff || !Array.isArray(message?.content)) return message
     let contentChanged = false
     const newContent = message.content.map(block => {
+      // Old image attachments age out entirely — base64 payloads dominate
+      // token estimates and the [attached: … media:id] text notice remains
+      // in the adjacent text block for read_media recovery.
+      if (block?.type === 'image') {
+        contentChanged = true
+        return { type: 'text', text: '[attached image aged out of context — the media id in this message recovers it]' }
+      }
       if (block?.type !== 'tool_result' || typeof block.content !== 'string') return block
       if (block.content.length <= TOOL_RESULT_AGE_THRESHOLD_CHARS) return block
       contentChanged = true
@@ -427,6 +470,10 @@ export class Room {
   set _wakeupSchedulers(v) { this._a._wakeupSchedulers = v }
   get _pendingBackchannels() { return this._a._pendingBackchannels }
   set _pendingBackchannels(v) { this._a._pendingBackchannels = v }
+  get harness() { return this._a.harness }
+  set harness(v) { this._a.harness = v }
+  get _turnOrigin() { return this._a._turnOrigin }
+  set _turnOrigin(v) { this._a._turnOrigin = v }
 
   /**
    * Queue a backchannel event for deferred broadcast.
@@ -480,7 +527,14 @@ export class Room {
       })
     }
 
-    this.tools = await loadTools(dir, config, this.memory, this.state, this, this.registry, this.modality)
+    // The harness: tasks, schedules, subagents, wiki, secrets, media,
+    // ad-hoc peers, autonomy. Created once, shared by all rooms via _a.
+    this.harness = createHarness({ personaDir: dir, config, registry: this.registry })
+
+    this.tools = await loadTools(dir, config, this.memory, this.state, this, this.registry, this.modality, { harness: this.harness })
+
+    this.harness.bindRoom(this)
+    await this.harness.start()
 
     // Replay recent history into agent context
     const recent = await this.chatLog.recent(MAX_HISTORY)
@@ -554,6 +608,24 @@ export class Room {
       scheduler.start()
       return scheduler
     })
+
+    // Nightly sleep cycle: reflection + context compaction. Disable with
+    // `sleep: false`; retime with `sleep: { schedule: '0 5 * * *' }`. The
+    // default minute is derived from the persona name so co-hosted agents
+    // don't all dream at the same instant.
+    if (config.sleep !== false) {
+      const nameHash = [...(config.name || 'agent')].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0)
+      const sleepScheduler = new WakeupScheduler(this.persona, {
+        name: 'sleep',
+        mode: 'cron',
+        schedule: config.sleep?.schedule || `${nameHash % 60} 4 * * *`,
+        promptText: 'sleep',
+      }, async () => {
+        await runSleepCycle(this, this.harness)
+      })
+      sleepScheduler.start()
+      this._wakeupSchedulers.push(sleepScheduler)
+    }
   }
 
   // Register an SSE client for broadcast
@@ -575,16 +647,18 @@ export class Room {
       this.participants.set(name, Date.now())
       this.broadcast({ type: 'presence', participants: this.participantList })
     }
-    // Send scrollback — one history, one send
+    // Send scrollback — one history, one send. Secret-value redaction must
+    // cover replay identically to live broadcast: a masked-live leak that
+    // reappears on refresh is not masked.
     const scrollback = this.getScrollback()
     if (scrollback.length > 0) {
-      const data = redactKeys(`data: ${JSON.stringify({ type: 'scrollback', messages: scrollback })}\n\n`)
+      const data = redactKeys(`data: ${JSON.stringify({ type: 'scrollback', messages: scrollback })}\n\n`, this.harness?.secrets?.values?.())
       res.write(data)
     }
 
     // Send moderator pool to agents so they know the full participant list
     if (isAgent && this._moderatorPool.length > 1) {
-      res.write(redactKeys(`data: ${JSON.stringify({ type: 'moderator_pool', pool: this._moderatorPool })}\n\n`))
+      res.write(redactKeys(`data: ${JSON.stringify({ type: 'moderator_pool', pool: this._moderatorPool })}\n\n`, this.harness?.secrets?.values?.()))
     }
 
     // Start heartbeat if this is the first client
@@ -611,6 +685,23 @@ export class Room {
   }
 
   recordHistory(entry) {
+    // Redact secret values at WRITE time — the JSONL store is forever, and
+    // every downstream egress (scrollback, search, threads, replay) serves
+    // what lands here. Egress-side redaction still runs for entries recorded
+    // before a secret existed.
+    if (entry.text && this.harness?.secrets) {
+      const redacted = redactKeys(entry.text, this.harness.secrets.values())
+      if (redacted !== entry.text) entry = { ...entry, text: redacted }
+    }
+
+    // Thread stamping: a reply inherits its parent's thread, whose root is
+    // the thread id. Unknown parents anchor the thread at the referenced id
+    // so late-joining context still groups.
+    if (entry.replyTo && !entry.threadId) {
+      const parent = this.history.find(h => h.id === entry.replyTo)
+      entry.threadId = parent?.threadId || parent?.id || entry.replyTo
+    }
+
     // Flood circuit-breaker. Suppress a flood of identical consecutive entries
     // (same type+name+text) and log loudly so the underlying re-injection loop
     // stays visible instead of silently filling disk and blowing the heap on
@@ -641,14 +732,25 @@ export class Room {
   }
 
   getScrollback() {
-    const HIDDEN_NAMES = new Set(['system', 'webhook', 'wakeup'])
+    const HIDDEN_NAMES = new Set(['system', 'webhook', 'wakeup', 'schedule', 'task'])
     return this.history.filter(msg => !HIDDEN_NAMES.has(msg.name))
+  }
+
+  /**
+   * Post a message from the agent carrying a media attachment (share_media).
+   */
+  postAgentAttachment(meta, note = '') {
+    const id = shortMsgId()
+    const attachment = { id: meta.id, name: meta.name, mime: meta.mime, bytes: meta.bytes }
+    const agentName = this.persona.config.display_name
+    this.broadcast({ type: 'assistant_message', text: note, id, name: agentName, attachments: [attachment] })
+    this.recordHistory({ type: 'assistant_message', text: note, id, room: this.roomName, attachments: [attachment] })
   }
 
   // Send event to all connected clients
   broadcast(event) {
     const tagged = this.roomName ? { ...event, room: this.roomName } : event
-    const data = redactKeys(`data: ${JSON.stringify(tagged)}\n\n`)
+    const data = redactKeys(`data: ${JSON.stringify(tagged)}\n\n`, this.harness?.secrets?.values?.())
     for (const client of this.clients) {
       try {
         const ok = client.write(data)
@@ -902,11 +1004,24 @@ export class Room {
     const idTag = replyTo ? ` [${msgId}] (replying to ${replyTo})` : ` [${msgId}]`
     this._safeAppendMessage({ role: 'user', content: `${name}${idTag}: ${text}` })
     const event = { type: 'user_message', name, text, fromAgent: true, model, id: msgId }
-    if (replyTo) event.replyTo = replyTo
+    if (replyTo) {
+      event.replyTo = replyTo
+      // Visitor replies target recent messages — quote from in-memory history
+      // so the referenced content rides on the event.
+      const ref = this.history.find(h => h.id === replyTo)
+      if (ref) {
+        event.replyToPreview = {
+          name: ref.name || this.persona.config.display_name,
+          text: String(ref.text || '').slice(0, 200),
+          timestamp: ref.timestamp || null,
+        }
+      }
+    }
     this.broadcast(event)
     const histEntry = { type: 'user_message', name, text, room: this.roomName, id: msgId }
     if (model) histEntry.model = model
     if (replyTo) histEntry.replyTo = replyTo
+    if (event.replyToPreview) histEntry.replyToPreview = event.replyToPreview
     this.recordHistory(histEntry)
     this.lastActivity = Date.now()
     this._clearIdleTimer()
@@ -1141,6 +1256,7 @@ export class Room {
     }
 
     this.busy = true
+    this._turnOrigin = 'user'
     try {
       if (!this.systemPrompt) await this.initialize()
 
@@ -1249,6 +1365,7 @@ export class Room {
       console.error(`[${this.persona.config.name}] DM error:`, err.message)
     } finally {
       this.busy = false
+      this._turnOrigin = null
       if (this._pendingContextMessages && this._pendingContextMessages.length > 0) {
         for (const msg of this._pendingContextMessages) {
           this.messages.push(msg)
@@ -1266,7 +1383,7 @@ export class Room {
             console.error(`[${this.persona.config.name}] Queued DM error:`, err.message)
           })
         } else {
-          targetRoom._processMessage(next.room, next.name, next.text).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast, _replyTo: next._replyTo, _messageId: next._messageId, _attachments: next._attachments, _replyPreview: next._replyPreview, _replyReferenced: next._replyReferenced }).catch(err => {
             console.error(`[${this.persona.config.name}] Queued message error:`, err.message)
           })
         }
@@ -1283,13 +1400,31 @@ export class Room {
           return
         }
         this._messageQueue.push({ room, name, text })
-      } else if (room === 'home' && name !== 'system') {
-        // Queue human messages — broadcast immediately so they appear in chat
+      } else if (room === 'home' && !INTERNAL_SOURCES.has(name)) {
+        // Queue human messages — broadcast immediately so they appear in chat.
+        // Replies resolve their referenced message BEFORE broadcasting so the
+        // quote rides on the event even while the agent is busy.
         const queuedReplyTo = options._replyTo || null
+        const queuedAttachments = options._attachments || []
         const queuedMessageId = shortMsgId()
-        this.broadcast({ type: 'user_message', name, text, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }) })
-        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }) })
-        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true, _replyTo: queuedReplyTo, _messageId: queuedMessageId })
+        let queuedPreview = null
+        let queuedReferenced = null
+        if (queuedReplyTo) {
+          queuedReferenced = this.history.find(h => h.id === queuedReplyTo) || null
+          if (!queuedReferenced && this.chatLog) {
+            try { queuedReferenced = await this.chatLog.findById(queuedReplyTo) } catch { }
+          }
+          if (queuedReferenced) {
+            queuedPreview = {
+              name: queuedReferenced.name || this.persona.config.display_name,
+              text: String(queuedReferenced.text || '').slice(0, 200),
+              timestamp: queuedReferenced.timestamp || null,
+            }
+          }
+        }
+        this.broadcast({ type: 'user_message', name, text, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }), ...(queuedPreview && { replyToPreview: queuedPreview }), ...(queuedAttachments.length > 0 && { attachments: queuedAttachments }) })
+        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }), ...(queuedPreview && { replyToPreview: queuedPreview }), ...(queuedAttachments.length > 0 && { attachments: queuedAttachments }) })
+        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true, _replyTo: queuedReplyTo, _messageId: queuedMessageId, _attachments: queuedAttachments, _replyPreview: queuedPreview, _replyReferenced: queuedReferenced })
       } else {
         this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
       }
@@ -1302,6 +1437,10 @@ export class Room {
     }
 
     this.busy = true
+    this._turnOrigin = name === 'webhook' ? 'webhook'
+      : (name === 'wakeup' || name === 'schedule') ? 'wakeup'
+      : name === 'task' ? 'task'
+      : 'user'
     this._backchannelTrigger = !!options._backchannelTrigger
     this._triggerTargetsThisTurn = new Set()
     this.lastActivity = Date.now()
@@ -1320,19 +1459,86 @@ export class Room {
       if (!this.systemPrompt) await this.initialize()
 
       const presence = room === 'home' ? ` (present: ${this.participantList.join(', ')})` : ''
-      const messageId = options._messageId || ((room === 'home' && !options._silent && name !== 'system' && name !== 'webhook' && name !== 'wakeup') ? shortMsgId() : null)
+      const messageId = options._messageId || ((room === 'home' && !options._silent && !INTERNAL_SOURCES.has(name)) ? shortMsgId() : null)
       const idTag = messageId ? ` [${messageId}]` : ''
       const replyTo = options._replyTo || null
       const replyTag = replyTo ? ` (replying to ${replyTo})` : ''
-      this.messages.push({ role: 'user', content: `${name}${idTag}${presence}${replyTag}: ${text}` })
+      const attachments = options._attachments || []
+
+      // A reply must never reach the agent context-free. The referenced
+      // message may have scrolled out of the live window (or predate this
+      // session entirely — history search lets users reply to anything), so
+      // resolve it from in-memory history first, then the full JSONL store,
+      // and quote it alongside the reply. The same resolution feeds
+      // replyToPreview on the broadcast + history entry, so the UI shows the
+      // referenced message too — one lookup, context for everyone.
+      let replyContext = ''
+      let replyPreview = options._replyPreview || null
+      if (replyTo) {
+        // Queue-drained replies carry the already-resolved entry — never
+        // stream the full history twice for one reply.
+        let referenced = options._replyReferenced || this.history.find(h => h.id === replyTo) || null
+        if (!referenced && this.chatLog) {
+          try {
+            referenced = await this.chatLog.findById(replyTo)
+          } catch (err) {
+            console.log(`[${this.persona.config.name}] reply lookup failed for ${replyTo}: ${err.message}`)
+          }
+        }
+        if (referenced && !replyPreview) {
+          replyPreview = {
+            name: referenced.name || this.persona.config.display_name,
+            text: String(referenced.text || '').slice(0, 200),
+            timestamp: referenced.timestamp || null,
+          }
+        }
+        if (referenced) {
+          const refWho = referenced.name || this.persona.config.display_name
+          const refWhen = referenced.timestamp
+            ? new Date(referenced.timestamp).toISOString().replace('T', ' ').slice(0, 16)
+            : 'earlier'
+          const refRoom = referenced.room ? `, in ${referenced.room}` : ''
+          const refText = String(referenced.text || '').slice(0, 500)
+          replyContext = `(system) ${name} is replying to this earlier message [${replyTo}] from ${refWho} (${refWhen}${refRoom}): "${refText}". Respond with that context in mind; read_thread ${replyTo} recovers the full chain if you need more.\n\n`
+        } else {
+          replyContext = `(system) ${name} is replying to message id ${replyTo}, which is not in stored history. Treat the reply text as your only context and ask for a recap if you need one — do not pretend to remember it.\n\n`
+        }
+      }
+
+      let contextText = `${replyContext}${name}${idTag}${presence}${replyTag}: ${text}`
+      if (attachments.length > 0) {
+        const notes = attachments.map(a => `[attached: ${a.name} (${a.mime}, ${Math.ceil((a.bytes || 0) / 1024)}KB) media:${a.id}]`).join(' ')
+        contextText = `${contextText}\n${notes}`
+      }
+      // Image attachments become vision blocks (anthropic-format; translate.js
+      // maps them for openai-compat backends). Oversized or svg images stay
+      // notice-only.
+      const imageBlocks = []
+      if (this.harness && attachments.length > 0) {
+        for (const a of attachments) {
+          if (!a.mime?.startsWith('image/') || a.mime === 'image/svg+xml') continue
+          try {
+            const loaded = await this.harness.media.load(a.id)
+            if (loaded && loaded.meta.bytes <= 5 * 1024 * 1024) {
+              imageBlocks.push({
+                type: 'image',
+                source: { type: 'base64', media_type: loaded.meta.mime, data: loaded.buffer.toString('base64') },
+              })
+            }
+          } catch { }
+        }
+      }
+      this.messages.push(imageBlocks.length > 0
+        ? { role: 'user', content: [{ type: 'text', text: contextText }, ...imageBlocks] }
+        : { role: 'user', content: contextText })
 
       // Multi-agent floor control.
       // 1. Explicit addressing (@Name, Name:) updates the floor
       // 2. If no addressing, the current floor persists (conversation continues)
       // 3. If no floor set, moderator orchestrates
       const myName = this.persona.config.display_name
-      const isMultiAgent = room === 'home' && this._moderatorPool.length > 1 && name !== 'system' && name !== 'webhook'
-      const isVisitorHuman = name !== myName && name !== 'system' && name !== 'webhook' && name !== 'wakeup'
+      const isMultiAgent = room === 'home' && this._moderatorPool.length > 1 && !INTERNAL_SOURCES.has(name)
+      const isVisitorHuman = name !== myName && !INTERNAL_SOURCES.has(name)
       let addressed = options._addressed || null
       let floor = this._floor
       let moderator = null
@@ -1365,10 +1571,10 @@ export class Room {
 
       if (room === 'home' && !options._silent) {
         if (name) this.participants.set(name, Date.now())
-        if (name !== 'system' && name !== 'webhook' && name !== 'wakeup' && !options._alreadyBroadcast) {
-          this.broadcast({ type: 'user_message', name, text, moderator, floor, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }) })
+        if (!INTERNAL_SOURCES.has(name) && !options._alreadyBroadcast) {
+          this.broadcast({ type: 'user_message', name, text, moderator, floor, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }), ...(replyPreview && { replyToPreview: replyPreview }), ...(attachments.length > 0 && { attachments }) })
         }
-        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }) })
+        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }), ...(replyPreview && { replyToPreview: replyPreview }), ...(attachments.length > 0 && { attachments }) })
       }
 
       // Modality: step up when we have the floor or are orchestrating
@@ -1730,6 +1936,7 @@ export class Room {
       // text). Without this flush, those visitors never wake.
       this._flushPendingBackchannels()
       this.busy = false
+      this._turnOrigin = null
       this._pendingRoom = null
       this._backchannelTrigger = false
 
@@ -1774,7 +1981,7 @@ export class Room {
             console.error(`[${this.persona.config.name}] Queued DM processing error:`, err.message)
           })
         } else {
-          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast, _replyTo: next._replyTo, _messageId: next._messageId }).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast, _replyTo: next._replyTo, _messageId: next._messageId, _attachments: next._attachments, _replyPreview: next._replyPreview, _replyReferenced: next._replyReferenced }).catch(err => {
             console.error(`[${this.persona.config.name}] Queue processing error:`, err.message)
           })
         }
@@ -1788,6 +1995,7 @@ export class Room {
     }
 
     this.busy = true
+    this._turnOrigin = 'idle'
     // Park mid-turn internal({thought}) payloads here so the tool can stream
     // them live but defer history + idle_done to this function's post-emit,
     // which writes ONE unified idle_thought per cycle.
@@ -1946,6 +2154,7 @@ export class Room {
       // coupled to a chat broadcast (pure handoff out of an idle thought).
       this._flushPendingBackchannels()
       this.busy = false
+      this._turnOrigin = null
       // Closing the idle turn — reset to null (not undefined) so the
       // internal({thought}) tool detects "not in an idle turn" via
       // Array.isArray() and resumes its standalone emit + record path.
@@ -1990,6 +2199,14 @@ export class Room {
           } else if (completed === true) {
             this._idleInterval = Math.min(this._idleInterval * 8, MAX_IDLE_INTERVAL)
             this._consecutiveDegenerateCount = 0
+            // Two substantive idle cycles without real interaction → sleep:
+            // distill to files, then compact live context. Runs detached; it
+            // no-ops if something made the room busy in the meantime.
+            this._a._idleCyclesSinceSleep = (this._a._idleCyclesSinceSleep || 0) + 1
+            if (this._a._idleCyclesSinceSleep >= 2 && this.harness) {
+              runSleepCycle(this, this.harness).catch(err =>
+                console.log(`[${this.persona.config.name}] sleep cycle error: ${err.message}`))
+            }
           } else {
             // completed === false (error/skipped) — don't change interval
             this._consecutiveDegenerateCount = 0

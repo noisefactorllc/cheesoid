@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import { redactHistoryEntry } from '../lib/chat-session.js'
 
 const router = Router()
 
@@ -75,6 +76,14 @@ router.post('/api/chat/send', async (req, res) => {
     const sendOpts = {}
     if (req.body.addressed) sendOpts._addressed = req.body.addressed
     if (req.body.replyTo) sendOpts._replyTo = req.body.replyTo
+    // Media attachments: shape-validated references to already-uploaded files
+    if (Array.isArray(req.body.attachments)) {
+      const atts = req.body.attachments
+        .filter(a => a && /^[a-f0-9]{8}$/.test(a.id || ''))
+        .slice(0, 8)
+        .map(a => ({ id: a.id, name: String(a.name || 'file').slice(0, 80), mime: String(a.mime || ''), bytes: Number(a.bytes) || 0 }))
+      if (atts.length > 0) sendOpts._attachments = atts
+    }
     room.sendMessage(name, message, sendOpts).catch(err => {
       console.error('sendMessage error:', err.message)
     })
@@ -115,7 +124,8 @@ router.post('/api/chat/event', (req, res) => {
 router.get('/api/chat/scrollback', (req, res) => {
   const room = resolveRoom(req, req.query.room)
   if (!room) return res.status(404).json({ error: 'room not found' })
-  res.json({ messages: room.getScrollback() })
+  const values = room.harness?.secrets?.values?.()
+  res.json({ messages: room.getScrollback().map(m => redactHistoryEntry(m, values)) })
 })
 
 export default router

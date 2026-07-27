@@ -320,6 +320,10 @@ function handleEvent(e) {
   eventCount++
   const event = JSON.parse(e.data)
 
+  // Harness add-on modules (panels, media, voice) observe the event stream
+  // through this hook; they never reach into chat.js internals.
+  try { window.cheesoidHooks?.onEvent?.(event) } catch { }
+
   // In hub mode, route events to correct view
   if (hubMode && event.type !== 'scrollback' && event.type !== 'presence') {
     const eventView = event.to
@@ -373,7 +377,7 @@ function handleEvent(e) {
         }
         if (msg.type === 'user_message') {
           const el = appendMessage('user', msg.text, msg.name, msg.timestamp, false, msg.model, msg.id)
-          if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
+          if (msg.replyTo) renderReplyHeader(el, msg.replyTo, msg.replyToPreview)
         } else if (msg.type === 'assistant_message') {
           // If a paired thought block already exists for this turn (thought is
           // recorded first server-side), fill the existing bubble's chat body
@@ -394,7 +398,7 @@ function handleEvent(e) {
             if (msg.id && !existing.querySelector('.message-toolbar')) {
               existing.appendChild(createToolbar(msg.id))
             }
-            if (msg.replyTo) renderReplyHeader(existing, msg.replyTo)
+            if (msg.replyTo) renderReplyHeader(existing, msg.replyTo, msg.replyToPreview)
           } else if (msg.name) {
             // Visiting agent message with optional tool summary
             const el = appendMessage('assistant', '', msg.name, msg.timestamp, true, msg.model, msg.id)
@@ -410,13 +414,13 @@ function handleEvent(e) {
               content += renderMarkdown(msg.text)
               body.innerHTML = content
             }
-            if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
+            if (msg.replyTo) renderReplyHeader(el, msg.replyTo, msg.replyToPreview)
           } else {
             const el = appendMessage('assistant', '', null, msg.timestamp, false, msg.model, msg.id)
             if (msg.turnId) el.dataset.turnId = msg.turnId
             const body = el.querySelector('.message-body')
             if (body) body.innerHTML = renderMarkdown(msg.text)
-            if (msg.replyTo) renderReplyHeader(el, msg.replyTo)
+            if (msg.replyTo) renderReplyHeader(el, msg.replyTo, msg.replyToPreview)
           }
         } else if (msg.type === 'assistant_thought') {
           // Thought-lane history entry. If it's paired with an assistant_message
@@ -542,6 +546,7 @@ function handleEvent(e) {
         if (assistantEl) {
           const body = assistantEl.querySelector('.message-body')
           if (body) body.innerHTML = renderMarkdown(event.text)
+          if (event.attachments) window.cheesoidMedia?.attachToMessage?.(assistantEl, event.attachments)
           if (event.model) {
             const meta = assistantEl.querySelector('.message-meta')
             if (meta && !meta.querySelector('.message-model')) {
@@ -554,11 +559,13 @@ function handleEvent(e) {
           assistantEl = null
           assistantBuffer = ''
         } else {
-          appendMessage('assistant', event.text, null, null, false, event.model)
+          const asstEl = appendMessage('assistant', event.text, null, null, false, event.model)
+          if (event.attachments) window.cheesoidMedia?.attachToMessage?.(asstEl, event.attachments)
         }
       } else {
         const msgEl = appendMessage('user', event.text, event.name || event.from, null, event.fromAgent, event.model, event.id)
-        if (event.replyTo) renderReplyHeader(msgEl, event.replyTo)
+        if (event.replyTo) renderReplyHeader(msgEl, event.replyTo, event.replyToPreview)
+        if (event.attachments) window.cheesoidMedia?.attachToMessage?.(msgEl, event.attachments)
       }
       // Show thinking indicator for room messages and DMs to the host agent
       // Skip if the floor excludes the host or moderator is another agent
@@ -1248,6 +1255,11 @@ async function send() {
 
   try {
     const body = { message: text, name: myName }
+    // Media attachments staged by media-ui.js (attach button / drop / paste)
+    if (window.cheesoidMedia?.takePending) {
+      const atts = window.cheesoidMedia.takePending()
+      if (atts && atts.length) body.attachments = atts
+    }
     if (replyToId) {
       body.replyTo = replyToId
       replyToId = null
@@ -1448,33 +1460,48 @@ function appendMessage(role, text, name, timestamp, fromAgent = false, model = n
   return el
 }
 
-function renderReplyHeader(el, replyTo) {
+function renderReplyHeader(el, replyTo, preview = null) {
   if (el.querySelector('.reply-header')) return
   const originalEl = document.querySelector(`[data-message-id="${replyTo}"]`)
   const header = document.createElement('div')
   header.className = 'reply-header'
 
+  const nameSpan = document.createElement('span')
+  nameSpan.className = 'reply-header-name'
+  const snippetSpan = document.createElement('span')
+  snippetSpan.className = 'reply-header-snippet'
+  header.appendChild(nameSpan)
+  header.appendChild(document.createTextNode(' '))
+  header.appendChild(snippetSpan)
+
   if (originalEl) {
-    const senderEl = originalEl.querySelector('.sender-name')
-    const bodyEl = originalEl.querySelector('.message-body')
-    const name = senderEl ? senderEl.textContent : 'someone'
-    const snippet = bodyEl ? bodyEl.textContent.slice(0, 100) : ''
-    const nameSpan = document.createElement('span')
-    nameSpan.className = 'reply-header-name'
-    nameSpan.textContent = name
-    const snippetSpan = document.createElement('span')
-    snippetSpan.className = 'reply-header-snippet'
-    snippetSpan.textContent = snippet
-    header.appendChild(nameSpan)
-    header.appendChild(document.createTextNode(' '))
-    header.appendChild(snippetSpan)
     header.dataset.replyTarget = replyTo
     header.classList.add('reply-header-linked')
+  }
+
+  if (preview && preview.text) {
+    // The server resolved the referenced message and sent it with the reply.
+    nameSpan.textContent = preview.name || personaLabel || 'agent'
+    snippetSpan.textContent = preview.text.slice(0, 100)
+  } else if (originalEl) {
+    const senderEl = originalEl.querySelector('.sender-name')
+    const bodyEl = originalEl.querySelector('.message-body')
+    nameSpan.textContent = senderEl ? senderEl.textContent : (personaLabel || 'agent')
+    snippetSpan.textContent = bodyEl ? bodyEl.textContent.slice(0, 100) : ''
   } else {
-    const nameSpan = document.createElement('span')
-    nameSpan.className = 'reply-header-name'
-    nameSpan.textContent = 'replying to a message'
-    header.appendChild(nameSpan)
+    // Entry recorded before reply previews existed — resolve from history.
+    fetch(`/api/chat/message?id=${encodeURIComponent(replyTo)}`)
+      .then(r => r.ok ? r.json() : Promise.reject(new Error(`resolution failed (${r.status})`)))
+      .then(msg => {
+        nameSpan.textContent = msg.name || personaLabel || 'agent'
+        snippetSpan.textContent = (msg.text || '').slice(0, 100)
+      })
+      .catch(err => {
+        // Every displayed id came out of the store; landing here means a
+        // fabricated id upstream. Surface the bug, don't paper over it.
+        console.error(`reply header could not resolve ${replyTo}: ${err.message}`)
+        header.remove()
+      })
   }
 
   // Insert before the message body
@@ -1713,4 +1740,30 @@ function escapeHtml(str) {
   const div = document.createElement('div')
   div.textContent = str
   return div.innerHTML
+}
+
+// ---- Harness add-on integration surface ----
+// media-ui.js, voice-ui.js, and harness-panels.js build on these instead of
+// reaching into this file's internals. chat.js itself never depends on them.
+window.cheesoidChat = {
+  send(text) {
+    if (typeof text === 'string' && text.trim()) {
+      input.value = text
+      send()
+    }
+  },
+  // Arm the composer to reply to a message by id — same state the ↩ toolbar
+  // button sets. Used by search-ui.js to thread directly off a search hit.
+  startReply(msgId, name = 'someone', snippet = '') {
+    if (!msgId) return
+    replyToId = msgId
+    replyToName = name
+    replyBannerText.textContent = `Replying to ${replyToName}: ${snippet.slice(0, 100)}`
+    replyBanner.classList.remove('hidden')
+    input.focus()
+  },
+  get myName() { return myName },
+  get currentView() { return typeof currentView !== 'undefined' ? currentView : null },
+  renderMarkdown,
+  escapeHtml,
 }

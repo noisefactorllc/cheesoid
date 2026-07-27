@@ -2,6 +2,7 @@ import { appendFile, readFile, readdir, mkdir, open } from 'node:fs/promises'
 import { createReadStream } from 'node:fs'
 import { createInterface } from 'node:readline'
 import { join } from 'node:path'
+import { resolveThreadId } from './thread-utils.js'
 
 // Cap how many bytes we read from the END of a history file to satisfy
 // `recent()`. History files are append-only daily logs that can grow without
@@ -85,6 +86,134 @@ export class ChatLog {
     }
 
     return collected.slice(0, limit).reverse()
+  }
+
+  async _files() {
+    await this._ready
+    try {
+      return (await readdir(this.dir)).filter(f => f.endsWith('.jsonl')).sort()
+    } catch {
+      return []
+    }
+  }
+
+  /** Stream one file line-by-line, invoking onEntry per parsed entry. */
+  async _streamFile(file, onEntry) {
+    const rl = createInterface({
+      input: createReadStream(join(this.dir, file), 'utf8'),
+      crlfDelay: Infinity,
+    })
+    try {
+      for await (const line of rl) {
+        if (!line) continue
+        try {
+          onEntry(JSON.parse(line))
+        } catch { /* skip malformed lines */ }
+      }
+    } finally {
+      rl.close()
+    }
+  }
+
+  /**
+   * Find one entry by message id, searching the FULL history (newest file
+   * first). Streaming, constant memory. Returns the entry or null.
+   */
+  async findById(id) {
+    if (!id) return null
+    const files = await this._files()
+    for (let i = files.length - 1; i >= 0; i--) {
+      let found = null
+      await this._streamFile(files[i], (entry) => {
+        if (!found && entry.id === id) found = entry
+      })
+      if (found) return found
+    }
+    return null
+  }
+
+  /**
+   * Reconstruct the full reply thread containing `anchorId` from the ENTIRE
+   * history — not a recency window. Search spans all of history, so thread
+   * recovery must too: a hit search can surface must be a thread this can
+   * reconstruct, or replying to search results dead-ends in "not found".
+   *
+   * Memory-bounded two-pass streaming:
+   *   1. Build a lightweight id → {id, replyTo} index (capped, oldest
+   *      evicted first) and resolve the thread root + member set.
+   *   2. Re-stream, collecting full entries for member ids only.
+   *
+   * Returns { threadId, entries (chronological), truncated } or null when
+   * the id appears nowhere in history.
+   */
+  async threadEntries(anchorId, { maxEntries = 200, maxIndex = 50000 } = {}) {
+    if (!anchorId) return null
+    const files = await this._files()
+    if (!files.length) return null
+
+    const THREADABLE = new Set(['user_message', 'assistant_message', 'idle_thought'])
+
+    // Pass 1: lightweight link index across all history.
+    const index = new Map()
+    for (const file of files) {
+      await this._streamFile(file, (entry) => {
+        if (!entry.id || (entry.type && !THREADABLE.has(entry.type))) return
+        index.set(entry.id, { id: entry.id, replyTo: entry.replyTo })
+        if (index.size > maxIndex) {
+          index.delete(index.keys().next().value) // evict oldest
+        }
+      })
+    }
+
+    let anchor = index.get(anchorId)
+    if (!anchor) {
+      // The anchor exists (system-surfaced ids always do) but fell out of
+      // the bounded link index on a very large history. Degrade to a
+      // single-entry thread rather than falsely reporting the id unknown.
+      const entry = await this.findById(anchorId)
+      if (!entry) return null
+      return {
+        threadId: entry.threadId || entry.replyTo || entry.id,
+        entries: [entry],
+        truncated: false,
+      }
+    }
+
+    const threadId = resolveThreadId(anchor, index)
+    const memo = new Map()
+    const rootOf = (entry) => {
+      if (memo.has(entry.id)) return memo.get(entry.id)
+      const root = resolveThreadId(entry, index)
+      memo.set(entry.id, root)
+      return root
+    }
+    const members = new Set()
+    for (const entry of index.values()) {
+      if (rootOf(entry) === threadId) members.add(entry.id)
+    }
+
+    // Pass 2: collect member entries in order with a rolling window — never
+    // more than maxEntries (+ the pinned root) in memory at once. The root
+    // is kept even when truncating so the thread's origin is always present.
+    let rootEntry = null
+    const window = []
+    let dropped = 0
+    for (const file of files) {
+      await this._streamFile(file, (entry) => {
+        if (!entry.id || !members.has(entry.id)) return
+        if (entry.id === threadId && !rootEntry) {
+          rootEntry = entry
+          return
+        }
+        window.push(entry)
+        if (window.length > maxEntries) {
+          window.shift()
+          dropped++
+        }
+      })
+    }
+    const entries = rootEntry ? [rootEntry, ...window] : window
+    return { threadId, entries, truncated: dropped > 0 }
   }
 
   async search(query, { limit = 50 } = {}) {

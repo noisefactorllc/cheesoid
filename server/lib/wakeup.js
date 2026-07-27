@@ -38,18 +38,24 @@ export class WakeupScheduler {
     const config = this._config
     if (!config || config.mode !== 'cron' || !config.schedule) return
 
-    // Pre-load the prompt to fail fast if it's missing
-    const promptPath = config.prompt
-    if (!promptPath) {
-      console.error(`[${this._label}] Wakeup configured but no prompt path`)
-      return
-    }
+    // Inline prompt text (runtime schedules, sleep cycle) skips the file
+    // path entirely; a file path is pre-loaded to fail fast if missing.
+    if (config.promptText != null) {
+      this._promptText = String(config.promptText)
+    } else {
+      const promptPath = config.prompt
+      if (!promptPath) {
+        console.error(`[${this._label}] Wakeup configured but no prompt path`)
+        return
+      }
 
-    try {
-      await readFile(join(this._persona.dir, promptPath), 'utf8')
-    } catch (err) {
-      console.error(`[${this._label}] Wakeup prompt not found: ${promptPath}`)
-      return
+      try {
+        await readFile(join(this._persona.dir, promptPath), 'utf8')
+      } catch (err) {
+        console.error(`[${this._label}] Wakeup prompt not found: ${promptPath}`)
+        return
+      }
+      this._promptPath = join(this._persona.dir, promptPath)
     }
 
     this._schedule = parseCron(config.schedule)
@@ -58,7 +64,6 @@ export class WakeupScheduler {
       return
     }
 
-    this._promptPath = join(this._persona.dir, promptPath)
     this._scheduleNext()
     console.log(`[${this._label}] Wakeup scheduled: ${config.schedule}`)
   }
@@ -95,7 +100,9 @@ export class WakeupScheduler {
       }
 
       try {
-        const prompt = await readFile(this._promptPath, 'utf8')
+        const prompt = this._promptText != null
+          ? this._promptText
+          : await readFile(this._promptPath, 'utf8')
         await this._onWakeup(prompt)
       } catch (err) {
         console.error(`[${this._label}] Wakeup error:`, err.message)

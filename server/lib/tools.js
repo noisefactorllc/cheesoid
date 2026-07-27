@@ -3,7 +3,17 @@ import { join } from 'node:path'
 import { randomUUID } from 'node:crypto'
 import { buildSharedWorkspaceTools } from './shared-workspace.js'
 import { buildWebSearchTools } from './web-search.js'
+import { buildHarnessTools } from './tools-harness.js'
 import { MEMORY_COMPACT_WARN_BYTES, MEMORY_READ_CAP_BYTES } from './memory.js'
+
+// The read-mostly subset a subagent gets: enough to research and report,
+// nothing that mutates the parent agent's world or spawns further workers.
+const SUBAGENT_TOOLS = new Set([
+  'read_memory', 'list_memory', 'search_memory',
+  'wiki_read', 'wiki_list', 'wiki_search',
+  'read_shared', 'list_shared',
+  'web_search', 'fetch_url',
+])
 
 /**
  * Build the full tool set for a persona: memory tools + persona-specific tools.
@@ -14,6 +24,10 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   const sharedTools = buildSharedWorkspaceTools(process.env.SHARED_WORKSPACE_PATH || '/shared')
   const roomTools = buildRoomTools(room, config)
   const webSearchTools = buildWebSearchTools(config, deps)
+  const harness = deps.harness || null
+  const harnessTools = harness
+    ? buildHarnessTools(harness, room, config, memory)
+    : { definitions: [], handles: () => false, execute: async () => ({ output: 'harness not available', is_error: true }) }
   let personaTools = { definitions: [], execute: async () => ({ error: 'unknown tool' }) }
 
   if (config.tools) {
@@ -29,7 +43,7 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   // Modality tools (attention/cognition gear shifting)
   const modalityTools = buildModalityTools(modality)
 
-  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...webSearchTools.definitions, ...personaTools.definitions]
+  const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...webSearchTools.definitions, ...harnessTools.definitions, ...personaTools.definitions]
 
   async function execute(name, input, options) {
     if (memoryTools.handles(name)) {
@@ -44,17 +58,36 @@ export async function loadTools(personaDir, config, memory, state, room, registr
     if (webSearchTools.handles(name)) {
       return webSearchTools.execute(name, input, options)
     }
+    if (harnessTools.handles(name)) {
+      return harnessTools.execute(name, input, options)
+    }
     if (modalityTools.handles(name)) {
       return modalityTools.execute(name, input, options)
     }
     return personaTools.execute(name, input, options)
   }
 
-  return {
+  const toolset = {
     // Dynamic: modality tools change based on current mode
     get definitions() { return [...staticDefinitions, ...modalityTools.definitions] },
     execute,
   }
+
+  // Register the subagent tool subset on the harness: same executors, filtered
+  // surface, and no spawn_subagent (the depth guard is structural).
+  if (harness) {
+    harness._subagentTools = () => ({
+      definitions: staticDefinitions.filter(d => SUBAGENT_TOOLS.has(d.name)),
+      execute: async (name, input, options) => {
+        if (!SUBAGENT_TOOLS.has(name)) {
+          return { output: `Tool ${name} is not available to subagents.`, is_error: true }
+        }
+        return execute(name, input, options)
+      },
+    })
+  }
+
+  return toolset
 }
 
 function buildRoomTools(room, config) {
@@ -131,12 +164,12 @@ function buildRoomTools(room, config) {
   // Short message ID generator — 8 hex chars, reliable for LLMs to echo.
   const shortMsgId = () => randomUUID().replace(/-/g, '').slice(0, 8)
 
-  // Validate that a messageId was actually seen in the agent's context.
-  // We scan room.messages (which both hosts and visitors push to with
-  // [id] tags) rather than room.history (which visitors don't populate
-  // for host-room messages). Returns true if the ID was seen, false if
-  // it looks like a hallucination.
-  function isKnownMessageId(messageId) {
+  // Validate that a messageId is real. Context scan first (cheap, covers
+  // what the agent just saw), then in-memory history, then the full JSONL
+  // store — an id learned from read_thread or a reply quote is as valid as
+  // one on screen. Only ids that resolve NOWHERE are rejected: those are
+  // fabricated, and the store is the authority on that.
+  async function isKnownMessageId(messageId) {
     if (!messageId) return false
     const pattern = `[${messageId}]`
     if (!room.messages) return true // fallback: accept if no context available
@@ -148,6 +181,12 @@ function buildRoomTools(room, config) {
           if (block?.type === 'text' && typeof block.text === 'string' && block.text.includes(pattern)) return true
         }
       }
+    }
+    if ((room.history || []).some(h => h.id === messageId)) return true
+    if (room.chatLog?.findById) {
+      try {
+        if (await room.chatLog.findById(messageId)) return true
+      } catch { }
     }
     return false
   }
@@ -317,10 +356,10 @@ function buildRoomTools(room, config) {
         if (!input.messageId || !input.text) {
           return { output: 'Both messageId and text are required.', is_error: true }
         }
-        if (!isKnownMessageId(input.messageId)) {
+        if (!(await isKnownMessageId(input.messageId))) {
           const recent = recentMessageIds()
           const hint = recent.length > 0 ? ` Recent valid message IDs: ${recent.join(', ')}.` : ''
-          return { output: `messageId "${input.messageId}" not found in recent context. Message IDs appear as [id] next to sender names.${hint}`, is_error: true }
+          return { output: `The id "${input.messageId}" did not come from this conversation — copy ids exactly as they appear in [brackets] next to sender names; do not invent them.${hint}`, is_error: true }
         }
         // Visitor path: relay to host so the reply lands in the actual room
         const pendingRoom = room._pendingRoom
@@ -334,6 +373,15 @@ function buildRoomTools(room, config) {
         }
         const replyId = shortMsgId()
         const event = { type: 'assistant_message', text: input.text, id: replyId, replyTo: input.messageId }
+        // Quote the referenced message on the event so the UI shows it.
+        const ref = (room.history || []).find(h => h.id === input.messageId)
+        if (ref) {
+          event.replyToPreview = {
+            name: ref.name || room.persona.config.display_name,
+            text: String(ref.text || '').slice(0, 200),
+            timestamp: ref.timestamp || null,
+          }
+        }
         room.broadcast(event)
         room.recordHistory({ ...event, room: room.roomName })
         return { output: `Reply sent (referencing message ${input.messageId}).` }
@@ -345,11 +393,11 @@ function buildRoomTools(room, config) {
           console.log(`[${agentName}] react_to_message rejected: missing required input`)
           return { output: 'Both messageId and emoji are required.', is_error: true }
         }
-        if (!isKnownMessageId(input.messageId)) {
+        if (!(await isKnownMessageId(input.messageId))) {
           const recent = recentMessageIds()
           const hint = recent.length > 0 ? ` Recent valid message IDs: ${recent.join(', ')}.` : ''
           console.log(`[${agentName}] react_to_message rejected: unknown messageId. Recent valid: ${recent.join(', ')}`)
-          return { output: `messageId "${input.messageId}" not found in recent context. Message IDs appear as [id] next to sender names.${hint}`, is_error: true }
+          return { output: `The id "${input.messageId}" did not come from this conversation — copy ids exactly as they appear in [brackets] next to sender names; do not invent them.${hint}`, is_error: true }
         }
         // Tool success output deliberately excludes the emoji character —
         // open-weights models pattern-match on recent context and will echo

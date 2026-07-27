@@ -3,6 +3,7 @@ import { join } from 'node:path'
 import { load as loadYaml } from 'js-yaml'
 import { loadPlugins } from './plugins.js'
 import { resolveModel } from './providers/resolve.js'
+import { applyModelPolicy } from './model-policy.js'
 
 // persona.yaml keys accepted here for operator readability but not read by any
 // code path in server/ (grep-verified) — false-confidence guardrails that look
@@ -41,9 +42,13 @@ const TIER_LABELS = [
 function providerHonorsThinkingBudget(providerName, config) {
   if (providerName === 'anthropic') return true
   const providerConfig = config.providers?.[providerName]
-  if (!providerConfig) return false
+  if (!providerConfig) {
+    // The auto-registered openrouter provider forwards reasoning budgets.
+    return providerName === 'openrouter' && Boolean(process.env.OPENROUTER_API_KEY)
+  }
   const type = providerConfig.type || 'openai-compat'
   if (type === 'anthropic' || type === 'gemini') return true
+  if (type === 'openrouter') return providerConfig.supports_reasoning_budget !== false
   if (type === 'openai-compat') return providerConfig.supports_reasoning_budget === true
   return false
 }
@@ -130,6 +135,7 @@ export async function loadPersona(personaDir) {
   const config = loadYaml(raw)
   resolveEnvVars(config)
   normalizeTierLists(config)
+  applyModelPolicy(config)
   warnDecorativeKeys(config)
   validateProviders(config)
 
@@ -174,6 +180,9 @@ function validateProviders(config) {
       if (!providerConfig.api_key) {
         throw new Error(`[${name}] provider "${providerName}" requires api_key`)
       }
+    }
+    if (type === 'openrouter' && !providerConfig.api_key && !process.env.OPENROUTER_API_KEY) {
+      throw new Error(`[${name}] provider "${providerName}" (openrouter) needs api_key or OPENROUTER_API_KEY in the environment`)
     }
     console.log(`[${name}] Registered provider: ${providerName} (${type})`)
   }
@@ -270,6 +279,9 @@ function normalizeTierLists(config) {
   config.cognition = normalize(config.cognition, config.cognition_fallback_models)
   config.attention = normalize(config.attention)
   config.reasoner = normalize(config.reasoner, config.reasoner_fallback_models)
+  config.reflection = normalize(config.reflection)
+  config.transcription = normalize(config.transcription)
+  config.subagent = normalize(config.subagent)
 
   // Remove legacy fallback fields
   delete config.fallback_models

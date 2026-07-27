@@ -25,6 +25,14 @@ export class ProviderRegistry {
       }
     }
 
+    // Auto-register an `openrouter` provider when the key is in the
+    // environment and the persona didn't define its own. This is what lets a
+    // zero-config persona run on the model-policy defaults with nothing but
+    // OPENROUTER_API_KEY set.
+    if (!this._configs.has('openrouter') && process.env.OPENROUTER_API_KEY) {
+      this._configs.set('openrouter', { type: 'openrouter' })
+    }
+
     // Register legacy top-level provider as default
     if (personaConfig.provider && personaConfig.provider !== 'anthropic') {
       const legacyConfig = {
@@ -73,6 +81,20 @@ export class ProviderRegistry {
       const type = config.type || 'openai-compat'
       if (type === 'anthropic') {
         provider = createAnthropicProvider(config)
+      } else if (type === 'openrouter') {
+        // openai-compat preconfigured for OpenRouter: the base_url is fixed,
+        // the key falls back to the environment, and capabilities OpenRouter
+        // actually supports — reasoning.max_tokens, the web plugin — default
+        // on instead of silently dropping (the trap that ate thinking_budget
+        // for every openai-compat OpenRouter deployment).
+        provider = createOpenAICompatProvider({
+          supports_reasoning_budget: true,
+          web_search: true,
+          ...config,
+          type: 'openai-compat',
+          base_url: 'https://openrouter.ai/api/v1',
+          api_key: config.api_key || process.env.OPENROUTER_API_KEY,
+        })
       } else if (type === 'openai-compat') {
         provider = createOpenAICompatProvider(config)
       } else if (type === 'openai-responses') {

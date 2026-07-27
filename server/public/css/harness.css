@@ -1,0 +1,431 @@
+/* harness.css — collapsible harness sidebar panels + peer approval banner.
+ * Companion stylesheet for harness-panels.js. Loaded after style.css, so
+ * rules here may reuse/override existing selectors (e.g. #sidebar) the same
+ * way any later stylesheet in a cascade legitimately would.
+ * Uses only --hf-* tokens already present on the page (handfish tokens.css)
+ * plus classes already defined in style.css (.sidebar-section-label,
+ * .hidden, .hf-scrollbar, hf-btn family) so the new panels match the
+ * existing look without redefining it.
+ */
+
+/* The sidebar is a fixed-height flex column with overflow:hidden (style.css).
+ * That is fine for the original two sections, whose only flexible child
+ * (#participants) scrolls internally. Adding five more (collapsible, some
+ * with forms) can legitimately exceed the sidebar's height once several are
+ * expanded at once. Switching to overflow-y:auto here means the sidebar
+ * itself becomes the scroll container of last resort — content can never be
+ * silently clipped — while overflow-x stays hidden so nothing widens the
+ * rail. Each panel's own list additionally scrolls internally (below), so
+ * this outer scroll is a safety net, not the primary interaction.
+ */
+#sidebar {
+  overflow-y: auto;
+  overflow-x: hidden;
+}
+
+.harness-section {
+  border-top: 1px solid var(--hf-border);
+  flex-shrink: 0;
+}
+
+.harness-section-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hf-space-2);
+  width: 100%;
+  background: none;
+  border: none;
+  margin: 0;
+  cursor: pointer;
+  text-align: left;
+  /* Match the native sidebar labels ("Rooms"/"Present") exactly. A bare
+     `font: inherit` here let the button render at body size — the shorthand
+     reset clobbered .hf-label's small-caps label styling. */
+  font-family: inherit;
+  font-size: var(--hf-size-xs);
+  font-weight: var(--hf-weight-semibold);
+  text-transform: var(--hf-text-transform-heading);
+  letter-spacing: var(--hf-tracking-wide);
+  color: var(--hf-text-dim);
+}
+
+.harness-section-header:hover .harness-section-title {
+  color: var(--hf-text-normal);
+}
+
+.harness-section-header:focus {
+  outline: var(--hf-focus-ring-width, 1px) solid var(--hf-focus-ring-color, var(--hf-accent));
+  outline-offset: -2px;
+}
+
+.harness-section-title {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-section-caret {
+  flex-shrink: 0;
+  color: var(--hf-text-muted);
+  font-size: var(--hf-size-xs);
+}
+
+.harness-section-body {
+  padding: 0 var(--hf-space-2) var(--hf-space-3);
+}
+
+/* Lists */
+.harness-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.harness-list-item {
+  display: flex;
+  align-items: center;
+  gap: var(--hf-space-2);
+  padding: var(--hf-space-1) var(--hf-space-2);
+  border-radius: var(--hf-radius-sm);
+  font-size: var(--hf-size-sm);
+  color: var(--hf-text-normal);
+}
+
+.harness-list-item:hover {
+  background: color-mix(in srgb, var(--hf-color-2) 50%, transparent 50%);
+}
+
+li.harness-list-item[tabindex] {
+  cursor: pointer;
+}
+
+li.harness-list-item[tabindex]:focus {
+  outline: var(--hf-focus-ring-width, 1px) solid var(--hf-focus-ring-color, var(--hf-accent));
+  outline-offset: -2px;
+}
+
+.harness-empty {
+  padding: var(--hf-space-1) var(--hf-space-2);
+  font-size: var(--hf-size-xs);
+  font-style: italic;
+  color: var(--hf-text-muted);
+  list-style: none;
+}
+
+.harness-item-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
+.harness-item-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-item-sub {
+  font-size: var(--hf-size-xs);
+  color: var(--hf-text-muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-mono {
+  font-family: var(--hf-font-family-mono);
+}
+
+.harness-item-actions {
+  flex-shrink: 0;
+  display: flex;
+  align-items: center;
+  gap: 2px;
+}
+
+/* Status dot (Tasks) */
+.harness-status-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: var(--hf-radius-full);
+  background: var(--hf-text-dim);
+}
+
+.harness-status-dot.is-running {
+  background: var(--hf-accent, #4a9eff);
+  animation: harness-pulse 1.4s ease-in-out infinite;
+}
+
+.harness-status-dot.is-done {
+  background: var(--hf-green, #3fb950);
+}
+
+.harness-status-dot.is-failed {
+  background: var(--hf-red, #d04242);
+}
+
+.harness-status-dot.is-stopped {
+  background: var(--hf-text-dim, #888);
+}
+
+@keyframes harness-pulse {
+  0%, 80%, 100% { opacity: 0.35; transform: scale(0.85); }
+  40% { opacity: 1; transform: scale(1); }
+}
+
+/* Compact icon-only buttons (stop / delete / revoke / close) */
+.harness-icon-btn {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  padding: 2px 6px;
+  border-radius: var(--hf-radius-sm);
+  font-size: var(--hf-size-sm);
+  line-height: 1;
+  color: var(--hf-text-muted);
+}
+
+.harness-icon-btn:hover {
+  color: var(--hf-red, #d04242);
+  background: color-mix(in srgb, var(--hf-red, #d04242) 12%, transparent 88%);
+}
+
+.harness-icon-btn:disabled {
+  opacity: 0.5;
+  cursor: default;
+  color: var(--hf-text-muted);
+  background: none;
+}
+
+/* Compact sizing modifier for real hf-btn actions inside sidebar rows/forms */
+.harness-btn-xs {
+  min-height: 0;
+  padding: 3px var(--hf-space-2);
+  font-size: var(--hf-size-xs);
+}
+
+/* Peers */
+.harness-peer-pending-row {
+  background: color-mix(in srgb, var(--hf-yellow, #d4a72c) 12%, transparent 88%);
+  border-left: 2px solid var(--hf-yellow, #d4a72c);
+}
+
+.harness-peer-join {
+  margin-top: var(--hf-space-2);
+  padding-top: var(--hf-space-2);
+  border-top: 1px solid var(--hf-border);
+}
+
+.harness-join-toggle {
+  display: block;
+  width: 100%;
+  background: none;
+  border: none;
+  margin: 0;
+  padding: var(--hf-space-1) 0;
+  text-align: left;
+  font-size: var(--hf-size-xs);
+  color: var(--hf-link-color, var(--hf-accent));
+  cursor: pointer;
+}
+
+.harness-join-toggle:hover {
+  color: var(--hf-link-hover, var(--hf-accent-hover));
+  text-decoration: underline;
+}
+
+/* Inline forms (join-remote, add-secret) */
+.harness-inline-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--hf-space-1);
+  margin-top: var(--hf-space-1);
+}
+
+.harness-input {
+  width: 100%;
+  box-sizing: border-box;
+}
+
+.harness-form-status {
+  display: block;
+  min-height: 1em;
+  font-size: var(--hf-size-xs);
+  color: var(--hf-text-muted);
+}
+
+/* Secrets section's own inline form sits directly in the section body,
+   not inside .harness-peer-join, so it needs its own top border/spacing. */
+.harness-secret-form {
+  margin-top: var(--hf-space-2);
+  padding-top: var(--hf-space-2);
+  border-top: 1px solid var(--hf-border);
+}
+
+/* Approval banner — fixed at the top of the viewport so it is visible
+   regardless of sidebar collapse state or mobile layout. */
+.harness-peer-banner {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  z-index: var(--hf-z-fixed, 300);
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: center;
+  gap: var(--hf-space-3);
+  padding: var(--hf-space-2) var(--hf-space-4);
+  background: color-mix(in srgb, var(--hf-yellow, #d4a72c) 20%, var(--hf-bg-elevated));
+  border-bottom: 1px solid var(--hf-yellow, #d4a72c);
+  color: var(--hf-text-bright);
+  font-size: var(--hf-size-sm);
+  box-shadow: var(--hf-shadow-md, 0 4px 8px rgba(0, 0, 0, 0.2));
+}
+
+.harness-peer-banner-text strong {
+  color: var(--hf-text-bright);
+}
+
+.harness-peer-banner-actions {
+  display: flex;
+  gap: var(--hf-space-2);
+  flex-shrink: 0;
+}
+
+/* Wiki overlay */
+.harness-overlay {
+  position: fixed;
+  inset: 0;
+  z-index: var(--hf-z-modal, 500);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--hf-space-6);
+}
+
+.harness-overlay-scrim {
+  position: absolute;
+  inset: 0;
+  background: var(--hf-backdrop, rgba(0, 0, 0, 0.6));
+}
+
+.harness-overlay-panel {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  width: min(720px, 100%);
+  max-height: 100%;
+  background: color-mix(in srgb, var(--hf-bg-surface) 96%, transparent 4%);
+  border-radius: var(--hf-radius-lg);
+  box-shadow: var(--hf-shadow-xl, 0 16px 32px rgba(0, 0, 0, 0.3));
+  overflow: hidden;
+}
+
+.harness-overlay-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--hf-space-3);
+  padding: var(--hf-space-3) var(--hf-space-4);
+  border-bottom: 1px solid var(--hf-border);
+  flex-shrink: 0;
+}
+
+.harness-overlay-title {
+  font-size: var(--hf-size-md);
+  font-weight: var(--hf-weight-semibold);
+  color: var(--hf-text-bright);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.harness-overlay-close {
+  flex-shrink: 0;
+  background: none;
+  border: none;
+  cursor: pointer;
+  color: var(--hf-text-muted);
+  font-size: var(--hf-size-lg);
+  line-height: 1;
+  padding: var(--hf-space-1) var(--hf-space-2);
+  border-radius: var(--hf-radius-sm);
+}
+
+.harness-overlay-close:hover {
+  color: var(--hf-text-normal);
+  background: color-mix(in srgb, var(--hf-color-2) 50%, transparent 50%);
+}
+
+.harness-overlay-body {
+  padding: var(--hf-space-4);
+  overflow-y: auto;
+  color: var(--hf-text-normal);
+  font-size: var(--hf-size-base);
+  line-height: var(--hf-leading-normal);
+}
+
+/* Baseline typography for marked-rendered wiki markdown — mirrors
+   .message-body's pre/code treatment in style.css so rendered pages match
+   the rest of the app rather than falling back to browser defaults. */
+.harness-overlay-body h1,
+.harness-overlay-body h2,
+.harness-overlay-body h3 {
+  color: var(--hf-text-bright);
+  margin: var(--hf-space-4) 0 var(--hf-space-2);
+}
+
+.harness-overlay-body h1:first-child,
+.harness-overlay-body h2:first-child,
+.harness-overlay-body h3:first-child {
+  margin-top: 0;
+}
+
+.harness-overlay-body p,
+.harness-overlay-body ul,
+.harness-overlay-body ol {
+  margin: var(--hf-space-2) 0;
+}
+
+.harness-overlay-body pre {
+  background: var(--hf-bg-base);
+  padding: var(--hf-space-3);
+  border-radius: var(--hf-radius-sm);
+  border: 1px solid var(--hf-border);
+  overflow-x: auto;
+  margin: var(--hf-space-2) 0;
+}
+
+.harness-overlay-body code {
+  font-family: var(--hf-font-family-mono);
+  font-size: var(--hf-size-sm);
+}
+
+.harness-overlay-body a {
+  color: var(--hf-link-color, var(--hf-accent));
+}
+
+@media (max-width: 480px) {
+  .harness-overlay {
+    padding: var(--hf-space-2);
+  }
+}
+
+/* [[wiki]] and [[memory:*.md]] drill-down links inside the overlay */
+.harness-wiki-link {
+  color: var(--hf-accent, #4a9eff);
+  text-decoration: none;
+  border-bottom: 1px dotted var(--hf-accent, #4a9eff);
+}
+.harness-wiki-link:hover {
+  border-bottom-style: solid;
+}

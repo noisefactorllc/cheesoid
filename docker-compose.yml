@@ -6,6 +6,7 @@ services:
     environment:
       - PERSONA=${PERSONA:-example}
       - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - PORT=3000
     volumes:
       - ./personas:/app/personas

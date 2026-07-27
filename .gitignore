@@ -5,6 +5,8 @@ node_modules/
 .DS_Store
 personas/*/memory/
 personas/*/history/
+personas/*/runtime/
+personas/*/wiki/
 docs/superpowers/
 docs/plans/
 test-results
