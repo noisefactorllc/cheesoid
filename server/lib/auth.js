@@ -9,8 +9,30 @@
  * requireAuth — simple backward-compatible middleware (groundsquirrel only)
  */
 
-export function createAuthMiddleware(agents, peerStore = null) {
+const ANONYMOUS_PRINCIPAL = Object.freeze({
+  kind: 'anonymous',
+  name: null,
+  email: null,
+  source: 'none',
+})
+
+function isLoopbackRequest(req) {
+  const address = req.socket?.remoteAddress || req.connection?.remoteAddress || ''
+  return address === '127.0.0.1'
+    || address === '::1'
+    || address === '::ffff:127.0.0.1'
+}
+
+function setPrincipal(req, principal) {
+  req.principal = principal
+  req.isAgent = principal.kind === 'agent'
+  req.userName = principal.name
+  if (principal.email) req.userEmail = principal.email
+}
+
+export function createAuthMiddleware(agents, peerStore = null, options = {}) {
   const secretMap = new Map()
+  const trustProxyHeaders = options.trustProxyHeaders === true
   if (agents && agents.length > 0) {
     for (const { name, secret } of agents) {
       secretMap.set(secret, name)
@@ -27,8 +49,12 @@ export function createAuthMiddleware(agents, peerStore = null) {
       if (secretMap.size > 0 || peerStore) {
         const agentName = secretMap.get(token)
         if (agentName) {
-          req.userName = agentName
-          req.isAgent = true
+          setPrincipal(req, {
+            kind: 'agent',
+            name: agentName,
+            email: null,
+            source: 'configured-bearer',
+          })
           return next()
         }
         // Runtime ad-hoc peers: approved secrets authenticate exactly like
@@ -37,8 +63,12 @@ export function createAuthMiddleware(agents, peerStore = null) {
           try {
             const peerName = await peerStore.authenticate(token)
             if (peerName) {
-              req.userName = peerName
-              req.isAgent = true
+              setPrincipal(req, {
+                kind: 'agent',
+                name: peerName,
+                email: null,
+                source: 'runtime-peer-bearer',
+              })
               return next()
             }
           } catch (err) {
@@ -53,32 +83,56 @@ export function createAuthMiddleware(agents, peerStore = null) {
         if (secretMap.size > 0) {
           return res.status(401).json({ error: 'Invalid bearer token' })
         }
-        req.isAgent = false
+        setPrincipal(req, ANONYMOUS_PRINCIPAL)
         return next()
       }
 
       // No agents configured — pass through
-      req.isAgent = false
+      setPrincipal(req, ANONYMOUS_PRINCIPAL)
       return next()
     }
 
     // Fall back to groundsquirrel header
-    const email = req.headers['x-gs-user-email']
+    const email = trustProxyHeaders ? req.headers['x-gs-user-email'] : null
     if (email) {
-      req.userName = email.split('@')[0]
-      req.userEmail = email
+      setPrincipal(req, {
+        kind: 'human',
+        name: email.split('@')[0],
+        email,
+        source: 'groundsquirrel',
+      })
+      return next()
     }
-    req.isAgent = false
+
+    const allowAnonymousOperator = options.allowAnonymousOperator
+      ?? process.env.CHEESOID_ALLOW_ANONYMOUS_OPERATOR === '1'
+    if (allowAnonymousOperator && !trustProxyHeaders && isLoopbackRequest(req)) {
+      setPrincipal(req, {
+        kind: 'human',
+        name: 'local-operator',
+        email: null,
+        source: 'development-bypass',
+      })
+      return next()
+    }
+
+    setPrincipal(req, ANONYMOUS_PRINCIPAL)
     next()
   }
 }
 
 export function requireAuth(req, res, next) {
-  const email = req.headers['x-gs-user-email']
+  const trustProxyHeaders = req.app?.locals?.persona?.config?.auth_proxy === true
+  const email = trustProxyHeaders ? req.headers['x-gs-user-email'] : null
   if (email) {
-    req.userName = email.split('@')[0]
-    req.userEmail = email
+    setPrincipal(req, {
+      kind: 'human',
+      name: email.split('@')[0],
+      email,
+      source: 'groundsquirrel',
+    })
+  } else {
+    setPrincipal(req, ANONYMOUS_PRINCIPAL)
   }
-  req.isAgent = false
   next()
 }

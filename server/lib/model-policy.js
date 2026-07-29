@@ -93,6 +93,7 @@ export function applyModelPolicy(config, opts = {}) {
   const policy = (typeof config.model_policy === 'object' && config.model_policy !== null)
     ? config.model_policy
     : {}
+  const explicitDefaults = config.model_policy === 'default'
   const filled = []
 
   // Whether the persona configured any loop model itself — measured before
@@ -128,20 +129,28 @@ export function applyModelPolicy(config, opts = {}) {
     }
   }
 
-  for (const tier of EXTENDED_TIERS) {
-    if (!config[tier]) {
-      config[tier] = [...TIER_DEFAULTS[tier]]
-      filled.push(tier)
+  if (coreAbsent || explicitDefaults) {
+    for (const tier of EXTENDED_TIERS) {
+      if (!config[tier]) {
+        config[tier] = [...TIER_DEFAULTS[tier]]
+        filled.push(tier)
+      }
     }
   }
 
   applyOverrides()
 
   if (filled.length) {
-    config._modelPolicy = { filled, source: 'eval-2026-07-27' }
+    config._modelPolicy = { filled, source: 'eval-2026-07-27', defaultsEnabled: true }
     console.log(`[${config.name || 'unknown'}] Model policy filled tiers: ${filled.join(', ')}`)
   }
   return filled
+}
+
+export function shouldEnableSleep(config) {
+  if (config.sleep === false) return false
+  if (Object.prototype.hasOwnProperty.call(config, 'sleep')) return true
+  return config._modelPolicy?.defaultsEnabled === true
 }
 
 /**

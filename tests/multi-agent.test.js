@@ -111,6 +111,25 @@ describe('Multi-agent room', () => {
     assert.equal(body.status, 'relayed')
   })
 
+  it('POST /api/chat/event binds persisted event identity to the authenticated agent', async () => {
+    const host = servers[0]
+    const res = await fetch('http://localhost:4001/api/chat/event', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': 'Bearer test-secret',
+      },
+      body: JSON.stringify({
+        name: 'Forged Agent',
+        event: { type: 'idle_thought', name: 'Forged Agent', text: 'bounded thought' },
+      }),
+    })
+    assert.equal(res.status, 200)
+    const last = host.room.history.at(-1)
+    assert.equal(last.type, 'idle_thought')
+    assert.equal(last.name, 'Guest')
+  })
+
   it('POST /api/chat/event rejects invalid token', async () => {
     const res = await fetch('http://localhost:4001/api/chat/event', {
       method: 'POST',

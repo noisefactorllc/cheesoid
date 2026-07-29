@@ -1,6 +1,10 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { createPeerStore, PENDING_TTL_MS } from '../server/lib/peering.js'
+import {
+  createPeerStore,
+  isLegacyPeerLifecycleEntry,
+  PENDING_TTL_MS,
+} from '../server/lib/peering.js'
 import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
@@ -12,6 +16,21 @@ describe('peering store', () => {
 
   const SECRET_A = 'a-very-long-secret-1234'
   const SECRET_B = 'another-long-secret-5678'
+
+  it('identifies legacy peer lifecycle records that must stay out of model context', () => {
+    assert.equal(isLegacyPeerLifecycleEntry({
+      type: 'system',
+      text: 'Peer join request from "margo-test" (http://margo:3003) — awaiting approval by a room owner.',
+    }), true)
+    assert.equal(isLegacyPeerLifecycleEntry({
+      type: 'system',
+      text: 'Peer "margo-test" approved by alex.',
+    }), true)
+    assert.equal(isLegacyPeerLifecycleEntry({
+      type: 'system',
+      text: 'ordinary operator note',
+    }), false)
+  })
 
   it('requestJoin creates a pending peer and returns a public record', async () => {
     const dir = await makeRuntimeDir()
@@ -40,6 +59,17 @@ describe('peering store', () => {
     assert.ok(!serialized.includes(SECRET_A))
     assert.ok(!serialized.toLowerCase().includes('hash'))
     assert.ok(!serialized.toLowerCase().includes('salt'))
+  })
+
+  it('persists new peer secrets with a memory-hard KDF marker', async () => {
+    const dir = await makeRuntimeDir()
+    const store = createPeerStore(dir)
+    await store.requestJoin({ name: 'ScryptPeer', secret: SECRET_A })
+    const [stored] = JSON.parse(await readFile(join(dir, 'peers.json'), 'utf8'))
+    assert.equal(stored.kdf, 'scrypt')
+    assert.match(stored.tokenLookup, /^[a-f0-9]{64}$/)
+    assert.ok(stored.salt.length >= 32)
+    assert.ok(stored.hash.length >= 64)
   })
 
   it('authenticate fails while pending', async () => {
@@ -127,6 +157,31 @@ describe('peering store', () => {
     const dir = await makeRuntimeDir()
     const store = createPeerStore(dir)
     await assert.rejects(() => store.requestJoin({ name: 'Leo', secret: 'short' }), /secret too short \(min 16 chars\)/)
+  })
+
+  it('bounds unauthenticated peer credentials and validates advertised URLs', async () => {
+    const dir = await makeRuntimeDir()
+    const store = createPeerStore(dir)
+    await assert.rejects(
+      () => store.requestJoin({ name: 'Huge', secret: 'x'.repeat(1025) }),
+      /secret too long/,
+    )
+    await assert.rejects(
+      () => store.requestJoin({
+        name: 'Script',
+        secret: SECRET_A,
+        url: 'javascript:alert(1)',
+      }),
+      /invalid peer url/,
+    )
+    await assert.rejects(
+      () => store.requestJoin({
+        name: 'Credentials',
+        secret: SECRET_A,
+        url: 'https://user:password@example.com/',
+      }),
+      /invalid peer url/,
+    )
   })
 
   it('prunes pending peers older than PENDING_TTL_MS on list()', async () => {

@@ -1,15 +1,21 @@
-import { readFileSync } from 'node:fs'
-import { writeFile, rename, chmod, mkdir } from 'node:fs/promises'
+import {
+  closeSync,
+  constants,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+} from 'node:fs'
+import { chmod, mkdir, rename, unlink, writeFile } from 'node:fs/promises'
+import { randomBytes } from 'node:crypto'
 import { join } from 'node:path'
 
 // Write-only credential drop: the UI hands an agent a secret (API key, token,
-// password) by writing it here, and the running agent gets it injected into
-// process/tool env without ever being able to read the value back through its
-// own tools. Keeping the read path (env()/values()) synchronous and separate
-// from the async CRUD surface (set/remove/list/names) is what makes that
-// guarantee enforceable — model-facing tools only ever get wired to the async
-// surface, which by construction cannot return a value.
+// password) by writing it here. Plaintext is available only to framework-owned
+// redaction and destination-bound broker code, never to model-facing tools,
+// child-process environments, logs, or HTTP responses.
 export const SECRET_NAME_RE = /^[A-Z][A-Z0-9_]{0,63}$/
+export const MIN_SECRET_VALUE_BYTES = 6
 export const MAX_SECRET_VALUE_BYTES = 64 * 1024
 
 const FILE_MODE = 0o600
@@ -21,13 +27,26 @@ const DIR_MODE = 0o700
  * `${runtimeDir}/secrets.env` as `NAME=base64(value) # updated-iso` lines, one
  * per secret, base64-encoded so multi-line values survive as a single line.
  */
-export function createSecretsStore(runtimeDir) {
+export function createSecretsStore(runtimeDir, { canSet = null } = {}) {
   const file = join(runtimeDir, 'secrets.env')
 
   // In-memory cache of decoded secrets: Map<name, { value, updated }>. Loaded
   // lazily (once) from disk, then kept in sync by set()/remove() — no reload
   // needed after that, since this process is the only writer we support.
   let cache = null
+  let mutations = Promise.resolve()
+
+  function assertSafeRuntimeDir() {
+    try {
+      const info = lstatSync(runtimeDir)
+      if (info.isSymbolicLink() || !info.isDirectory()) {
+        throw new Error(`unsafe secrets directory: ${runtimeDir} must be a real directory`)
+      }
+    } catch (err) {
+      if (err.code === 'ENOENT') return
+      throw err
+    }
+  }
 
   function parse(content) {
     const map = new Map()
@@ -74,13 +93,23 @@ export function createSecretsStore(runtimeDir) {
   // keep it current directly.
   function ensureLoaded() {
     if (cache !== null) return
+    assertSafeRuntimeDir()
     let content = ''
+    let fd = null
     try {
-      content = readFileSync(file, 'utf8')
-    } catch (err) {
-      if (err.code !== 'ENOENT') {
-        console.log(`[secrets] failed to read ${file}: ${err.message}`)
+      fd = openSync(file, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+      const info = fstatSync(fd)
+      if (!info.isFile()) {
+        throw new Error(`unsafe secrets file: ${file} must be a regular file`)
       }
+      content = readFileSync(fd, 'utf8')
+    } catch (err) {
+      if (err.code === 'ELOOP') {
+        throw new Error(`unsafe secrets file: ${file} must not be a symbolic link`)
+      }
+      if (err.code !== 'ENOENT') throw err
+    } finally {
+      if (fd !== null) closeSync(fd)
     }
     cache = parse(content)
   }
@@ -99,19 +128,35 @@ export function createSecretsStore(runtimeDir) {
   // don't support POSIX permission bits, and that's not fatal here.
   async function persist() {
     await mkdir(runtimeDir, { recursive: true, mode: DIR_MODE })
+    assertSafeRuntimeDir()
     try {
       await chmod(runtimeDir, DIR_MODE)
     } catch (err) {
       console.log(`[secrets] failed to chmod directory ${runtimeDir}: ${err.message}`)
     }
-    const tmp = `${file}.tmp`
-    await writeFile(tmp, serialize(), 'utf8')
-    await rename(tmp, file)
+    const tmp = `${file}.tmp-${process.pid}-${randomBytes(6).toString('hex')}`
+    try {
+      await writeFile(tmp, serialize(), {
+        encoding: 'utf8',
+        flag: 'wx',
+        mode: FILE_MODE,
+      })
+      await rename(tmp, file)
+    } catch (err) {
+      await unlink(tmp).catch(() => {})
+      throw err
+    }
     try {
       await chmod(file, FILE_MODE)
     } catch (err) {
       console.log(`[secrets] failed to chmod ${file}: ${err.message}`)
     }
+  }
+
+  function mutate(operation) {
+    const pending = mutations.then(operation, operation)
+    mutations = pending.catch(() => {})
+    return pending
   }
 
   return {
@@ -123,20 +168,46 @@ export function createSecretsStore(runtimeDir) {
       if (typeof value !== 'string' || value.length === 0) {
         throw new Error(`invalid secret value for ${name}: must be a non-empty string`)
       }
-      if (Buffer.byteLength(value, 'utf8') > MAX_SECRET_VALUE_BYTES) {
+      const valueBytes = Buffer.byteLength(value, 'utf8')
+      if (valueBytes < MIN_SECRET_VALUE_BYTES) {
+        throw new Error(`invalid secret value for ${name}: must be at least ${MIN_SECRET_VALUE_BYTES} bytes`)
+      }
+      if (valueBytes > MAX_SECRET_VALUE_BYTES) {
         throw new Error(`invalid secret value for ${name}: exceeds ${MAX_SECRET_VALUE_BYTES} byte limit`)
       }
-      ensureLoaded()
-      cache.set(name, { value, updated: new Date().toISOString() })
-      await persist()
+      if (typeof canSet === 'function') {
+        const denial = canSet(name)
+        if (denial) throw new Error(denial)
+      }
+      return mutate(async () => {
+        ensureLoaded()
+        const previous = cache.get(name)
+        cache.set(name, { value, updated: new Date().toISOString() })
+        try {
+          await persist()
+        } catch (err) {
+          if (previous) cache.set(name, previous)
+          else cache.delete(name)
+          throw err
+        }
+      })
     },
 
     /** Remove `name` if present. Returns whether it existed. */
     async remove(name) {
-      ensureLoaded()
-      const existed = cache.delete(name)
-      if (existed) await persist()
-      return existed
+      return mutate(async () => {
+        ensureLoaded()
+        const previous = cache.get(name)
+        if (!previous) return false
+        cache.delete(name)
+        try {
+          await persist()
+        } catch (err) {
+          cache.set(name, previous)
+          throw err
+        }
+        return true
+      })
     },
 
     /** Names and last-updated timestamps only — values are never included. */
@@ -151,10 +222,24 @@ export function createSecretsStore(runtimeDir) {
       return [...cache.keys()]
     },
 
-    // SYNCHRONOUS. Decoded secrets as { NAME: value }. This is the only path
-    // that ever yields plaintext secret values, and it exists solely for the
-    // framework to inject credentials into a child process's environment or a
-    // tool call's execution env.
+    /** Whether the store contains any credentials. Safe for policy checks. */
+    hasAny() {
+      ensureLoaded()
+      return cache.size > 0
+    },
+
+    /**
+     * Framework-only lookup for the destination-bound secret broker.
+     * Never expose this method through a model-facing tool or HTTP response.
+     */
+    resolveForBroker(name) {
+      ensureLoaded()
+      return cache.get(name)?.value || null
+    },
+
+    // SYNCHRONOUS. Decoded secrets as { NAME: value }. Retained as a
+    // framework-only compatibility surface; built-in shell and task execution
+    // deliberately never consume it.
     //
     // DO NOT expose this over HTTP, a chat-visible tool result, a log line, or
     // any other surface the model or a client could read. Doing so defeats
@@ -178,16 +263,32 @@ export function createSecretsStore(runtimeDir) {
     // SYNCHRONOUS. Mask every stored secret value inside `text`. The one
     // sanctioned consumer-side use of values(): tool outputs, task logs, and
     // agent-bound messages pass through here so the write-only guarantee
-    // holds even when a shell echoes its own environment.
+    // holds even if another tool happens to echo a credential.
     redact(text) {
       ensureLoaded()
       let out = String(text ?? '')
       for (const entry of cache.values()) {
-        if (entry.value && entry.value.length >= 6 && out.includes(entry.value)) {
+        if (
+          entry.value
+          && Buffer.byteLength(entry.value, 'utf8') >= MIN_SECRET_VALUE_BYTES
+          && out.includes(entry.value)
+        ) {
           out = out.split(entry.value).join('**[Redacted by Cheesoid]**')
         }
       }
       return out
+    },
+
+    /** Recursively redact strings without changing a tool result's shape. */
+    redactDeep(value) {
+      if (typeof value === 'string') return this.redact(value)
+      if (Array.isArray(value)) return value.map(item => this.redactDeep(item))
+      if (value && typeof value === 'object') {
+        return Object.fromEntries(
+          Object.entries(value).map(([key, item]) => [key, this.redactDeep(item)]),
+        )
+      }
+      return value
     },
   }
 }

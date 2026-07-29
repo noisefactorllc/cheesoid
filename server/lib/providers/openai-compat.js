@@ -1,5 +1,6 @@
 import { translateMessages, translateToolDefs } from './translate.js'
 import circuitBreaker, { CircuitOpenError } from '../circuit-breaker.js'
+import { abortableDelay } from '../abort.js'
 
 const FINISH_REASON_MAP = {
   stop: 'end_turn',
@@ -153,7 +154,36 @@ export function createOpenAICompatProvider(config) {
   return {
     supportsIntentRouting: true,
 
-    async classifyIntent({ model, system, messages, tools }) {
+    async transcribeAudio({ buffer, format, model, prompt, signal, timeoutMs = 45_000 }) {
+      const timeout = AbortSignal.timeout(timeoutMs)
+      const combinedSignal = signal ? AbortSignal.any([signal, timeout]) : timeout
+      const response = await fetch(`${baseUrl}/chat/completions`, {
+        method: 'POST',
+        signal: combinedSignal,
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${apiKey}`,
+        },
+        body: JSON.stringify({
+          model,
+          messages: [{
+            role: 'user',
+            content: [
+              { type: 'text', text: prompt },
+              { type: 'input_audio', input_audio: { data: buffer.toString('base64'), format } },
+            ],
+          }],
+          max_tokens: 4000,
+        }),
+      })
+      const json = await response.json()
+      if (!response.ok || json.error) {
+        throw new Error(json.error?.message || `transcription HTTP ${response.status}`)
+      }
+      return { text: json.choices?.[0]?.message?.content || '' }
+    },
+
+    async classifyIntent({ model, system, messages, tools, signal }) {
       const toolSummary = tools.map(t => `- ${t.name}: ${t.description || 'no description'}`).join('\n')
 
       // Detect if the last user message contains tool results (post-tool-call state)
@@ -196,6 +226,7 @@ export function createOpenAICompatProvider(config) {
             messages: classifyMessages,
             temperature: 0,
           }),
+          signal,
         })
 
         if (!response.ok) {
@@ -216,6 +247,7 @@ export function createOpenAICompatProvider(config) {
           if (text.includes('"text"')) return 'none'
         }
       } catch (err) {
+        signal?.throwIfAborted()
         const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
         console.log(`[openai-compat] classifier fetch failed${cause}, falling back to auto`)
         circuitBreaker.recordFailure(baseUrl, `classifier fetch failed${cause}`)
@@ -223,7 +255,7 @@ export function createOpenAICompatProvider(config) {
       return 'auto'
     },
 
-    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }, onEvent) {
+    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice, signal }, onEvent) {
       const openaiMessages = translateMessages(system, messages)
       const openaiTools = translateToolDefs(tools)
 
@@ -261,6 +293,7 @@ export function createOpenAICompatProvider(config) {
       let lastErr
 
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        signal?.throwIfAborted()
         // Circuit breaker check — skip all retries if endpoint is dead
         if (circuitBreaker.isOpen(baseUrl)) {
           throw new CircuitOpenError(baseUrl, Math.round(circuitBreaker.remainingCooldown(baseUrl) / 1000), circuitBreaker.lastError(baseUrl))
@@ -274,8 +307,10 @@ export function createOpenAICompatProvider(config) {
               'Authorization': `Bearer ${apiKey}`,
             },
             body: JSON.stringify(body),
+            signal,
           })
         } catch (err) {
+          signal?.throwIfAborted()
           const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
           lastErr = new Error(`OpenAI-compat fetch failed${cause}`)
           response = null
@@ -307,7 +342,7 @@ export function createOpenAICompatProvider(config) {
             ? parseInt(response.headers.get('retry-after') || '0', 10)
             : 0
           const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
-          await new Promise(r => setTimeout(r, delay))
+          await abortableDelay(delay, signal)
         }
       }
 

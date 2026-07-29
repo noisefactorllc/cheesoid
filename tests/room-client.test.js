@@ -156,6 +156,7 @@ describe('RoomClient', () => {
       url: `http://localhost:${port}`,
       name: 'test-room',
       secret: 'test-secret',
+      allow_private: true,
     }, {
       agentName: 'Alice',
       onMessage: () => {},
@@ -175,6 +176,7 @@ describe('RoomClient', () => {
       url: 'http://localhost:1', // nothing listening
       name: 'dead-room',
       secret: 'test-secret',
+      allow_private: true,
     }, {
       agentName: 'Alice',
       onMessage: () => {},
@@ -201,7 +203,7 @@ describe('RoomClient', () => {
     const port = server.address().port
 
     const client = new RoomClient(
-      { name: 'test', url: `http://localhost:${port}`, secret: 's' },
+      { name: 'test', url: `http://localhost:${port}`, secret: 's', allow_private: true },
       { agentName: 'Agent', onMessage: () => {} },
     )
 
@@ -211,6 +213,130 @@ describe('RoomClient', () => {
     assert.equal(postedBody.backchannel, true)
     assert.equal(postedBody.trigger, true)
     assert.equal(postedBody.message, 'delegate this')
+  })
+
+  it('validates and pins the target for every outbound request', async () => {
+    let validations = 0
+    const client = new RoomClient(
+      { name: 'blocked', url: 'https://peer.example', secret: 's' },
+      {
+        agentName: 'Agent',
+        onMessage: () => {},
+        resolveTarget: async () => {
+          validations++
+          throw new Error('refusing non-global address 127.0.0.1')
+        },
+      },
+    )
+
+    await assert.rejects(() => client.sendMessage('one'), /non-global/)
+    await assert.rejects(() => client.sendMessage('two'), /non-global/)
+    assert.equal(validations, 2)
+  })
+
+  it('includes target resolution in the request deadline', async () => {
+    const client = new RoomClient(
+      {
+        name: 'slow-dns',
+        url: 'https://peer.example',
+        secret: 's',
+        request_timeout_ms: 30,
+      },
+      {
+        agentName: 'Agent',
+        onMessage: () => {},
+        resolveTarget: async () => new Promise(() => {}),
+      },
+    )
+    await assert.rejects(() => client.sendMessage('one'), /timed out after 30ms/)
+  })
+
+  it('bounds JSON responses from a peer', async () => {
+    const http = await import('node:http')
+    const server = http.createServer((_req, res) => {
+      res.end('x'.repeat(2048))
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const client = new RoomClient({
+      name: 'bounded',
+      url: `http://127.0.0.1:${server.address().port}`,
+      secret: 'test-secret',
+      allow_private: true,
+      max_response_bytes: 1024,
+    }, { agentName: 'Agent', onMessage: () => {} })
+    try {
+      await assert.rejects(() => client.sendMessage('hello'), /exceeds 1024 byte limit/)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  it('times out peer POST requests that never respond', async () => {
+    const http = await import('node:http')
+    const server = http.createServer(() => {})
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const client = new RoomClient({
+      name: 'timeout',
+      url: `http://127.0.0.1:${server.address().port}`,
+      secret: 'test-secret',
+      allow_private: true,
+      request_timeout_ms: 25,
+    }, { agentName: 'Agent', onMessage: () => {} })
+    try {
+      await assert.rejects(() => client.sendMessage('hello'), /timed out/)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  it('enforces a total peer POST deadline against trickle responses', async () => {
+    const http = await import('node:http')
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200)
+      const timer = setInterval(() => res.write('x'), 10)
+      res.on('close', () => clearInterval(timer))
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const client = new RoomClient({
+      name: 'trickle',
+      url: `http://127.0.0.1:${server.address().port}`,
+      secret: 'test-secret',
+      allow_private: true,
+      request_timeout_ms: 40,
+    }, { agentName: 'Agent', onMessage: () => {} })
+    try {
+      await assert.rejects(() => client.sendMessage('hello'), /timed out after 40ms/)
+    } finally {
+      await new Promise(resolve => server.close(resolve))
+    }
+  })
+
+  it('drops a peer stream whose unterminated SSE line exceeds the buffer cap', async () => {
+    const http = await import('node:http')
+    const server = http.createServer((_req, res) => {
+      res.writeHead(200, { 'content-type': 'text/event-stream' })
+      res.write(`data: ${'x'.repeat(2048)}`)
+    })
+    await new Promise(resolve => server.listen(0, '127.0.0.1', resolve))
+    const client = new RoomClient({
+      name: 'oversized-stream',
+      url: `http://127.0.0.1:${server.address().port}`,
+      secret: 'test-secret',
+      allow_private: true,
+      max_sse_buffer_bytes: 1024,
+    }, { agentName: 'Agent', onMessage: () => {} })
+    try {
+      client.connect()
+      const deadline = Date.now() + 1000
+      while (!client._retryTimer && Date.now() < deadline) {
+        await new Promise(resolve => setTimeout(resolve, 10))
+      }
+      assert.ok(client._retryTimer, 'oversized stream must be destroyed and scheduled for retry')
+      assert.equal(client.connected, false)
+    } finally {
+      client.destroy()
+      await new Promise(resolve => server.close(resolve))
+    }
   })
 
   it('ignores presence/reset/error events from remote rooms', () => {

@@ -58,6 +58,14 @@ describe('MediaStore', () => {
     )
   })
 
+  it('preflights declared sizes before request bodies are buffered', async () => {
+    const { runtimeDir } = await makeStore()
+    const store = createMediaStore(runtimeDir, { maxTotalBytes: 10, maxFiles: 1 })
+    await assert.rejects(() => store.preflight(MEDIA_MAX_BYTES + 1), /media too large/)
+    await store.save({ buffer: Buffer.from('123456'), mime: 'text/plain', name: 'one.txt' })
+    await assert.rejects(() => store.preflight(5), /aggregate media byte quota/)
+  })
+
   it('rejects an empty buffer', async () => {
     const { store } = await makeStore()
     await assert.rejects(
@@ -174,5 +182,22 @@ describe('MediaStore', () => {
     assert.deepEqual(await store.list(), [])
     const entries = await readdir(join(runtimeDir, 'media'))
     assert.deepEqual(entries, [])
+  })
+
+  it('enforces aggregate byte and file-count quotas', async () => {
+    const runtimeDir = await mkdtemp(join(tmpdir(), 'cheesoid-media-quota-'))
+    const store = createMediaStore(runtimeDir, { maxTotalBytes: 6, maxFiles: 2 })
+    await store.save({ buffer: Buffer.from('aaa'), mime: 'text/plain', name: 'a.txt' })
+    await store.save({ buffer: Buffer.from('bb'), mime: 'text/plain', name: 'b.txt' })
+    await assert.rejects(
+      () => store.save({ buffer: Buffer.from('cc'), mime: 'text/plain', name: 'c.txt' }),
+      /aggregate media byte quota/i,
+    )
+    await store.remove((await store.list()).at(-1).id)
+    await store.save({ buffer: Buffer.from('c'), mime: 'text/plain', name: 'c.txt' })
+    await assert.rejects(
+      () => store.save({ buffer: Buffer.from('d'), mime: 'text/plain', name: 'd.txt' }),
+      /media file-count quota/i,
+    )
   })
 })

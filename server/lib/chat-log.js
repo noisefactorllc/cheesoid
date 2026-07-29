@@ -155,9 +155,11 @@ export class ChatLog {
 
     // Pass 1: lightweight link index across all history.
     const index = new Map()
+    let anchorEntry = null
     for (const file of files) {
       await this._streamFile(file, (entry) => {
         if (!entry.id || (entry.type && !THREADABLE.has(entry.type))) return
+        if (entry.id === anchorId) anchorEntry = entry
         index.set(entry.id, { id: entry.id, replyTo: entry.replyTo })
         if (index.size > maxIndex) {
           index.delete(index.keys().next().value) // evict oldest
@@ -166,6 +168,34 @@ export class ChatLog {
     }
 
     let anchor = index.get(anchorId)
+    // Only take the fast path when this entry was actually stamped by the
+    // modern writer. Legacy roots have no threadId; treating their own id as
+    // a persisted id would select the root but miss every link-only reply.
+    const persistedThreadId = anchorEntry?.threadId
+    if (anchorEntry && persistedThreadId) {
+      const threadId = persistedThreadId
+      let rootEntry = null
+      const window = []
+      let dropped = 0
+      for (const file of files) {
+        await this._streamFile(file, (entry) => {
+          if (!entry.id) return
+          if (entry.id !== threadId && entry.threadId !== threadId) return
+          if (entry.id === threadId && !rootEntry) {
+            rootEntry = entry
+            return
+          }
+          window.push(entry)
+          if (window.length > maxEntries) {
+            window.shift()
+            dropped++
+          }
+        })
+      }
+      const entries = rootEntry ? [rootEntry, ...window] : window
+      return { threadId, entries, truncated: dropped > 0 }
+    }
+
     if (!anchor) {
       // The anchor exists (system-surfaced ids always do) but fell out of
       // the bounded link index on a very large history. Degrade to a

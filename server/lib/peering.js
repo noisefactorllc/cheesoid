@@ -11,7 +11,8 @@
  *     the join for the UI/list.
  *
  * Secrets are never stored in plaintext: each pending/approved record keeps a
- * random salt and sha256(salt + secret) hex digest. Public callers only ever
+ * random salt and scrypt digest. Legacy SHA-256 records are accepted and
+ * upgraded after a successful authentication. Public callers only ever
  * see publicRecord() projections (name, url, note, state, requested,
  * approvedBy, approved) — salt/hash never leave this module.
  *
@@ -20,17 +21,39 @@
  * than throwing.
  */
 
-import { readFile, writeFile, mkdir, rename } from 'node:fs/promises'
+import { chmod, readFile, writeFile, mkdir, rename } from 'node:fs/promises'
 import { join } from 'node:path'
-import { randomBytes, createHash, timingSafeEqual } from 'node:crypto'
+import {
+  createHash,
+  createHmac,
+  randomBytes,
+  timingSafeEqual,
+  scrypt as scryptCallback,
+} from 'node:crypto'
+import { promisify } from 'node:util'
 
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000
 
 const MAX_NAME_LENGTH = 40
 const MIN_SECRET_LENGTH = 16
+const MAX_SECRET_BYTES = 1024
+const MAX_URL_LENGTH = 2048
 
-function hashSecret(salt, secret) {
+const scrypt = promisify(scryptCallback)
+
+export function isLegacyPeerLifecycleEntry(entry) {
+  if (entry?.type !== 'system' || typeof entry.text !== 'string') return false
+  return entry.text.startsWith('Peer join request from "')
+    || (entry.text.startsWith('Peer "') && entry.text.includes('" approved by '))
+    || (entry.text.startsWith('Peer request "') && entry.text.endsWith('" denied.'))
+}
+
+function legacyHashSecret(salt, secret) {
   return createHash('sha256').update(salt + secret).digest('hex')
+}
+
+async function hashSecret(salt, secret) {
+  return (await scrypt(secret, salt, 32)).toString('hex')
 }
 
 function constantTimeEqual(hexA, hexB) {
@@ -58,11 +81,48 @@ function byNewestFirst(a, b) {
 
 export function createPeerStore(runtimeDir) {
   const filePath = join(runtimeDir, 'peers.json')
+  const lookupKeyPath = join(runtimeDir, '.peer-lookup.key')
 
   let peers = null
   let loadPromise = null
+  let lookupKey = null
+  let lookupKeyPromise = null
+  let nextLegacyScanAt = 0
+
+  async function ensureLookupKey() {
+    if (lookupKey) return lookupKey
+    if (!lookupKeyPromise) {
+      lookupKeyPromise = (async () => {
+        await mkdir(runtimeDir, { recursive: true, mode: 0o700 })
+        try {
+          const existing = await readFile(lookupKeyPath)
+          if (existing.length !== 32) throw new Error('invalid peer lookup key')
+          lookupKey = existing
+          return lookupKey
+        } catch (err) {
+          if (err.code !== 'ENOENT') throw err
+        }
+        const generated = randomBytes(32)
+        try {
+          await writeFile(lookupKeyPath, generated, { flag: 'wx', mode: 0o600 })
+          lookupKey = generated
+        } catch (err) {
+          if (err.code !== 'EEXIST') throw err
+          lookupKey = await readFile(lookupKeyPath)
+        }
+        await chmod(lookupKeyPath, 0o600).catch(() => {})
+        return lookupKey
+      })()
+    }
+    return lookupKeyPromise
+  }
+
+  function tokenLookup(secret) {
+    return createHmac('sha256', lookupKey).update(secret).digest('hex')
+  }
 
   async function load() {
+    await ensureLookupKey()
     const map = new Map()
     let raw
     try {
@@ -131,9 +191,26 @@ export function createPeerStore(runtimeDir) {
     }
   }
 
+  function validateUrl(url) {
+    if (url == null || url === '') return null
+    if (typeof url !== 'string' || url.length > MAX_URL_LENGTH || /[\r\n\0]/.test(url)) {
+      throw new Error('invalid peer url')
+    }
+    let parsed
+    try {
+      parsed = new URL(url)
+    } catch {
+      throw new Error('invalid peer url')
+    }
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) {
+      throw new Error('invalid peer url')
+    }
+    return url
+  }
+
   async function requestJoin({ name, secret, url = null, note = null }) {
-    // The note flows into an agent turn and persists — cap and flatten it so
-    // an unauthenticated caller cannot inject bulk instruction text.
+    // The note is human-facing only. Cap and flatten it so unauthenticated
+    // callers cannot create oversized peer records or disruptive UI content.
     if (note != null) {
       note = String(note).replace(/\s+/g, ' ').trim().slice(0, 300) || null
     }
@@ -146,8 +223,12 @@ export function createPeerStore(runtimeDir) {
     if (typeof secret !== 'string' || secret.length < MIN_SECRET_LENGTH) {
       throw new Error('secret too short (min 16 chars)')
     }
+    if (Buffer.byteLength(secret, 'utf8') > MAX_SECRET_BYTES) {
+      throw new Error(`secret too long (max ${MAX_SECRET_BYTES} bytes)`)
+    }
+    url = validateUrl(url)
 
-    const salt = randomBytes(8).toString('hex')
+    const salt = randomBytes(16).toString('hex')
     const rec = {
       name,
       url,
@@ -155,7 +236,9 @@ export function createPeerStore(runtimeDir) {
       state: 'pending',
       requested: new Date().toISOString(),
       salt,
-      hash: hashSecret(salt, secret),
+      kdf: 'scrypt',
+      hash: await hashSecret(salt, secret),
+      tokenLookup: tokenLookup(secret),
       approvedBy: null,
       approved: null,
     }
@@ -206,10 +289,42 @@ export function createPeerStore(runtimeDir) {
   async function authenticate(secret) {
     await pruneExpired()
     if (typeof secret !== 'string' || secret.length === 0) return null
-    for (const rec of peers.values()) {
-      if (rec.state !== 'approved' || !rec.salt || !rec.hash) continue
-      const candidate = hashSecret(rec.salt, secret)
-      if (constantTimeEqual(candidate, rec.hash)) return rec.name
+    const lookup = tokenLookup(secret)
+    const direct = [...peers.values()].find(rec => (
+      rec.state === 'approved'
+      && rec.tokenLookup === lookup
+      && rec.salt
+      && rec.hash
+    ))
+    if (direct) {
+      const candidate = await hashSecret(direct.salt, secret)
+      return constantTimeEqual(candidate, direct.hash) ? direct.name : null
+    }
+
+    // Pre-lookup records require a bounded one-time compatibility scan.
+    // Rate-limit globally so invalid bearer traffic cannot turn peer count
+    // into unbounded scrypt work. A successful legacy auth is upgraded.
+    const now = Date.now()
+    if (now < nextLegacyScanAt) return null
+    const legacy = [...peers.values()].filter(rec => (
+      rec.state === 'approved' && !rec.tokenLookup && rec.salt && rec.hash
+    ))
+    if (!legacy.length) return null
+    nextLegacyScanAt = now + 5000
+    for (const rec of legacy) {
+      const candidate = rec.kdf === 'scrypt'
+        ? await hashSecret(rec.salt, secret)
+        : legacyHashSecret(rec.salt, secret)
+      if (constantTimeEqual(candidate, rec.hash)) {
+        rec.tokenLookup = lookup
+        if (rec.kdf !== 'scrypt') {
+          rec.salt = randomBytes(16).toString('hex')
+          rec.hash = await hashSecret(rec.salt, secret)
+          rec.kdf = 'scrypt'
+        }
+        await persist()
+        return rec.name
+      }
     }
     return null
   }
@@ -231,6 +346,7 @@ export function createPeerStore(runtimeDir) {
       requested: now,
       salt: null,
       hash: null,
+      kdf: null,
       approvedBy: addedBy ?? null,
       approved: now,
     }

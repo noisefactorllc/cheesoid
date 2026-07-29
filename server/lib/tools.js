@@ -4,7 +4,8 @@ import { randomUUID } from 'node:crypto'
 import { buildSharedWorkspaceTools } from './shared-workspace.js'
 import { buildWebSearchTools } from './web-search.js'
 import { buildHarnessTools } from './tools-harness.js'
-import { MEMORY_COMPACT_WARN_BYTES, MEMORY_READ_CAP_BYTES } from './memory.js'
+import { MEMORY_COMPACT_WARN_BYTES, MEMORY_READ_CAP_BYTES, validateMemoryFilename } from './memory.js'
+import { isLegacyPeerLifecycleEntry } from './peering.js'
 
 // The read-mostly subset a subagent gets: enough to research and report,
 // nothing that mutates the parent agent's world or spawns further workers.
@@ -46,25 +47,25 @@ export async function loadTools(personaDir, config, memory, state, room, registr
   const staticDefinitions = [...memoryTools.definitions, ...sharedTools.definitions, ...roomTools.definitions, ...webSearchTools.definitions, ...harnessTools.definitions, ...personaTools.definitions]
 
   async function execute(name, input, options) {
+    let result
     if (memoryTools.handles(name)) {
-      return memoryTools.execute(name, input, options)
+      result = await memoryTools.execute(name, input, options)
+    } else if (sharedTools.handles(name)) {
+      result = await sharedTools.execute(name, input, options)
+    } else if (roomTools.handles(name)) {
+      result = await roomTools.execute(name, input, options)
+    } else if (webSearchTools.handles(name)) {
+      result = await webSearchTools.execute(name, input, options)
+    } else if (harnessTools.handles(name)) {
+      result = await harnessTools.execute(name, input, options)
+    } else if (modalityTools.handles(name)) {
+      result = await modalityTools.execute(name, input, options)
+    } else {
+      result = await personaTools.execute(name, input, options)
     }
-    if (sharedTools.handles(name)) {
-      return sharedTools.execute(name, input, options)
-    }
-    if (roomTools.handles(name)) {
-      return roomTools.execute(name, input, options)
-    }
-    if (webSearchTools.handles(name)) {
-      return webSearchTools.execute(name, input, options)
-    }
-    if (harnessTools.handles(name)) {
-      return harnessTools.execute(name, input, options)
-    }
-    if (modalityTools.handles(name)) {
-      return modalityTools.execute(name, input, options)
-    }
-    return personaTools.execute(name, input, options)
+    return harness?.secrets?.redactDeep
+      ? harness.secrets.redactDeep(result)
+      : result
   }
 
   const toolset = {
@@ -243,7 +244,8 @@ function buildRoomTools(room, config) {
       }
       case 'search_history': {
         if (!room.chatLog) return { output: 'Chat log not available', is_error: true }
-        const results = await room.chatLog.search(input.query, { limit: input.limit })
+        const results = (await room.chatLog.search(input.query, { limit: input.limit }))
+          .filter(entry => !isLegacyPeerLifecycleEntry(entry))
         if (results.length === 0) return { output: 'No matching history entries found.' }
         const formatted = results.map(e => {
           const prefix = e.name ? `[${e.timestamp}] ${e.name}` : `[${e.timestamp}]`
@@ -374,7 +376,10 @@ function buildRoomTools(room, config) {
         const replyId = shortMsgId()
         const event = { type: 'assistant_message', text: input.text, id: replyId, replyTo: input.messageId }
         // Quote the referenced message on the event so the UI shows it.
-        const ref = (room.history || []).find(h => h.id === input.messageId)
+        let ref = (room.history || []).find(h => h.id === input.messageId)
+        if (!ref && room.chatLog) {
+          try { ref = await room.chatLog.findById(input.messageId) } catch {}
+        }
         if (ref) {
           event.replyToPreview = {
             name: ref.name || room.persona.config.display_name,
@@ -382,6 +387,7 @@ function buildRoomTools(room, config) {
             timestamp: ref.timestamp || null,
           }
         }
+        event.threadId = ref?.threadId || ref?.id || input.messageId
         room.broadcast(event)
         room.recordHistory({ ...event, room: room.roomName })
         return { output: `Reply sent (referencing message ${input.messageId}).` }
@@ -502,25 +508,43 @@ function buildMemoryTools(memory, state) {
   async function execute(name, input) {
     switch (name) {
       case 'read_memory': {
-        const content = await memory.readCapped(input.filename)
-        return content !== null
-          ? { output: content }
-          : { output: `File not found: ${input.filename}`, is_error: true }
+        try {
+          const filename = validateMemoryFilename(input.filename)
+          const content = await memory.readCapped(filename)
+          return content !== null
+            ? { output: content }
+            : { output: `File not found: ${filename}`, is_error: true }
+        } catch (err) {
+          return { output: err.message, is_error: true }
+        }
       }
       case 'write_memory': {
-        if (input.filename === 'SOUL.md' || input.filename === '../SOUL.md') {
-          return { output: 'Cannot modify SOUL.md — it is immutable.', is_error: true }
+        try {
+          const filename = validateMemoryFilename(input.filename)
+          if (filename === 'SOUL.md') {
+            return { output: 'Cannot modify SOUL.md — it is immutable.', is_error: true }
+          }
+          await memory.write(filename, input.content)
+          return { output: `Written: ${filename}` }
+        } catch (err) {
+          return { output: err.message, is_error: true }
         }
-        await memory.write(input.filename, input.content)
-        return { output: `Written: ${input.filename}` }
       }
       case 'append_memory': {
-        await memory.append(input.filename, input.content)
-        const size = await memory.sizeOf(input.filename)
-        const pressure = size != null && size > MEMORY_COMPACT_WARN_BYTES
-          ? ` (file is ${Math.ceil(size / 1024)}KB — consider compacting into topic files)`
-          : ''
-        return { output: `Appended to: ${input.filename}${pressure}` }
+        try {
+          const filename = validateMemoryFilename(input.filename)
+          if (filename === 'SOUL.md') {
+            return { output: 'Cannot modify SOUL.md — it is immutable.', is_error: true }
+          }
+          await memory.append(filename, input.content)
+          const size = await memory.sizeOf(filename)
+          const pressure = size != null && size > MEMORY_COMPACT_WARN_BYTES
+            ? ` (file is ${Math.ceil(size / 1024)}KB — consider compacting into topic files)`
+            : ''
+          return { output: `Appended to: ${filename}${pressure}` }
+        } catch (err) {
+          return { output: err.message, is_error: true }
+        }
       }
       case 'list_memory': {
         const files = await memory.listWithSizes()

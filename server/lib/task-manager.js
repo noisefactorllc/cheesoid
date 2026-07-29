@@ -17,6 +17,18 @@ const JOB_OUTPUT_CAP_BYTES = 64 * 1024
 const TIMEOUT_KILL_GRACE_MS = 10_000
 // Grace period between SIGTERM and SIGKILL when stop() is called explicitly.
 const STOP_KILL_GRACE_MS = 5_000
+const CHILD_PATH = '/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin'
+
+/** Environment for untrusted shell children. Never inherit the server env. */
+export function minimalChildEnv(cwd) {
+  return {
+    HOME: cwd,
+    LANG: 'C',
+    LC_ALL: 'C',
+    PATH: CHILD_PATH,
+    TMPDIR: '/tmp',
+  }
+}
 
 // Short id generator — 8 hex chars, same pattern as shortMsgId in tools.js.
 function makeTaskId() {
@@ -52,9 +64,21 @@ function stringifyResult(value) {
  * processes for shell tasks, bookkeeping for jobs) so list/get/tail can be
  * served straight from disk without asking a live task for its own state.
  */
-export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.cwd(), maxConcurrent = 5, defaultTimeoutMs = 30 * 60 * 1000, onEvent = null }) {
+export function createTaskManager({
+  runtimeDir,
+  cwd = process.cwd(),
+  maxConcurrent = 5,
+  defaultTimeoutMs = 30 * 60 * 1000,
+  onEvent = null,
+  stopKillGraceMs = STOP_KILL_GRACE_MS,
+  timeoutKillGraceMs = TIMEOUT_KILL_GRACE_MS,
+  shutdownTimeoutMs = 15_000,
+  redact = text => String(text ?? ''),
+}) {
   const tasksDir = join(runtimeDir, 'tasks')
   const live = new Map() // id -> live entry (shell: {kind,record,child,...}; job: {kind,record})
+  let occupied = 0
+  let stopping = false
 
   const recordPath = (id) => join(tasksDir, `${id}.json`)
   const logPath = (id) => join(tasksDir, `${id}.log`)
@@ -82,16 +106,42 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
   }
 
   function running() {
-    return live.size
+    return occupied
+  }
+
+  function reserveSlot() {
+    if (stopping) throw new Error('task manager is stopping')
+    if (occupied >= maxConcurrent) {
+      throw new Error(`task limit reached (${maxConcurrent} running)`)
+    }
+    occupied++
+  }
+
+  function releaseSlot(entry = null) {
+    if (entry?.slotReleased) return
+    if (entry) entry.slotReleased = true
+    occupied = Math.max(0, occupied - 1)
+  }
+
+  function signalProcessTree(entry, signal) {
+    if (entry.processGroup && entry.child.pid) {
+      try {
+        process.kill(-entry.child.pid, signal)
+        return
+      } catch {
+        // The group may already be gone; fall back to the direct child.
+      }
+    }
+    try { entry.child.kill(signal) } catch { /* already gone */ }
   }
 
   // SIGTERM now, SIGKILL after `graceMs` if the process is still alive.
   // entry.killGraceHandle is unref'd so a straggler timer never keeps the
   // process alive on its own.
   function sendSignalWithGrace(entry, signal, graceMs) {
-    try { entry.child.kill(signal) } catch { /* already gone */ }
+    signalProcessTree(entry, signal)
     entry.killGraceHandle = setTimeout(() => {
-      try { entry.child.kill('SIGKILL') } catch { /* already gone */ }
+      signalProcessTree(entry, 'SIGKILL')
     }, graceMs)
     entry.killGraceHandle.unref?.()
   }
@@ -103,6 +153,7 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
     const entry = live.get(id)
     if (!entry) return // already finalized (e.g. duplicate error+close)
     if (entry.timeoutHandle) clearTimeout(entry.timeoutHandle)
+    if (entry.reason) signalProcessTree(entry, 'SIGKILL')
     if (entry.killGraceHandle) clearTimeout(entry.killGraceHandle)
     entry.logStream.end()
 
@@ -122,6 +173,7 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
     }
 
     live.delete(id)
+    releaseSlot(entry)
     try {
       await persist(record)
     } finally {
@@ -136,17 +188,15 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
     if (!command || typeof command !== 'string') {
       throw new Error('startShell requires a command string')
     }
-    if (running() >= maxConcurrent) {
-      throw new Error(`task limit reached (${maxConcurrent} running)`)
-    }
+    reserveSlot()
 
     const id = makeTaskId()
     const effectiveTimeout = timeoutMs != null ? timeoutMs : defaultTimeoutMs
     const record = {
       id,
-      name: name ? String(name).slice(0, 80) : command.slice(0, 40),
+      name: name ? redact(String(name)).slice(0, 80) : 'shell task',
       kind: 'shell',
-      command,
+      command: null,
       status: 'running',
       started: new Date().toISOString(),
       finished: null,
@@ -154,7 +204,12 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
       timeoutMs: effectiveTimeout,
       note: null,
     }
-    await persist(record)
+    try {
+      await persist(record)
+    } catch (err) {
+      releaseSlot()
+      throw err
+    }
 
     const logStream = createWriteStream(logPath(id), { flags: 'a' })
     let bytesWritten = 0
@@ -173,12 +228,19 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
       }
     }
 
-    const child = spawn('bash', ['-lc', command], {
-      cwd,
-      env: { ...process.env, ...env() },
-      detached: false,
-      stdio: ['ignore', 'pipe', 'pipe'],
-    })
+    let child
+    try {
+      child = spawn('bash', ['--noprofile', '--norc', '-c', command], {
+        cwd,
+        env: minimalChildEnv(cwd),
+        detached: process.platform !== 'win32',
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (err) {
+      logStream.destroy()
+      releaseSlot()
+      throw err
+    }
 
     const entry = {
       kind: 'shell',
@@ -189,6 +251,8 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
       timeoutHandle: null,
       killGraceHandle: null,
       resolveClosed: null,
+      processGroup: process.platform !== 'win32',
+      slotReleased: false,
     }
     entry.closed = new Promise((resolve) => { entry.resolveClosed = resolve })
     live.set(id, entry)
@@ -210,7 +274,7 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
     if (effectiveTimeout > 0 && Number.isFinite(effectiveTimeout)) {
       entry.timeoutHandle = setTimeout(() => {
         entry.reason = 'timeout'
-        sendSignalWithGrace(entry, 'SIGTERM', TIMEOUT_KILL_GRACE_MS)
+        sendSignalWithGrace(entry, 'SIGTERM', timeoutKillGraceMs)
       }, effectiveTimeout)
       entry.timeoutHandle.unref?.()
     }
@@ -220,7 +284,7 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
 
   async function appendJobOutput(id, text) {
     await ensureTasksDir()
-    await appendFile(logPath(id), capUtf8(text, JOB_OUTPUT_CAP_BYTES))
+    await appendFile(logPath(id), capUtf8(redact(text), JOB_OUTPUT_CAP_BYTES))
   }
 
   // run()'s settlement funnels through here. If stop() already removed the
@@ -229,50 +293,90 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
   // discarded when it settles".
   async function finalizeJob(id, outcome, value) {
     const entry = live.get(id)
-    if (!entry) return
+    if (!entry || entry.finalizing) return
+    if (entry.terminalized) {
+      live.delete(id)
+      releaseSlot(entry)
+      entry.resolveClosed?.(entry.stopRecord)
+      return
+    }
+    // Claim settlement synchronously. stop() can still find the entry while
+    // result I/O is pending, but it must await `closed` rather than changing
+    // the terminal state underneath this finalizer.
+    entry.finalizing = true
 
     const record = { ...entry.record, finished: new Date().toISOString(), exitCode: null }
+    if (entry.timeoutHandle) clearTimeout(entry.timeoutHandle)
 
-    if (outcome === 'resolved') {
-      record.status = 'done'
-      await appendJobOutput(id, stringifyResult(value))
-    } else {
-      record.status = 'failed'
-      const message = value instanceof Error ? value.message : String(value)
-      await appendJobOutput(id, `Error: ${message}`)
+    try {
+      if (outcome === 'resolved') {
+        record.status = 'done'
+        await appendJobOutput(id, stringifyResult(value))
+      } else {
+        record.status = 'failed'
+        const message = value instanceof Error ? value.message : String(value)
+        await appendJobOutput(id, `Error: ${message}`)
+      }
+      await persist(record)
+    } finally {
+      live.delete(id)
+      releaseSlot(entry)
+      entry.resolveClosed?.(record)
+      emit(record.status === 'done' ? 'task_done' : 'task_failed', record)
     }
-
-    live.delete(id)
-    await persist(record)
-    emit(record.status === 'done' ? 'task_done' : 'task_failed', record)
   }
 
-  async function startJob({ name, run } = {}) {
+  async function startJob({ name, run, timeoutMs } = {}) {
     if (typeof run !== 'function') {
       throw new Error('startJob requires a run function')
     }
-    if (running() >= maxConcurrent) {
-      throw new Error(`task limit reached (${maxConcurrent} running)`)
-    }
+    reserveSlot()
 
     const id = makeTaskId()
+    const effectiveTimeout = timeoutMs != null ? timeoutMs : defaultTimeoutMs
     const record = {
       id,
-      name: name ? String(name).slice(0, 80) : 'job',
+      name: name ? redact(String(name)).slice(0, 80) : 'job',
       kind: 'job',
       command: null,
       status: 'running',
       started: new Date().toISOString(),
       finished: null,
       exitCode: null,
-      timeoutMs: null,
+      timeoutMs: effectiveTimeout,
       note: null,
     }
-    await persist(record)
+    try {
+      await persist(record)
+    } catch (err) {
+      releaseSlot()
+      throw err
+    }
 
-    live.set(id, { kind: 'job', record })
+    const controller = new AbortController()
+    const entry = {
+      kind: 'job',
+      record,
+      controller,
+      reason: null,
+      timeoutHandle: null,
+      resolveClosed: null,
+      finalizing: false,
+      terminalized: false,
+      stopRecord: null,
+      slotReleased: false,
+    }
+    entry.closed = new Promise(resolve => { entry.resolveClosed = resolve })
+    live.set(id, entry)
 
-    Promise.resolve().then(run).then(
+    if (effectiveTimeout > 0 && Number.isFinite(effectiveTimeout)) {
+      entry.timeoutHandle = setTimeout(() => {
+        stopJob(id, 'timeout').catch(err => console.error('[task-manager] job timeout error:', err.message))
+      }, effectiveTimeout)
+      entry.timeoutHandle.unref?.()
+    }
+
+    Promise.resolve().then(() => run({ signal: controller.signal })).then(
       (result) => finalizeJob(id, 'resolved', result),
       (err) => finalizeJob(id, 'rejected', err)
     ).catch((e) => console.error('[task-manager] job finalize error:', e.message))
@@ -331,17 +435,59 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
     if (!entry) return get(id) // not running — already finished, or unknown
 
     if (entry.kind === 'job') {
-      const record = { ...entry.record, status: 'stopped', finished: new Date().toISOString() }
-      live.delete(id)
-      await persist(record)
-      emit('task_stopped', record)
-      return record
+      return stopJob(id, 'stopped')
     }
 
+    if (entry.reason) return entry.closed
     if (entry.timeoutHandle) clearTimeout(entry.timeoutHandle)
     entry.reason = 'stopped'
-    sendSignalWithGrace(entry, 'SIGTERM', STOP_KILL_GRACE_MS)
+    sendSignalWithGrace(entry, 'SIGTERM', stopKillGraceMs)
     return entry.closed
+  }
+
+  async function stopJob(id, reason) {
+    const entry = live.get(id)
+    if (!entry || entry.kind !== 'job') return get(id)
+    if (entry.finalizing) return entry.closed
+    if (entry.terminalized) return entry.stopRecord
+    if (entry.timeoutHandle) clearTimeout(entry.timeoutHandle)
+    entry.reason = reason
+    entry.terminalized = true
+    entry.controller.abort(new Error(reason === 'timeout' ? 'task timed out' : 'task stopped'))
+    const record = {
+      ...entry.record,
+      status: reason === 'timeout' ? 'failed' : 'stopped',
+      note: reason === 'timeout' ? 'timeout' : entry.record.note,
+      finished: new Date().toISOString(),
+    }
+    entry.stopRecord = record
+    await persist(record)
+    emit(reason === 'timeout' ? 'task_failed' : 'task_stopped', record)
+    return record
+  }
+
+  async function stopAll() {
+    stopping = true
+    const entries = [...live.values()]
+    const pending = [...live.keys()].map(id => stop(id))
+    if (pending.length === 0) return 0
+    let timer
+    await Promise.race([
+      Promise.allSettled([
+        ...pending,
+        ...entries.map(entry => entry.closed),
+      ]),
+      new Promise(resolve => {
+        timer = setTimeout(resolve, shutdownTimeoutMs)
+        timer.unref?.()
+      }),
+    ])
+    if (timer) clearTimeout(timer)
+    for (const entry of live.values()) {
+      if (entry.kind === 'shell') signalProcessTree(entry, 'SIGKILL')
+      else entry.controller.abort(new Error('task manager shutdown'))
+    }
+    return pending.length
   }
 
   async function recoverOrphans() {
@@ -372,5 +518,5 @@ export function createTaskManager({ runtimeDir, env = () => ({}), cwd = process.
     return count
   }
 
-  return { startShell, startJob, list, get, tail, stop, running, recoverOrphans }
+  return { startShell, startJob, list, get, tail, stop, stopAll, running, recoverOrphans }
 }

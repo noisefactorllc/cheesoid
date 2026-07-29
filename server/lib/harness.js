@@ -1,15 +1,18 @@
 import { join, resolve, sep } from 'node:path'
-import { mkdirSync } from 'node:fs'
-import { readFile, writeFile, stat } from 'node:fs/promises'
+import { constants, mkdirSync } from 'node:fs'
+import { open, readFile, writeFile, realpath } from 'node:fs/promises'
 import { createSecretsStore } from './secrets.js'
 import { createTaskManager } from './task-manager.js'
 import { createScheduleStore } from './schedule-store.js'
 import { createWiki } from './wiki.js'
 import { createPeerStore } from './peering.js'
-import { createMediaStore } from './media.js'
+import { createMediaStore, MEDIA_MAX_BYTES } from './media.js'
 import { createAutonomy } from './autonomy.js'
 import { createSubagentRunner } from './subagent.js'
+import { createSecretBroker } from './secret-broker.js'
 import { TIER_DEFAULTS } from './model-policy.js'
+import { RoomClient } from './room-client.js'
+import { allowPrivatePeers, resolvePublicTarget } from './network-policy.js'
 
 const OVERRIDES_FILE = 'model-overrides.json'
 
@@ -33,7 +36,23 @@ export function createHarness({ personaDir, config, registry }) {
     _room: null,
   }
 
-  harness.secrets = createSecretsStore(runtimeDir)
+  const shellConfigured = (config.builtin_tools || []).includes('shell')
+  harness.secrets = createSecretsStore(runtimeDir, {
+    canSet: () => shellConfigured
+      ? 'cannot store secrets while shell capability is enabled; remove "shell" from builtin_tools and restart'
+      : null,
+  })
+  harness.secretBroker = createSecretBroker({
+    bindings: config.secret_bindings || {},
+    resolveSecret: name => harness.secrets.resolveForBroker(name),
+  })
+  harness.shellPolicy = {
+    configured: shellConfigured,
+    available: () => shellConfigured && !harness.secrets.hasAny(),
+    denialReason: () => harness.secrets.hasAny()
+      ? 'shell capability is disabled because stored secrets exist; remove the secrets and restart'
+      : 'shell capability is not enabled in builtin_tools',
+  }
   harness.autonomy = createAutonomy(config)
   harness.wiki = createWiki(personaDir)
   harness.peers = createPeerStore(runtimeDir)
@@ -41,8 +60,8 @@ export function createHarness({ personaDir, config, registry }) {
 
   harness.tasks = createTaskManager({
     runtimeDir,
-    env: () => harness.secrets.env(),
     cwd: personaDir,
+    redact: text => harness.secrets.redact(text),
     onEvent: (event) => harness._onTaskEvent(event),
   })
 
@@ -54,6 +73,7 @@ export function createHarness({ personaDir, config, registry }) {
   harness.subagents = createSubagentRunner({
     config,
     registry,
+    redactDeep: value => harness.secrets.redactDeep(value),
     buildTools: () => harness._subagentTools
       ? harness._subagentTools()
       : { definitions: [], execute: async () => ({ output: 'no tools', is_error: true }) },
@@ -83,6 +103,67 @@ export function createHarness({ personaDir, config, registry }) {
 
   harness.bindRoom = (room) => { harness._room = room }
 
+  harness.revokePeer = async (name, room = harness._room) => {
+    const removed = await harness.peers.remove(name)
+    if (!removed) return false
+    const normalizedName = String(name).toLowerCase()
+    for (const [clientName, client] of room?.roomClients || []) {
+      if (String(clientName).toLowerCase() !== normalizedName) continue
+      client.destroy()
+      room.roomClients.delete(clientName)
+      break
+    }
+    return true
+  }
+
+  /**
+   * Connect to a remote room. This is deliberately a framework method rather
+   * than a model tool: only the authenticated human route may change network
+   * topology or provide the shared credential.
+   */
+  harness.joinRemote = async ({ url: inputUrl, secret, name, actor }, room = harness._room) => {
+    if (!room) throw new Error('room not ready')
+    let url
+    try {
+      url = new URL(inputUrl)
+      if (!/^https?:$/.test(url.protocol)) throw new Error('http(s) only')
+    } catch (err) {
+      throw new Error(`Invalid url: ${err.message}`)
+    }
+    const connName = (name || url.hostname.split('.')[0]).slice(0, 40)
+    if (!connName) throw new Error('connection name required')
+    if (room.roomClients.has(connName)) {
+      throw new Error(`Already connected to a room named "${connName}".`)
+    }
+    const allowPrivate = allowPrivatePeers(config)
+    await resolvePublicTarget(url, { allowPrivate })
+    const roomConfig = {
+      url: inputUrl.replace(/\/$/, ''),
+      name: connName,
+      domain: url.hostname,
+      secret,
+      allow_private: allowPrivate,
+    }
+    const client = new RoomClient(roomConfig, {
+      agentName: config.display_name,
+      onMessage: event => room._handleRemoteEvent(event, connName),
+    })
+    room.roomClients.set(connName, client)
+    try {
+      await harness.peers.addOutbound({
+        name: connName,
+        url: roomConfig.url,
+        addedBy: actor,
+      })
+      client.connect()
+    } catch (err) {
+      room.roomClients.delete(connName)
+      client.destroy()
+      throw err
+    }
+    return { name: connName, url: roomConfig.url }
+  }
+
   /**
    * Import a file from the shared workspace into the media store so it can
    * be attached to a message. Path rules mirror shared-workspace.js.
@@ -92,9 +173,18 @@ export function createHarness({ personaDir, config, registry }) {
     const resolved = resolve(base, String(sharedPath).replace(/^\/+/, ''))
     if (resolved !== base && !resolved.startsWith(base + sep)) return null
     try {
-      const info = await stat(resolved)
-      if (!info.isFile()) return null
-      const buffer = await readFile(resolved)
+      const [realBase, realTarget] = await Promise.all([realpath(base), realpath(resolved)])
+      if (realTarget !== realBase && !realTarget.startsWith(realBase + sep)) return null
+      const handle = await open(realTarget, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+      let buffer
+      try {
+        const info = await handle.stat()
+        if (!info.isFile()) return null
+        if (info.size <= 0 || info.size > MEDIA_MAX_BYTES) return null
+        buffer = await handle.readFile()
+      } finally {
+        await handle.close()
+      }
       const name = resolved.split(sep).pop()
       const mime = guessMime(name)
       return await harness.media.save({ buffer, mime, name, by: config.display_name })
@@ -137,12 +227,19 @@ export function createHarness({ personaDir, config, registry }) {
   harness.start = async () => {
     const orphaned = await harness.tasks.recoverOrphans()
     if (orphaned) console.log(`[harness] marked ${orphaned} orphaned task(s) failed after restart`)
-    harness.schedules.start()
+    await harness.schedules.start()
     await harness.applyModelOverrides()
   }
 
+  let stopPromise = null
   harness.stop = () => {
-    harness.schedules.stop()
+    if (!stopPromise) {
+      stopPromise = (async () => {
+        harness.schedules.stop()
+        await harness.tasks.stopAll()
+      })()
+    }
+    return stopPromise
   }
 
   return harness

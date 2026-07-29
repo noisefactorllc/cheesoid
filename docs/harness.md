@@ -11,7 +11,7 @@ Everything here is file-backed under the persona directory:
 ```
 personas/my-agent/
   runtime/            # created automatically, gitignored
-    secrets.env       # operator-dropped secrets (0600, write-only)
+    secrets.env       # operator-dropped secrets (0600, destination-bound)
     peers.json        # ad-hoc peer registry (hashed secrets)
     schedules.json    # runtime schedules
     tasks/            # task records + logs
@@ -27,23 +27,25 @@ OPENROUTER_API_KEY=sk-or-... PERSONA=example npm start
 ```
 
 With no models configured, the model policy fills every tier with evaluated
-OpenRouter defaults (docs/models.md). A persona that pins any model keeps
-exactly what it pinned — the policy only fills what is empty, so existing
-deployments load unchanged.
+OpenRouter defaults (docs/models.md). A legacy persona that pins any model
+keeps its configured tiers and does not silently gain reflection,
+transcription, subagent, or sleep behavior. Set `model_policy: default` to
+opt a configured persona into the evaluated extended-tier defaults.
 
 ## Background tasks
 
 `task_start` runs work while the conversation continues:
 
-- `command:` — a shell command in the persona directory, with operator
-  secrets in its environment. 30-minute default timeout, 1MB log cap,
-  5 concurrent.
+- `command:` — available only with `builtin_tools: [shell]`; runs in the
+  persona directory with a minimal credential-free environment. 30-minute
+  default timeout, 1MB log cap, 5 concurrent.
 - `prompt:` — the work goes to a background subagent instead.
 
 The agent is notified in-room when a task finishes ("[background task] …"),
 reads the log tail, and decides whether the result matters. `task_list`,
-`task_status`, `task_stop` manage them; the Tasks sidebar panel and
-`GET /api/tasks` expose the same records to users. Tasks left running by a
+`task_status` inspects them; stopping is reserved for an authenticated human
+through the Tasks sidebar panel. `GET /api/tasks` exposes the same records to
+users. Tasks left running by a
 restart are marked failed as orphaned on boot.
 
 ## Schedules
@@ -55,7 +57,7 @@ Two layers:
 - **Runtime schedules** — created by the agent (or via API) with
   `schedule_create`: cron for recurring, `at` for one-shots ("remind me
   tomorrow at 9am" is one tool call). Persisted, restart-safe, capped at 50,
-  removable by agent (`schedule_delete`) or user (Schedules panel).
+  removable by an authenticated human (Schedules panel).
 
 At fire time the prompt arrives as a `[scheduled]` message and the agent
 acts on it with full tool access.
@@ -72,23 +74,52 @@ cannot spawn subagents or touch tasks, schedules, or peers.
 ## Secrets (write-only)
 
 The Secrets sidebar panel (or `POST /api/secrets {name, value}`) drops a
-credential to the running agent. Properties:
+credential to the running agent. Dropped secrets and arbitrary shell are
+mutually exclusive capabilities. Properties:
 
-- Values are never readable back through any API, tool, or panel — listing
-  returns names and dates only. The agent's `list_secrets` shows names.
-- Values are injected as environment variables into `shell` and shell-task
-  processes, so tools use `$STRIPE_KEY` normally.
+- Values are never readable back through any API, tool, or panel. Human-only
+  listing returns stored names and dates; the agent's `list_secrets` sees
+  only configured binding names and whether each is available.
+- Values are never injected into shell or command-task processes. Enabling
+  `shell` rejects new secret writes; existing stored secrets suppress shell
+  until they are removed and the process restarts.
+- `secret_bindings` lets `fetch_url` use a credential without revealing it:
+
+  ```yaml
+  secret_bindings:
+    github:
+      secret: GITHUB_TOKEN
+      hosts: [api.github.com]
+      header: Authorization
+      prefix: "Bearer "
+  ```
+
+  The agent calls `fetch_url` with `credential: github`; the broker attaches
+  the fixed header only to that exact HTTPS host and rechecks redirects.
 - Every SSE broadcast is filtered against current secret values — if a tool
   echoes one, the wire carries `**[Redacted by Cheesoid]**`.
-- Storage is `runtime/secrets.env`, mode 0600, base64-encoded values.
+- Values must be at least 6 bytes so exact output redaction cannot degenerate
+  into unsafe one-character matching. Storage is `runtime/secrets.env`, mode
+  0600, base64-encoded values. The
+  runtime directory and file must be real paths rather than symlinks, and
+  mutations are serialized through atomic replacement.
 
 Rotate by overwriting the same name; revoke with the panel's delete or
 `DELETE /api/secrets/:name`.
 
+Secret writes, media uploads, voice transcription, task stops, schedule
+deletes, and peer approval/revocation require an authenticated human.
+`X-GS-User-Email` is trusted only when the persona explicitly sets
+`auth_proxy: true`; direct/local deployments can opt into the clearly marked
+development bypass with `CHEESOID_ALLOW_ANONYMOUS_OPERATOR=1`. That bypass
+accepts direct loopback sockets only, is disabled behind a trusted proxy, and
+labels operator actions in the server log.
+
 ## Media
 
-Users attach files by button, drag-drop onto the chat, or paste. Limits:
-20MB, images/audio/pdf/text/json. Attachments ride on the message:
+Authenticated humans attach files by button, drag-drop onto the chat, or
+paste. Limits: 20MB per file, 200 files, and 200MB aggregate by default;
+images/audio/pdf/text/json. Attachments ride on the message:
 
 - Images (except SVG) become vision blocks for the model — on Anthropic
   natively and on openai-compat backends via data-URL image parts.
@@ -180,13 +211,14 @@ Config peering (`agents:` / `rooms:`) is unchanged. Runtime peering adds:
 
 **Inbound** — a remote cheesoid POSTs `/api/peer/join {name, secret, url}`.
 The request is stored pending (secret salted-hashed, 24h expiry), the room
-gets a banner and the host agent announces it — and only a **human in the
-room** can approve (Approve button / `POST /api/peer/approve`). Agents
+gets a structured banner without creating an agent turn — and only an
+authenticated **human in the room** can approve (Approve button /
+`POST /api/peer/approve`). Agents
 cannot approve peers; the approval endpoints reject agent credentials.
 On approval the peer's bearer secret authenticates exactly like a
-config-declared agent. Revocation (`remove_peer`, panel ×) is immediate.
+config-declared agent. Human revocation (panel ×) is immediate.
 
-**Outbound** — `join_room {url, secret}` (agent tool, autonomy high, or the
+**Outbound** — the authenticated human join control accepts `{url, secret}` (the
 Peers panel form) connects this cheesoid to a remote room at runtime, no
 config edit, no restart. The connection is recorded in the peer list;
 secrets are held in memory only.
@@ -208,11 +240,14 @@ doesn't render and `/api/voice` returns 501.
 
 ```yaml
 builtin_tools:
-  - shell        # bash in the persona dir, secrets in env, 120s/1MB caps
+  - shell        # credential-free bash in the persona dir, 120s/1MB caps
 ```
 
 `fetch_url` (public http(s), HTML→text, 1MB cap, private addresses
 refused) is on by default; suppress with `builtin_tools: [no_fetch]`.
+DNS is resolved once per hop and the validated address is pinned into the
+socket. Private peers require `network.allow_private_peers: true` (or the
+deployment override `CHEESOID_ALLOW_PRIVATE_PEERS=1`).
 
 `set_model` lets the agent pin a tier's model within its allow list
 (`model_policy.allow` plus everything already configured); pins persist
@@ -228,8 +263,8 @@ across restarts in `runtime/model-overrides.json`.
 | `POST /api/peer/join` | inbound ad-hoc join (unauthenticated, throttled, pending until approved) |
 | `POST /api/peer/approve` / `deny`, `GET /api/peers`, `DELETE /api/peers/:name` | approval + management (humans only) |
 | `POST /api/peer/join-remote` | outbound runtime join (humans only) |
-| `POST /api/media`, `GET /api/media/:id` | uploads and serving |
-| `POST /api/voice` | speech-to-text |
+| `POST /api/media`, `GET /api/media/:id` | human-only uploads and sandboxed serving |
+| `POST /api/voice` | human-only, rate/concurrency-limited speech-to-text |
 | `GET /api/wiki`, `GET /api/wiki/:slug` | read-only wiki |
 | `GET /api/memory`, `GET /api/memory/:filename` | read-only memory drill-down from wiki links |
 | `GET /api/chat/search?q=` | user-facing full-history search (thread/reply off hits) |
@@ -238,12 +273,10 @@ across restarts in `runtime/model-overrides.json`.
 
 ## Rollout notes for existing deployments
 
-The model policy never touches configured tiers, but three harness features
-activate by default on personas that predate them:
+The model policy never touches configured tiers. Harness rollout choices:
 
-- **Sleep cycle** — nightly reflection + compaction runs even without an
-  OpenRouter key (the reflection tier falls back through attention/executor
-  models). Opt out with `sleep: false`, or retime with `sleep: {schedule}`.
+- **Sleep cycle** — defaults on only for a zero-config/default-policy persona.
+  Legacy configured personas opt in with `sleep: {schedule}`.
 - **`fetch_url`** — available to the agent (and its subagents) by default.
   Opt out with `builtin_tools: [no_fetch]`.
 - **Autonomy `medium`** — self-directed turns may start tasks, schedule

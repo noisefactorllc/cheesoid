@@ -14,7 +14,7 @@ Rules:
  * result; background spawns are wrapped in a task by the harness wiring so
  * completion flows back into the room like any finished job.
  */
-export function createSubagentRunner({ config, registry, buildTools }) {
+export function createSubagentRunner({ config, registry, buildTools, redactDeep = value => value }) {
   let active = 0
   const MAX_ACTIVE = 4
 
@@ -29,14 +29,18 @@ export function createSubagentRunner({ config, registry, buildTools }) {
      * @param {string} [opts.extraSystem] appended context (e.g. thread excerpt)
      * @returns {{ text, usage, toolUses, model }}
      */
-    async run({ prompt, model, maxTurns = 10, extraSystem = null }) {
+    async run({ prompt, model, maxTurns = 10, extraSystem = null, signal = null }) {
       if (!prompt || !String(prompt).trim()) throw new Error('subagent prompt required')
       if (active >= MAX_ACTIVE) throw new Error(`subagent limit reached (${MAX_ACTIVE} active)`)
 
       const chain = model ? [model] : (tierChain(config, 'subagent') || [])
       if (!chain.length) throw new Error('no subagent model configured (set a subagent tier or model_policy)')
 
-      const tools = buildTools()
+      const rawTools = buildTools()
+      const tools = {
+        ...rawTools,
+        definitions: redactDeep(rawTools.definitions || []),
+      }
       const toolUses = []
       const onEvent = (event) => {
         if (event.type === 'tool_start') toolUses.push(event.name)
@@ -54,14 +58,15 @@ export function createSubagentRunner({ config, registry, buildTools }) {
             continue
           }
           try {
-            const system = extraSystem ? `${SUBAGENT_SYSTEM}\n\n${extraSystem}` : SUBAGENT_SYSTEM
-            const messages = [{ role: 'user', content: String(prompt) }]
+            const system = redactDeep(extraSystem ? `${SUBAGENT_SYSTEM}\n\n${extraSystem}` : SUBAGENT_SYSTEM)
+            const messages = [{ role: 'user', content: redactDeep(String(prompt)) }]
             const { usage } = await runAgent(system, messages, tools, {
               provider: resolved.provider,
               model: resolved.modelId,
               maxTurns: Math.min(maxTurns, 20),
               maxOutputTokens: 8192,
               layer: 'subagent',
+              signal,
             }, onEvent)
             const text = extractFinalText(messages)
             return { text, usage, toolUses, model: modelString }

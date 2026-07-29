@@ -59,22 +59,30 @@ export async function runSleepCycle(room, harness) {
       }
     }
 
-    await runAgent(room.systemPrompt, messages, room.tools, {
-      provider: resolved.provider,
-      model: resolved.modelId,
-      maxTurns: 8,
-      maxOutputTokens: 8192,
-      layer: 'sleep',
-    }, onEvent)
+    await runAgent(
+      room._providerPrompt(room.systemPrompt),
+      room._providerMessages(messages),
+      room._providerTools(),
+      {
+        provider: resolved.provider,
+        model: resolved.modelId,
+        maxTurns: 8,
+        maxOutputTokens: 8192,
+        layer: 'sleep',
+      },
+      onEvent,
+    )
 
     room.broadcast({ type: 'idle_done', name: agentName, model: modelString })
     const summary = streamed.trim()
-    room.recordHistory({
+    const sleepEntry = {
       type: 'idle_thought',
       text: `[sleep ${date}] ${summary || '(reflection written to files)'}`.slice(0, 4000),
       name: agentName,
       model: modelString,
-    })
+    }
+    room.recordHistory(sleepEntry)
+    if (room.harness?.secrets?.hasAny?.()) room.broadcast(sleepEntry)
 
     compactAfterSleep(room, date)
     room._a._idleCyclesSinceSleep = 0

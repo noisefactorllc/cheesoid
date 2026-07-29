@@ -9,6 +9,11 @@ import { LaneRouter, splitChatAndThought } from './lane-router.js'
 function shortMsgId() {
   return randomUUID().replace(/-/g, '').slice(0, 8)
 }
+
+export function persistedThreadIdForReply(replyTo, referenced) {
+  if (!replyTo) return null
+  return referenced?.threadId || referenced?.id || replyTo
+}
 import { Memory } from './memory.js'
 import { State } from './state.js'
 import { ToolJournal } from './tool-journal.js'
@@ -18,13 +23,18 @@ import { runAgent, runHybridAgent } from './agent.js'
 import { ProviderRegistry } from './providers/index.js'
 import { Modality } from './modality.js'
 import { RoomClient } from './room-client.js'
+import { allowPrivatePeers } from './network-policy.js'
+import { shouldEnableSleep } from './model-policy.js'
 import { WakeupScheduler } from './wakeup.js'
 import { createHarness } from './harness.js'
 import { runSleepCycle } from './sleep.js'
+import { isLegacyPeerLifecycleEntry } from './peering.js'
+import { MIN_SECRET_VALUE_BYTES } from './secrets.js'
 
 // Message sources that are framework plumbing rather than people: no message
 // ids, no UI broadcast as user chat, hidden from scrollback.
 const INTERNAL_SOURCES = new Set(['system', 'webhook', 'wakeup', 'schedule', 'task'])
+const THREADABLE_HISTORY_TYPES = new Set(['user_message', 'assistant_message', 'idle_thought'])
 
 // Matches common API key patterns: sk-*, key-*, vendor_sk_*, Bearer tokens, hex/base64 strings 32+ chars
 const API_KEY_PATTERN = /\b(sk-[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9]+_sk_[a-zA-Z0-9_-]{20,}|key-[a-zA-Z0-9_-]{20,}|ghp_[a-zA-Z0-9]{36,}|ghu_[a-zA-Z0-9]{36,}|xoxb-[a-zA-Z0-9-]{20,}|xoxp-[a-zA-Z0-9-]{20,}|AKIA[A-Z0-9]{16}|eyJ[a-zA-Z0-9_-]{40,}\.[a-zA-Z0-9_-]{40,}|[a-zA-Z0-9_-]{40,}(?=["'\s,}\]\\]))/g
@@ -34,19 +44,14 @@ const API_KEY_PATTERN = /\b(sk-[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9]+_sk_[a-zA-Z0-9_-]{
  * serving over any JSON endpoint. Returns the entry unchanged when clean.
  */
 export function redactHistoryEntry(entry, extraValues = null) {
-  if (!entry) return entry
-  let out = entry
-  if (typeof entry.text === 'string') {
-    const text = redactKeys(entry.text, extraValues)
-    if (text !== entry.text) out = { ...out, text }
+  if (typeof entry === 'string') return redactKeys(entry, extraValues)
+  if (Array.isArray(entry)) return entry.map(value => redactHistoryEntry(value, extraValues))
+  if (entry && typeof entry === 'object') {
+    return Object.fromEntries(
+      Object.entries(entry).map(([key, value]) => [key, redactHistoryEntry(value, extraValues)]),
+    )
   }
-  if (entry.replyToPreview?.text) {
-    const previewText = redactKeys(entry.replyToPreview.text, extraValues)
-    if (previewText !== entry.replyToPreview.text) {
-      out = { ...out, replyToPreview: { ...entry.replyToPreview, text: previewText } }
-    }
-  }
-  return out
+  return entry
 }
 
 export function redactKeys(str, extraValues = null) {
@@ -55,7 +60,11 @@ export function redactKeys(str, extraValues = null) {
   // appear — the write-only guarantee holds even if a tool echoes one.
   if (extraValues) {
     for (const value of extraValues) {
-      if (value && value.length >= 6 && out.includes(value)) {
+      if (
+        value
+        && Buffer.byteLength(value, 'utf8') >= MIN_SECRET_VALUE_BYTES
+        && out.includes(value)
+      ) {
         out = out.split(value).join('**[Redacted by Cheesoid]**')
       }
     }
@@ -539,41 +548,45 @@ export class Room {
     // Replay recent history into agent context
     const recent = await this.chatLog.recent(MAX_HISTORY)
     if (recent.length > 0) {
-      this.messages.push({ role: 'user', content: '--- PREVIOUS SESSION TRANSCRIPT (for continuity — not a live conversation) ---' })
+      this.messages.push(this._redactContextMessage({ role: 'user', content: '--- PREVIOUS SESSION TRANSCRIPT (for continuity — not a live conversation) ---' }))
       for (const entry of recent) {
         // Skip accumulated welcome messages from previous restarts
         if (entry.type === 'system' && entry.text?.startsWith('Welcome to ')) continue
+        // Older harness builds persisted unauthenticated peer lifecycle text
+        // as system history. Keep it in human scrollback, but never replay it
+        // as a model turn.
+        if (isLegacyPeerLifecycleEntry(entry)) continue
 
         const ts = entry.timestamp ? new Date(entry.timestamp).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit', hour12: false }) : '??:??'
         if (entry.type === 'assistant_message' || entry.type === 'idle_thought') {
           // Annotate past DM replies this agent sent, so the model can see
           // in history that "I replied privately to X here".
           if (entry.dm_from && entry.dm_to) {
-            this.messages.push({
+            this.messages.push(this._redactContextMessage({
               role: 'user',
               content: `(system) Previous turn was a private DM you sent to ${entry.dm_to}.`,
-            })
+            }))
           }
-          this.messages.push({ role: 'assistant', content: entry.text })
+          this.messages.push(this._redactContextMessage({ role: 'assistant', content: entry.text }))
         } else if (entry.type === 'user_message') {
           const prefix = entry.name || 'anon'
           if (entry.dm_from && entry.dm_to) {
             // Past DM addressed to this agent (or recorded between two
             // other agents). Annotate so the model doesn't read it as a
             // shared-room message.
-            this.messages.push({
+            this.messages.push(this._redactContextMessage({
               role: 'user',
               content: `(system) Previous message was a private 1:1 DM from ${entry.dm_from} to ${entry.dm_to}.\n\n${prefix}: ${entry.text}`,
-            })
+            }))
           } else {
-            this.messages.push({ role: 'user', content: `${prefix}: ${entry.text}` })
+            this.messages.push(this._redactContextMessage({ role: 'user', content: `${prefix}: ${entry.text}` }))
           }
         } else if (entry.type === 'system') {
-          this.messages.push({ role: 'user', content: `* ${entry.text}` })
+          this.messages.push(this._redactContextMessage({ role: 'user', content: `* ${entry.text}` }))
         }
       }
       this.history = recent // also restore scrollback
-      this.messages.push({ role: 'user', content: '--- END OF TRANSCRIPT — SESSION IS NOW LIVE ---' })
+      this.messages.push(this._redactContextMessage({ role: 'user', content: '--- END OF TRANSCRIPT — SESSION IS NOW LIVE ---' }))
       console.log(`[${config.name}] Replayed ${recent.length} history entries`)
     }
 
@@ -585,7 +598,10 @@ export class Room {
     // Connect to configured remote rooms
     for (const roomConfig of config.rooms || []) {
       const configName = roomConfig.name
-      const client = new RoomClient(roomConfig, {
+      const client = new RoomClient({
+        ...roomConfig,
+        allow_private: roomConfig.allow_private === true || allowPrivatePeers(config),
+      }, {
         agentName: config.display_name,
         onMessage: (event) => this._handleRemoteEvent(event, configName),
       })
@@ -613,7 +629,7 @@ export class Room {
     // `sleep: false`; retime with `sleep: { schedule: '0 5 * * *' }`. The
     // default minute is derived from the persona name so co-hosted agents
     // don't all dream at the same instant.
-    if (config.sleep !== false) {
+    if (shouldEnableSleep(config)) {
       const nameHash = [...(config.name || 'agent')].reduce((h, c) => (h * 31 + c.charCodeAt(0)) >>> 0, 0)
       const sleepScheduler = new WakeupScheduler(this.persona, {
         name: 'sleep',
@@ -689,9 +705,12 @@ export class Room {
     // every downstream egress (scrollback, search, threads, replay) serves
     // what lands here. Egress-side redaction still runs for entries recorded
     // before a secret existed.
-    if (entry.text && this.harness?.secrets) {
-      const redacted = redactKeys(entry.text, this.harness.secrets.values())
-      if (redacted !== entry.text) entry = { ...entry, text: redacted }
+    if (this.harness?.secrets) {
+      entry = redactHistoryEntry(entry, this.harness.secrets.values())
+    }
+
+    if (entry.id && !entry.replyTo && !entry.threadId && THREADABLE_HISTORY_TYPES.has(entry.type)) {
+      entry.threadId = entry.id
     }
 
     // Thread stamping: a reply inherits its parent's thread, whose root is
@@ -749,8 +768,19 @@ export class Room {
 
   // Send event to all connected clients
   broadcast(event) {
+    // Stateful streaming and exact-value redaction are incompatible: a secret
+    // can be split across arbitrary provider chunks. When any secret exists,
+    // suppress content deltas and deliver only the complete, recursively
+    // redacted turn below. Non-content progress events still stream.
+    if (
+      this.harness?.secrets?.hasAny?.()
+      && new Set(['text_delta', 'thought_delta', 'thinking_delta', 'idle_text_delta']).has(event.type)
+    ) return
     const tagged = this.roomName ? { ...event, room: this.roomName } : event
-    const data = redactKeys(`data: ${JSON.stringify(tagged)}\n\n`, this.harness?.secrets?.values?.())
+    const safe = this.harness?.secrets?.redactDeep
+      ? this.harness.secrets.redactDeep(tagged)
+      : redactHistoryEntry(tagged, this.harness?.secrets?.values?.())
+    const data = `data: ${JSON.stringify(safe)}\n\n`
     for (const client of this.clients) {
       try {
         const ok = client.write(data)
@@ -830,9 +860,9 @@ export class Room {
       }
       if (model) thoughtEntry.model = model
       this.recordHistory(thoughtEntry)
-      // Thought was already streamed live via thought_delta; no re-broadcast
-      // of the full text here. The entry id + turnId are what scrollback and
-      // reaction association need.
+      if (this.harness?.secrets?.hasAny?.()) {
+        this.broadcast(thoughtEntry)
+      }
       this.broadcast({ type: 'assistant_thought_id', id: thoughtId, turnId })
     }
 
@@ -895,6 +925,9 @@ export class Room {
     }
     if (model) entry.model = model
     this.recordHistory(entry)
+    if (this.harness?.secrets?.hasAny?.()) {
+      this.broadcast(entry)
+    }
     this.broadcast({ type: 'assistant_thought_id', id: thoughtId })
   }
 
@@ -999,7 +1032,7 @@ export class Room {
     return domain ? `@${domain}` : ''
   }
 
-  addAgentMessage(name, text, { source = 'user', model, replyTo } = {}) {
+  async addAgentMessage(name, text, { source = 'user', model, replyTo } = {}) {
     const msgId = shortMsgId()
     const idTag = replyTo ? ` [${msgId}] (replying to ${replyTo})` : ` [${msgId}]`
     this._safeAppendMessage({ role: 'user', content: `${name}${idTag}: ${text}` })
@@ -1008,7 +1041,10 @@ export class Room {
       event.replyTo = replyTo
       // Visitor replies target recent messages — quote from in-memory history
       // so the referenced content rides on the event.
-      const ref = this.history.find(h => h.id === replyTo)
+      let ref = this.history.find(h => h.id === replyTo)
+      if (!ref && this.chatLog) {
+        try { ref = await this.chatLog.findById(replyTo) } catch {}
+      }
       if (ref) {
         event.replyToPreview = {
           name: ref.name || this.persona.config.display_name,
@@ -1016,11 +1052,15 @@ export class Room {
           timestamp: ref.timestamp || null,
         }
       }
+      event.threadId = persistedThreadIdForReply(replyTo, ref)
     }
     this.broadcast(event)
     const histEntry = { type: 'user_message', name, text, room: this.roomName, id: msgId }
     if (model) histEntry.model = model
-    if (replyTo) histEntry.replyTo = replyTo
+    if (replyTo) {
+      histEntry.replyTo = replyTo
+      histEntry.threadId = event.threadId
+    }
     if (event.replyToPreview) histEntry.replyToPreview = event.replyToPreview
     this.recordHistory(histEntry)
     this.lastActivity = Date.now()
@@ -1078,9 +1118,10 @@ export class Room {
     //
     // For tool_start/tool_result and idle streaming events: broadcast to SSE.
     // For idle_thought: also record in host history for scrollback.
-    this.broadcast({ ...event, agentName: name, visiting: true })
+    const authenticatedEvent = { ...event, name, agentName: name, visiting: true }
+    this.broadcast(authenticatedEvent)
     if (event.type === 'idle_thought') {
-      this.recordHistory(event)
+      this.recordHistory(authenticatedEvent)
     }
   }
 
@@ -1233,11 +1274,86 @@ export class Room {
    * insert a user message between tool_use and tool_result, which the API rejects.
    */
   _safeAppendMessage(message) {
+    message = this._redactContextMessage(message)
     if (this.busy) {
       this._pendingContextMessages = this._pendingContextMessages || []
       this._pendingContextMessages.push(message)
     } else {
       this.messages.push(message)
+    }
+  }
+
+  _redactContextMessage(message) {
+    const redact = text => this.harness?.secrets?.redact
+      ? this.harness.secrets.redact(text)
+      : text
+    if (typeof message?.content === 'string') {
+      return { ...message, content: redact(message.content) }
+    }
+    if (Array.isArray(message?.content)) {
+      return {
+        ...message,
+        content: message.content.map(block => (
+          block?.type === 'text' && typeof block.text === 'string'
+            ? { ...block, text: redact(block.text) }
+            : block
+        )),
+      }
+    }
+    return message
+  }
+
+  _providerMessages(messages = this.messages) {
+    const secrets = this.harness?.secrets
+    if (!secrets?.redactDeep) return messages
+    return messages.map((message) => {
+      const projected = { ...message }
+      if (typeof message.content === 'string') {
+        projected.content = secrets.redact(message.content)
+      } else if (Array.isArray(message.content)) {
+        projected.content = message.content.map((block) => {
+          if (!block || typeof block !== 'object') return block
+          const clean = { ...block }
+          for (const field of ['text', 'thinking', 'content', 'input', 'arguments']) {
+            if (Object.prototype.hasOwnProperty.call(clean, field)) {
+              clean[field] = secrets.redactDeep(clean[field])
+            }
+          }
+          return clean
+        })
+      }
+      if (projected.tool_calls) {
+        projected.tool_calls = projected.tool_calls.map(call => ({
+          ...call,
+          function: call.function
+            ? { ...call.function, arguments: secrets.redact(call.function.arguments) }
+            : call.function,
+        }))
+      }
+      return projected
+    })
+  }
+
+  _providerPrompt(prompt) {
+    const secrets = this.harness?.secrets
+    if (!secrets?.redact) return prompt
+    if (typeof prompt === 'string') return secrets.redact(prompt)
+    if (!Array.isArray(prompt)) return prompt
+    return prompt.map((part) => {
+      if (!part || typeof part !== 'object') return part
+      const clean = { ...part }
+      if (typeof clean.text === 'string') clean.text = secrets.redact(clean.text)
+      if (typeof clean.content === 'string') clean.content = secrets.redact(clean.content)
+      return clean
+    })
+  }
+
+  _providerTools(tools = this.tools) {
+    const secrets = this.harness?.secrets
+    if (!tools || !secrets?.redactDeep) return tools
+    return {
+      ...tools,
+      definitions: secrets.redactDeep(tools.definitions || []),
     }
   }
 
@@ -1266,7 +1382,10 @@ export class Room {
       // elsewhere in the codebase. We do NOT prefix the user's text itself
       // — prefixes tend to get mimicked back into the reply.
       const dmMarker = `(system) The next message is a private 1:1 DM from ${from}. Your reply goes only to ${from}, not to any shared room.`
-      this.messages.push({ role: 'user', content: `${dmMarker}\n\n${from}: ${text}` })
+      this.messages.push(this._redactContextMessage({
+        role: 'user',
+        content: `${dmMarker}\n\n${from}: ${text}`,
+      }))
       this.recordHistory({ type: 'user_message', name: from, text, dm_from: from, dm_to: this.persona.config.display_name })
 
       const hasModality = this.modality?.isModal
@@ -1332,7 +1451,7 @@ export class Room {
       )
       const prompt = composeSystem(basePrompt, { state: this.state })
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
-      const result = await agentFn(prompt, this.messages, this.tools, agentConfig, (event) => {
+      const result = await agentFn(this._providerPrompt(prompt), this._providerMessages(), this._providerTools(), agentConfig, (event) => {
         if (event.type === 'text_delta') assistantText += event.text
         else if (event.type === 'done' && event.model) assistantModel = event.model
         this._recordToolUse(event)
@@ -1383,7 +1502,7 @@ export class Room {
             console.error(`[${this.persona.config.name}] Queued DM error:`, err.message)
           })
         } else {
-          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast, _replyTo: next._replyTo, _messageId: next._messageId, _attachments: next._attachments, _replyPreview: next._replyPreview, _replyReferenced: next._replyReferenced }).catch(err => {
+          targetRoom._processMessage(next.room, next.name, next.text, { _roomChannel: next._roomChannel, _alreadyBroadcast: next._alreadyBroadcast, _replyTo: next._replyTo, _messageId: next._messageId, _attachments: next._attachments, _replyPreview: next._replyPreview, _replyReferenced: next._replyReferenced, _replyThreadId: next._replyThreadId }).catch(err => {
             console.error(`[${this.persona.config.name}] Queued message error:`, err.message)
           })
         }
@@ -1409,6 +1528,7 @@ export class Room {
         const queuedMessageId = shortMsgId()
         let queuedPreview = null
         let queuedReferenced = null
+        let queuedThreadId = null
         if (queuedReplyTo) {
           queuedReferenced = this.history.find(h => h.id === queuedReplyTo) || null
           if (!queuedReferenced && this.chatLog) {
@@ -1421,10 +1541,11 @@ export class Room {
               timestamp: queuedReferenced.timestamp || null,
             }
           }
+          queuedThreadId = persistedThreadIdForReply(queuedReplyTo, queuedReferenced)
         }
         this.broadcast({ type: 'user_message', name, text, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }), ...(queuedPreview && { replyToPreview: queuedPreview }), ...(queuedAttachments.length > 0 && { attachments: queuedAttachments }) })
-        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }), ...(queuedPreview && { replyToPreview: queuedPreview }), ...(queuedAttachments.length > 0 && { attachments: queuedAttachments }) })
-        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true, _replyTo: queuedReplyTo, _messageId: queuedMessageId, _attachments: queuedAttachments, _replyPreview: queuedPreview, _replyReferenced: queuedReferenced })
+        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, id: queuedMessageId, ...(queuedReplyTo && { replyTo: queuedReplyTo }), ...(queuedThreadId && { threadId: queuedThreadId }), ...(queuedPreview && { replyToPreview: queuedPreview }), ...(queuedAttachments.length > 0 && { attachments: queuedAttachments }) })
+        this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel, _alreadyBroadcast: true, _replyTo: queuedReplyTo, _messageId: queuedMessageId, _attachments: queuedAttachments, _replyPreview: queuedPreview, _replyReferenced: queuedReferenced, _replyThreadId: queuedThreadId })
       } else {
         this._messageQueue.push({ room, name, text, _roomInstance: this, _roomChannel: options._roomChannel })
       }
@@ -1474,6 +1595,7 @@ export class Room {
       // referenced message too — one lookup, context for everyone.
       let replyContext = ''
       let replyPreview = options._replyPreview || null
+      let replyThreadId = options._replyThreadId || null
       if (replyTo) {
         // Queue-drained replies carry the already-resolved entry — never
         // stream the full history twice for one reply.
@@ -1492,6 +1614,7 @@ export class Room {
             timestamp: referenced.timestamp || null,
           }
         }
+        replyThreadId = persistedThreadIdForReply(replyTo, referenced)
         if (referenced) {
           const refWho = referenced.name || this.persona.config.display_name
           const refWhen = referenced.timestamp
@@ -1528,9 +1651,9 @@ export class Room {
           } catch { }
         }
       }
-      this.messages.push(imageBlocks.length > 0
+      this.messages.push(this._redactContextMessage(imageBlocks.length > 0
         ? { role: 'user', content: [{ type: 'text', text: contextText }, ...imageBlocks] }
-        : { role: 'user', content: contextText })
+        : { role: 'user', content: contextText }))
 
       // Multi-agent floor control.
       // 1. Explicit addressing (@Name, Name:) updates the floor
@@ -1574,7 +1697,9 @@ export class Room {
         if (!INTERNAL_SOURCES.has(name) && !options._alreadyBroadcast) {
           this.broadcast({ type: 'user_message', name, text, moderator, floor, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }), ...(replyPreview && { replyToPreview: replyPreview }), ...(attachments.length > 0 && { attachments }) })
         }
-        this.recordHistory({ type: 'user_message', name, text, room: this.roomName, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }), ...(replyPreview && { replyToPreview: replyPreview }), ...(attachments.length > 0 && { attachments }) })
+        if (!options._alreadyBroadcast) {
+          this.recordHistory({ type: 'user_message', name, text, room: this.roomName, ...(messageId && { id: messageId }), ...(replyTo && { replyTo }), ...(replyThreadId && { threadId: replyThreadId }), ...(replyPreview && { replyToPreview: replyPreview }), ...(attachments.length > 0 && { attachments }) })
+        }
       }
 
       // Modality: step up when we have the floor or are orchestrating
@@ -1767,8 +1892,10 @@ export class Room {
       // closing `>` arrives — no safe-prefix math needed here.
       let laneRouter = new LaneRouter()
       const emitLaneSegments = (segments, baseEvent) => {
+        const suppressContentStream = this.harness?.secrets?.hasAny?.()
         for (const seg of segments) {
           if (!seg.text) continue
+          if (suppressContentStream) continue
           const evtType = seg.lane === 'thought' ? 'thought_delta' : 'text_delta'
           const out = { ...baseEvent, type: evtType, text: seg.text }
           if (this._pendingRoom === 'home') {
@@ -1836,7 +1963,11 @@ export class Room {
           this.broadcast(event)
         } else {
           const client = this.roomClients.get(this._pendingRoom)
-          if (client) client.sendEvent(event, this._pendingRoomChannel)
+          if (client) {
+            const safeEvent = this.harness?.secrets?.redactDeep?.(event)
+              || redactHistoryEntry(event, this.harness?.secrets?.values?.())
+            client.sendEvent(safeEvent, this._pendingRoomChannel)
+          }
         }
       }
 
@@ -1851,7 +1982,7 @@ export class Room {
       // addendum stays OUT of the user messages to prevent echo leak.
       const prompt = composeSystem(basePrompt, { addendum: moderatorAddendum, state: this.state })
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
-      const result = await agentFn(prompt, this.messages, this.tools, agentConfig, onEvent)
+      const result = await agentFn(this._providerPrompt(prompt), this._providerMessages(), this._providerTools(), agentConfig, onEvent)
       this.messages = result.messages
       // Trim context to prevent unbounded growth
       this.messages = trimContextToBudget(this.messages, { maxTokens: this.contextBudget })
@@ -1893,7 +2024,8 @@ export class Room {
         const client = this.roomClients.get(this._pendingRoom)
         const visitorText = stripChatNarration(assistantText)
         if (client && visitorText) {
-          await client.sendMessage(visitorText, { model: assistantModel, room: this._pendingRoomChannel })
+          const safeVisitorText = this.harness?.secrets?.redact?.(visitorText) || visitorText
+          await client.sendMessage(safeVisitorText, { model: assistantModel, room: this._pendingRoomChannel })
         } else if (options._backchannelTrigger && !visitorText) {
           // Visitor was triggered but produced no visible text (model called
           // internal instead of speaking, or produced empty output). Log it
@@ -2076,7 +2208,9 @@ export class Room {
           if (event.type === 'text_delta') {
             idleText += event.text
             this.broadcast({ type: 'idle_text_delta', text: event.text, name: agentName })
-            if (remoteClient) remoteClient.sendEvent({ type: 'idle_text_delta', text: event.text, name: agentName }, remoteChannel)
+            if (remoteClient && !this.harness?.secrets?.hasAny?.()) {
+              remoteClient.sendEvent({ type: 'idle_text_delta', text: event.text, name: agentName }, remoteChannel)
+            }
           } else if (event.type === 'done') {
             if (event.model) idleModel = event.model
             this.broadcast({ type: 'idle_done', model: event.model, name: agentName })
@@ -2099,7 +2233,7 @@ export class Room {
         : await assemblePrompt(this.persona.dir, this.persona.config, this.persona.plugins, { isClaude: false, toolJournal: this.toolJournal })
       const prompt = composeSystem(basePrompt, { state: this.state })
       const agentFn = (hasOrchestrator || hasModality) ? runHybridAgent : runAgent
-      const result = await agentFn(prompt, idleMessages, this.tools, agentConfig, onEvent)
+      const result = await agentFn(this._providerPrompt(prompt), this._providerMessages(idleMessages), this._providerTools(), agentConfig, onEvent)
 
       // Degenerate detection: discard if output is trivial with no real work
       const outputTokens = (result.usage?.output_tokens || 0)
@@ -2137,7 +2271,11 @@ export class Room {
           if (idleModel) histEntry.model = idleModel
           this.broadcast(histEntry)
           this.recordHistory(histEntry)
-          if (remoteClient) remoteClient.sendEvent(histEntry, remoteChannel)
+          if (remoteClient) {
+            const safeEntry = this.harness?.secrets?.redactDeep?.(histEntry)
+              || redactHistoryEntry(histEntry, this.harness?.secrets?.values?.())
+            remoteClient.sendEvent(safeEntry, remoteChannel)
+          }
         }
       }
 
@@ -2215,6 +2353,7 @@ export class Room {
         }
       }
     }, interval)
+    this.idleTimer.unref?.()
   }
 
   _clearIdleTimer() {
@@ -2241,6 +2380,7 @@ export class Room {
         }
       }
     }, HEARTBEAT_INTERVAL)
+    this._heartbeatTimer.unref?.()
   }
 
   _stopHeartbeat() {
@@ -2264,5 +2404,6 @@ export class Room {
     }
     this.clients.clear()
     this.participants.clear()
+    return this.harness?.stop?.() || Promise.resolve()
   }
 }

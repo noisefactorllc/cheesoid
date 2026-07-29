@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert'
-import { applyModelPolicy, TIER_DEFAULTS, tierChain } from '../server/lib/model-policy.js'
+import { applyModelPolicy, TIER_DEFAULTS, tierChain, shouldEnableSleep } from '../server/lib/model-policy.js'
 
 test('fills all tiers for a zero-config persona when openrouter is available', () => {
   const config = { name: 'bare' }
@@ -22,9 +22,31 @@ test('never touches core tiers when the persona configured any model', () => {
   assert.deepStrictEqual(config.model, ['google/gemma-4-31b-it:openrouter'])
   assert.strictEqual(config.cognition, undefined)
   assert.strictEqual(config.attention, undefined)
-  // Extended tiers still fill — they are new features with no legacy behavior.
+  assert.strictEqual(config.reflection, undefined)
+  assert.strictEqual(config.transcription, undefined)
+  assert.strictEqual(config.subagent, undefined)
+})
+
+test('model_policy default explicitly opts a configured persona into all defaults', () => {
+  const config = { name: 'opted-in', model: ['legacy:anthropic'], model_policy: 'default' }
+  applyModelPolicy(config, { hasOpenRouter: true })
+  assert.deepStrictEqual(config.model, ['legacy:anthropic'])
   assert.deepStrictEqual(config.reflection, TIER_DEFAULTS.reflection)
   assert.deepStrictEqual(config.subagent, TIER_DEFAULTS.subagent)
+})
+
+test('an allow-list-only model_policy object does not opt a legacy persona into paid defaults', () => {
+  const config = {
+    name: 'legacy-policy',
+    model: ['legacy:anthropic'],
+    model_policy: { allow: ['legacy:anthropic'] },
+  }
+  const filled = applyModelPolicy(config, { hasOpenRouter: true })
+  assert.deepStrictEqual(filled, [])
+  assert.strictEqual(config.reflection, undefined)
+  assert.strictEqual(config.transcription, undefined)
+  assert.strictEqual(config.subagent, undefined)
+  assert.equal(shouldEnableSleep(config), false)
 })
 
 test('orchestrator counts as configured — no core fill', () => {
@@ -70,4 +92,11 @@ test('tierChain falls back through sensible tiers', () => {
   assert.deepStrictEqual(tierChain({ model: ['m'] }, 'subagent'), ['m'])
   assert.strictEqual(tierChain({}, 'transcription'), null)
   assert.strictEqual(tierChain({ model: ['m'] }, 'transcription'), null)
+})
+
+test('sleep defaults only for policy-default personas or explicit sleep config', () => {
+  assert.equal(shouldEnableSleep({ model: ['legacy'] }), false)
+  assert.equal(shouldEnableSleep({ model: ['legacy'], sleep: false }), false)
+  assert.equal(shouldEnableSleep({ model: ['legacy'], sleep: { schedule: '0 4 * * *' } }), true)
+  assert.equal(shouldEnableSleep({ _modelPolicy: { defaultsEnabled: true } }), true)
 })

@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createSecretsStore, MAX_SECRET_VALUE_BYTES } from '../server/lib/secrets.js'
-import { mkdtemp, stat } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, stat, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -36,8 +36,8 @@ describe('secrets store', () => {
   it('names() returns just the names', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
-    await store.set('FOO', 'a')
-    await store.set('BAR', 'b')
+    await store.set('FOO', 'value-a')
+    await store.set('BAR', 'value-b')
     const names = await store.names()
     assert.deepEqual([...names].sort(), ['BAR', 'FOO'])
   })
@@ -45,7 +45,7 @@ describe('secrets store', () => {
   it('remove() returns true when a secret existed and false otherwise', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
-    await store.set('TEMP', 'value')
+    await store.set('TEMP', 'value-long')
     assert.equal(await store.remove('TEMP'), true)
     assert.equal(await store.remove('TEMP'), false)
     assert.equal(await store.remove('NEVER_SET'), false)
@@ -70,6 +70,27 @@ describe('secrets store', () => {
     assert.ok(values.includes('second-value'))
   })
 
+  it('redactDeep masks secrets recursively without changing result shape', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const store = createSecretsStore(runtimeDir)
+    await store.set('TOKEN', 'recursive-secret-value')
+    const redacted = store.redactDeep({
+      output: 'saw recursive-secret-value',
+      nested: ['recursive-secret-value', { ok: true }],
+    })
+    assert.deepEqual(redacted, {
+      output: 'saw **[Redacted by Cheesoid]**',
+      nested: ['**[Redacted by Cheesoid]**', { ok: true }],
+    })
+  })
+
+  it('redacts accepted multibyte secrets by bytes rather than code units', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const store = createSecretsStore(runtimeDir)
+    await store.set('UNICODE_KEY', '密钥')
+    assert.equal(store.redact('echoed 密钥'), 'echoed **[Redacted by Cheesoid]**')
+  })
+
   it('rejects invalid secret names', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
@@ -84,6 +105,7 @@ describe('secrets store', () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
     await assert.rejects(() => store.set('EMPTY', ''), /invalid secret value/)
+    await assert.rejects(() => store.set('TOO_SHORT', 'short'), /at least 6 bytes/)
     await assert.rejects(() => store.set('TOO_BIG', 'x'.repeat(MAX_SECRET_VALUE_BYTES + 1)), /invalid secret value/)
     await store.set('AT_LIMIT', 'x'.repeat(MAX_SECRET_VALUE_BYTES))
     assert.equal(store.env().AT_LIMIT.length, MAX_SECRET_VALUE_BYTES)
@@ -92,7 +114,7 @@ describe('secrets store', () => {
   it('sets secrets.env file mode to 0o600', { skip: process.platform === 'win32' }, async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
-    await store.set('FOO', 'bar')
+    await store.set('FOO', 'bar-value')
     const info = await stat(join(runtimeDir, 'secrets.env'))
     assert.equal(info.mode & 0o777, 0o600)
   })
@@ -105,6 +127,50 @@ describe('secrets store', () => {
     const store2 = createSecretsStore(runtimeDir)
     assert.deepEqual(store2.env(), { SHARED: 'shared-value' })
     assert.deepEqual(store2.values(), ['shared-value'])
+  })
+
+  it('refuses to read a symlinked secrets file', { skip: process.platform === 'win32' }, async () => {
+    const runtimeDir = await makeRuntimeDir()
+    await mkdir(runtimeDir, { recursive: true })
+    const outside = join(runtimeDir, '..', 'outside.env')
+    await writeFile(outside, 'STOLEN=c2VjcmV0\n')
+    await symlink(outside, join(runtimeDir, 'secrets.env'))
+
+    const store = createSecretsStore(runtimeDir)
+    assert.throws(() => store.env(), /unsafe secrets file/)
+  })
+
+  it('refuses a symlinked runtime directory', { skip: process.platform === 'win32' }, async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const outside = join(runtimeDir, '..', 'outside-runtime')
+    await mkdir(outside)
+    await symlink(outside, runtimeDir)
+
+    const store = createSecretsStore(runtimeDir)
+    await assert.rejects(() => store.set('TOKEN', 'do-not-redirect'), /unsafe secrets directory/)
+  })
+
+  it('serializes concurrent mutations without losing persisted values', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const store = createSecretsStore(runtimeDir)
+    await Promise.all([
+      store.set('ONE', 'first-value'),
+      store.set('TWO', 'second-value'),
+      store.set('THREE', 'third-value'),
+    ])
+    await Promise.all([
+      store.remove('TWO'),
+      store.set('FOUR', 'fourth-value'),
+    ])
+
+    const fresh = createSecretsStore(runtimeDir)
+    assert.deepEqual(fresh.env(), {
+      ONE: 'first-value',
+      THREE: 'third-value',
+      FOUR: 'fourth-value',
+    })
+    const files = await readFile(join(runtimeDir, 'secrets.env'), 'utf8')
+    assert.doesNotMatch(files, /\.tmp/)
   })
 
   it('overwrites an existing name on a second set()', async () => {

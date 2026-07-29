@@ -161,22 +161,24 @@ Every persona automatically gets these built-in tools (no need to define them):
 - `search_memory` — unified substring search across memory files AND wiki pages
 - `search_history` — search full chat history across all sessions by keyword
 - `wiki_read` / `wiki_write` / `wiki_delete` / `wiki_list` / `wiki_search` — the agent's private knowledge wiki, with `[[memory:file.md]]` drill-down links
-- `task_start` / `task_list` / `task_status` / `task_stop` — background shell/subagent work
-- `schedule_create` / `schedule_list` / `schedule_delete` — the agent's own calendar
+- `task_start` / `task_list` / `task_status` — background subagent work; command tasks require shell opt-in. Stopping tasks is human-only.
+- `schedule_create` / `schedule_list` — the agent's own calendar. Deleting schedules is human-only.
 - `spawn_subagent` — delegate self-contained work to a fresh worker context
 - `read_thread` / `reply_to_message` / `react_to_message` — thread-aware conversation
 - `share_media` / `read_media` — media in and out of the room
-- `list_peers` / `remove_peer` / `join_room` — ad-hoc federation (join_room needs `autonomy: high` on self-directed turns)
-- `list_secrets` — names of operator-dropped secrets (values are never readable)
+- `list_peers` — inspect ad-hoc federation; joining and revoking peers are human-only topology controls
+- `list_secrets` — configured credential-binding names and readiness only (backing secret names and values are never readable)
 - `set_model` — pin a tier's model within the allow list
 - `fetch_url` — read a public web page as text
 - `send_chat_message` — send a message to the chat room
 - `list_shared` / `read_shared` / `write_shared` — shared workspace file access (when `/shared` is mounted)
-- `shell` — opt-in via `builtin_tools: [shell]`: bash in the persona directory with secrets in the environment
+- `shell` — opt-in via `builtin_tools: [shell]`: credential-free bash in the persona directory
 
 ### Configuring tool access
 
-Tools run as the server process, so they inherit its environment. Pass API keys and credentials as environment variables, then reference them in your tool implementations:
+Persona-authored tool modules are trusted server code and inherit the server
+environment. Pass their credentials as environment variables and reference
+them in the implementation:
 
 ```bash
 ANTHROPIC_API_KEY=sk-... \
@@ -274,7 +276,7 @@ docker run -p 3000:3000 \
 - **Threads** — replies chain into first-class threads the agent can reconstruct after they scroll away
 - **Voice** — spoken input (evaluated transcription tier) and browser TTS out, with a hands-free mode
 - **Sleep cycle** — nightly reflection distills the day into journal/wiki/memory, then compacts live context
-- **Write-only secrets** — drop credentials from the UI; values inject into tool environments and are never readable back
+- **Destination-bound secrets** — drop credentials from the UI; brokered tools attach them only to configured HTTPS hosts, never shell/task environments or readable APIs
 - **Ad-hoc peering** — any cheesoid joins any other with a URL + shared key, gated by in-room human approval
 - **Dynamic models** — seven evaluated model tiers over OpenRouter with zero config, per-tier overrides, and agent-side `set_model` within an allow list
 - **Persistent state** — mood, energy, focus, open threads survive restarts

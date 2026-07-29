@@ -37,6 +37,13 @@ describe('Room history', () => {
     assert.equal(room.history[0].text, 'hi there')
   })
 
+  it('stamps new thread roots at write time', async () => {
+    const { Room } = await import('../server/lib/chat-session.js')
+    const room = new Room(mockPersona())
+    room.recordHistory({ type: 'user_message', id: 'root9000', name: 'alice', text: 'root' })
+    assert.equal(room.history[0].threadId, 'root9000')
+  })
+
   it('caps history at MAX_HISTORY entries', async () => {
     const { Room, MAX_HISTORY } = await import('../server/lib/chat-session.js')
     const room = new Room(mockPersona())
@@ -58,6 +65,84 @@ describe('Room history', () => {
     room.recordHistory({ type: 'assistant_message', text: 'hi' })
     const scrollback = room.getScrollback()
     assert.equal(scrollback.length, 2)
+  })
+
+  it('redacts stored credentials before appending live model context', async () => {
+    const { Room } = await import('../server/lib/chat-session.js')
+    const room = new Room(mockPersona())
+    room.harness = {
+      secrets: {
+        redact: text => String(text).replaceAll('live-secret-value', '[redacted]'),
+        values: () => ['live-secret-value'],
+      },
+    }
+    room._safeAppendMessage({
+      role: 'user',
+      content: 'visitor echoed live-secret-value',
+    })
+    assert.equal(room.messages.at(-1).content, 'visitor echoed [redacted]')
+  })
+
+  it('re-redacts the provider projection when a secret is added after context', async () => {
+    const { Room } = await import('../server/lib/chat-session.js')
+    const room = new Room(mockPersona())
+    room.messages.push({
+      role: 'user',
+      content: 'old context contains later-secret-value',
+    })
+    room.harness = {
+      secrets: {
+        redact: text => String(text).replaceAll('later-secret-value', '[redacted]'),
+        redactDeep(value) {
+          if (typeof value === 'string') return this.redact(value)
+          if (Array.isArray(value)) return value.map(item => this.redactDeep(item))
+          if (value && typeof value === 'object') {
+            return Object.fromEntries(Object.entries(value).map(([key, item]) => [key, this.redactDeep(item)]))
+          }
+          return value
+        },
+        values: () => ['later-secret-value'],
+      },
+    }
+    const projected = room._providerMessages()
+    assert.equal(projected[0].content, 'old context contains [redacted]')
+    assert.equal(room.messages[0].content, 'old context contains later-secret-value')
+    assert.equal(
+      room._providerPrompt([{ role: 'system', content: 'memory has later-secret-value' }])[0].content,
+      'memory has [redacted]',
+    )
+  })
+
+  it('redacts credential values from non-text history metadata before persistence', async () => {
+    const { Room } = await import('../server/lib/chat-session.js')
+    const room = new Room(mockPersona())
+    room.harness = {
+      secrets: {
+        values: () => ['metadata-secret'],
+      },
+    }
+    room.recordHistory({
+      type: 'user_message',
+      name: 'metadata-secret',
+      text: 'hello',
+      emoji: 'metadata-secret',
+      attachments: [{ id: 'abcddcba', name: 'metadata-secret.txt', mime: 'text/plain' }],
+      replyToPreview: { name: 'metadata-secret', text: 'preview metadata-secret' },
+    })
+    assert.doesNotMatch(JSON.stringify(room.history.at(-1)), /metadata-secret/)
+  })
+
+  it('agent replies to old mid-thread entries retain the stored root id', async () => {
+    const { Room } = await import('../server/lib/chat-session.js')
+    const room = new Room(mockPersona())
+    room.chatLog = {
+      async findById() {
+        return { id: 'mid00001', threadId: 'root0001', text: 'old reply', name: 'alice' }
+      },
+      async append() {},
+    }
+    await room.addAgentMessage('Visitor', 'continuing', { replyTo: 'mid00001' })
+    assert.equal(room.history.at(-1).threadId, 'root0001')
   })
 
   describe('_handleAssistantTextTurn (per-turn history flushing)', () => {

@@ -178,9 +178,7 @@ export class RoomManager {
     return [...names]
   }
 
-  destroy() {
-    for (const room of this.rooms()) {
-      room.destroy()
-    }
+  async destroy() {
+    await Promise.all([...this.rooms()].map(room => room.destroy()))
   }
 }

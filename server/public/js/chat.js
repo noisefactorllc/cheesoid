@@ -1,3 +1,5 @@
+import { renderSafeMarkdown } from './safe-markdown.js'
+
 const namePrompt = document.getElementById('name-prompt')
 const nameInput = document.getElementById('name-input')
 const nameBtn = document.getElementById('name-btn')
@@ -605,6 +607,26 @@ function handleEvent(e) {
           assistantEl.appendChild(createToolbar(event.id))
         }
       }
+      break
+
+    case 'assistant_message':
+      // Whole-turn fallback used when stored secrets disable chunk streaming.
+      // Reuse the pending assistant bubble when one exists; otherwise create
+      // one (remote/unsolicited messages may not have a preceding user event).
+      if (!assistantEl) {
+        assistantEl = appendMessage('assistant', '', event.name || null, null, !!event.name, event.model, event.id)
+      }
+      if (thinkingEl) {
+        thinkingEl.remove()
+        thinkingEl = null
+      }
+      assistantBuffer = event.text || ''
+      {
+        const body = assistantEl.querySelector('.message-body')
+        if (body) body.innerHTML = renderMarkdown(assistantBuffer)
+      }
+      if (event.id) assistantEl.dataset.messageId = event.id
+      if (event.turnId) assistantEl.dataset.turnId = event.turnId
       break
 
     case 'assistant_thought_id':
@@ -1718,19 +1740,7 @@ function forceScrollToBottom() {
   messages.scrollTop = messages.scrollHeight
 }
 
-function renderMarkdown(text) {
-  if (typeof marked !== 'undefined') {
-    return marked.parse(text)
-  }
-  // Fallback if marked not loaded
-  return text
-    .replace(/```(\w*)\n([\s\S]*?)```/g, '<pre><code>$2</code></pre>')
-    .replace(/`([^`]+)`/g, '<code>$1</code>')
-    .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
-    .replace(/\*([^*]+)\*/g, '<em>$1</em>')
-    .replace(/\n\n/g, '<br><br>')
-    .replace(/\n/g, '<br>')
-}
+const renderMarkdown = renderSafeMarkdown
 
 function truncate(str, max) {
   return str.length > max ? str.slice(0, max) + '...' : str

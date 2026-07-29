@@ -1,6 +1,6 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, writeFile, mkdir } from 'node:fs/promises'
+import { mkdtemp, writeFile, mkdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createTaskManager } from '../server/lib/task-manager.js'
@@ -61,11 +61,12 @@ describe('createTaskManager: startShell', () => {
     await waitUntil(() => events.some((e) => e.type === 'task_done' && e.task.id === record.id))
   })
 
-  it('defaults name to the first 40 chars of the command', async () => {
+  it('does not persist the raw command or derive the name from it', async () => {
     const { tm } = await setup()
     const command = 'echo this-is-a-fairly-long-command-that-should-be-truncated-for-the-default-name'
     const record = await tm.startShell({ command })
-    assert.equal(record.name, command.slice(0, 40))
+    assert.equal(record.name, 'shell task')
+    assert.equal(record.command, null)
     await waitFinished(tm, record.id)
   })
 
@@ -88,16 +89,39 @@ describe('createTaskManager: startShell', () => {
     assert.ok(elapsed < 3000, `expected timeout finalize well under 3s, took ${elapsed}ms`)
   })
 
-  it('injects env() values into the shell environment', async () => {
-    const { tm } = await setup({ env: () => ({ MY_SECRET: 'x42' }) })
-    const record = await tm.startShell({ command: 'echo $MY_SECRET' })
-    await waitFinished(tm, record.id)
-    const log = await tm.tail(record.id)
-    assert.ok(log.includes('x42'), `log should contain injected env value, got: ${log}`)
+  it('does not inherit the server environment', async () => {
+    process.env.CHEESOID_PARENT_ONLY_SECRET = 'must-not-cross-process-boundary'
+    try {
+      const { tm } = await setup()
+      const record = await tm.startShell({
+        command: 'printf "%s" "${CHEESOID_PARENT_ONLY_SECRET-unset}"',
+      })
+      await waitFinished(tm, record.id)
+      const log = await tm.tail(record.id)
+      assert.equal(log, 'unset')
+    } finally {
+      delete process.env.CHEESOID_PARENT_ONLY_SECRET
+    }
   })
 })
 
 describe('createTaskManager: concurrency + stop', () => {
+  it('reserves capacity before asynchronous persistence', async () => {
+    const { tm } = await setup({ maxConcurrent: 1 })
+    let release
+    const gate = new Promise(resolve => { release = resolve })
+    const starts = await Promise.allSettled([
+      tm.startJob({ name: 'one', run: async () => gate }),
+      tm.startJob({ name: 'two', run: async () => gate }),
+    ])
+    assert.equal(starts.filter(result => result.status === 'fulfilled').length, 1)
+    assert.equal(starts.filter(result => result.status === 'rejected').length, 1)
+    assert.match(starts.find(result => result.status === 'rejected').reason.message, /task limit reached/)
+    release('done')
+    const accepted = starts.find(result => result.status === 'fulfilled').value
+    await waitFinished(tm, accepted.id)
+  })
+
   it('throws at the concurrency limit and allows new tasks after stop() frees a slot', async () => {
     const { tm } = await setup({ maxConcurrent: 1 })
     const first = await tm.startShell({ command: 'sleep 30' })
@@ -126,6 +150,30 @@ describe('createTaskManager: concurrency + stop', () => {
     assert.ok(stopped.finished)
     assert.equal(tm.running(), 0)
     await waitUntil(() => events.some((e) => e.type === 'task_stopped' && e.task.id === record.id))
+  })
+
+  it('stop() terminates the shell process group, including descendants', { skip: process.platform === 'win32' }, async () => {
+    const { tm, runtimeDir } = await setup({ stopKillGraceMs: 100 })
+    const pidFile = join(runtimeDir, 'descendant.pid')
+    const script = `const {spawn}=require("node:child_process");const fs=require("node:fs");const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));setInterval(()=>{},1000)`
+    const record = await tm.startShell({ command: `node -e '${script}'` })
+    const descendantPid = await waitUntil(async () => {
+      try { return Number(await readFile(pidFile, 'utf8')) || null } catch { return null }
+    })
+
+    try {
+      await tm.stop(record.id)
+      await waitUntil(() => {
+        try {
+          process.kill(descendantPid, 0)
+          return false
+        } catch (err) {
+          return err.code === 'ESRCH'
+        }
+      }, { timeout: 2000 })
+    } finally {
+      try { process.kill(descendantPid, 'SIGKILL') } catch {}
+    }
   })
 
   it('stop() on an already-finished task returns its record without error', async () => {
@@ -162,6 +210,20 @@ describe('createTaskManager: startJob', () => {
     await waitUntil(() => events.some((e) => e.type === 'task_failed' && e.task.id === record.id))
   })
 
+  it('redacts job names and results before writing them to disk', async () => {
+    const secret = 'persist-me-secret'
+    const { tm } = await setup({
+      redact: text => String(text).split(secret).join('[redacted]'),
+    })
+    const record = await tm.startJob({
+      name: `job ${secret}`,
+      run: async () => `result ${secret}`,
+    })
+    await waitFinished(tm, record.id)
+    assert.doesNotMatch(JSON.stringify(await tm.get(record.id)), /persist-me-secret/)
+    assert.doesNotMatch(await tm.tail(record.id), /persist-me-secret/)
+  })
+
   it('counts jobs toward maxConcurrent and stop() cancels a job without erroring the caller', async () => {
     const { tm } = await setup({ maxConcurrent: 1 })
     let releaseJob
@@ -173,13 +235,78 @@ describe('createTaskManager: startJob', () => {
 
     const stopped = await tm.stop(record.id)
     assert.equal(stopped.status, 'stopped')
-    assert.equal(tm.running(), 0)
+    assert.equal(tm.running(), 1, 'an abort-ignoring job must retain its capacity slot')
+    await assert.rejects(
+      () => tm.startJob({ name: 'must-wait', run: async () => 'nope' }),
+      /task limit reached/,
+    )
 
     releaseJob()
-    // Give the discarded promise a tick to settle; the record must stay 'stopped'.
-    await new Promise((resolve) => setTimeout(resolve, 100))
+    await waitUntil(() => tm.running() === 0)
     const after = await tm.get(record.id)
     assert.equal(after.status, 'stopped')
+  })
+
+  it('does not let a late stop race overwrite a job that already settled', async () => {
+    const { tm } = await setup()
+    let resolveJob
+    const record = await tm.startJob({
+      name: 'settling',
+      run: () => new Promise(resolve => { resolveJob = resolve }),
+    })
+    resolveJob('x'.repeat(64 * 1024))
+    await new Promise(resolve => setImmediate(resolve))
+
+    const stopResult = await tm.stop(record.id)
+    const finished = await waitFinished(tm, record.id)
+    assert.equal(finished.status, 'done')
+    assert.equal(stopResult.status, 'done')
+  })
+
+  it('passes an AbortSignal to jobs and aborts it on stop()', async () => {
+    const { tm } = await setup()
+    let observedSignal
+    const record = await tm.startJob({
+      name: 'abortable',
+      run: async ({ signal }) => {
+        observedSignal = signal
+        await new Promise((resolve, reject) => {
+          signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+        })
+      },
+    })
+    const stopped = await tm.stop(record.id)
+    assert.equal(stopped.status, 'stopped')
+    assert.ok(observedSignal instanceof AbortSignal)
+    assert.equal(observedSignal.aborted, true)
+  })
+
+  it('stopAll aborts jobs and stops shells before returning', async () => {
+    const { tm } = await setup({ stopKillGraceMs: 100 })
+    const job = await tm.startJob({
+      name: 'job',
+      run: async ({ signal }) => new Promise((resolve, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      }),
+    })
+    const shell = await tm.startShell({ command: 'sleep 30' })
+    await tm.stopAll()
+    assert.equal(tm.running(), 0)
+    assert.equal((await tm.get(job.id)).status, 'stopped')
+    assert.equal((await tm.get(shell.id)).status, 'stopped')
+  })
+
+  it('arms the shutdown deadline before awaiting a stubborn shell', async () => {
+    const { tm } = await setup({
+      stopKillGraceMs: 10_000,
+      shutdownTimeoutMs: 30,
+    })
+    await tm.startShell({
+      command: `node -e 'process.on("SIGTERM",()=>{});setInterval(()=>{},1000)'`,
+    })
+    const started = Date.now()
+    await tm.stopAll()
+    assert.ok(Date.now() - started < 1000, 'shutdown must be bounded before shell close')
   })
 })
 

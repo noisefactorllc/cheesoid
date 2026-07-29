@@ -68,14 +68,24 @@ memory:
 ## and re-pin its own models.
 # autonomy: medium
 
-## Opt-in built-in tools. `shell` gives the agent bash in its persona
-## directory with operator-dropped secrets in the environment — grant it the
-## way you would grant a person production access.
+## Opt-in built-in tools. `shell` gives the agent credential-free bash in its
+## persona directory. Shell and operator-dropped secrets are mutually
+## exclusive capabilities.
 # builtin_tools:
 #   - shell
 
-## Sleep cycle: nightly reflection + context compaction. On by default at
-## 04:00 server time; retime or disable:
+## Destination-bound credentials for fetch_url. The agent sees the binding
+## name, never the secret value. Exact HTTPS hosts only.
+# secret_bindings:
+#   github:
+#     secret: GITHUB_TOKEN
+#     hosts: [api.github.com]
+#     header: Authorization
+#     prefix: "Bearer "
+
+## Sleep cycle: nightly reflection + context compaction. Zero-config and
+## `model_policy: default` personas get a default schedule; configured legacy
+## personas opt in explicitly:
 # sleep:
 #   schedule: "0 5 * * *"
 # sleep: false
@@ -99,9 +109,12 @@ memory:
 #     secret: ${AGENT_SECRET_OTHER}
 ## Join other cheesoids at boot (ad-hoc joins also work at runtime):
 # rooms:
-#   - url: http://other-cheesoid:3000
+#   - url: https://other-cheesoid.example
 #     name: other-room
 #     secret: ${ROOM_SECRET_OTHER}
+## Private peers are refused unless the operator opts in:
+# network:
+#   allow_private_peers: true
 
 ## Scheduled wakeups (config-owned; the agent manages its own runtime
 ## schedules with the schedule_create tool):
@@ -112,4 +125,5 @@ memory:
 #     prompt: prompts/wakeup.md
 
 ## Behind an auth proxy (e.g. groundsquirrel):
+## Only when enabled does Cheesoid trust X-GS-User-Email as a human identity.
 # auth_proxy: true

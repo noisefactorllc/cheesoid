@@ -5,7 +5,7 @@ import { createAutonomy } from '../server/lib/autonomy.js'
 test('user-originated turns are never gated', () => {
   const a = createAutonomy({ autonomy: 'low' })
   assert.strictEqual(a.gate('task_start', 'user').allowed, true)
-  assert.strictEqual(a.gate('join_room', 'user').allowed, true)
+  assert.strictEqual(a.gate('set_model', 'user').allowed, true)
   assert.strictEqual(a.gate('shell', 'webhook').allowed, true)
 })
 
@@ -17,18 +17,17 @@ test('low autonomy blocks self-directed initiative', () => {
   assert.strictEqual(a.gate('send_chat_message', 'sleep').allowed, false)
 })
 
-test('medium (the default) permits tasks and speech but not topology', () => {
+test('medium (the default) permits tasks and speech but not model changes', () => {
   const a = createAutonomy({})
   assert.strictEqual(a.level, 'medium')
   assert.strictEqual(a.gate('task_start', 'idle').allowed, true)
   assert.strictEqual(a.gate('send_chat_message', 'wakeup').allowed, true)
-  assert.strictEqual(a.gate('join_room', 'idle').allowed, false)
   assert.strictEqual(a.gate('set_model', 'idle').allowed, false)
 })
 
 test('high permits everything', () => {
   const a = createAutonomy({ autonomy: 'high' })
-  assert.strictEqual(a.gate('join_room', 'idle').allowed, true)
+  assert.strictEqual(a.gate('task_start', 'idle').allowed, true)
   assert.strictEqual(a.gate('set_model', 'sleep').allowed, true)
 })
 

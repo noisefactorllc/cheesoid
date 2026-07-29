@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { Memory, MEMORY_READ_CAP_BYTES, capUtf8Bytes } from '../server/lib/memory.js'
-import { mkdtemp, readFile, mkdir, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, mkdir, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -68,6 +68,37 @@ describe('Memory', () => {
     const mem = new Memory(personaDir, 'memory/')
     const content = await mem.read('nope.md')
     assert.equal(content, null)
+  })
+
+  it('rejects traversal, absolute, nested, and non-Markdown filenames', async () => {
+    const { personaDir } = await makeMemoryDir()
+    const mem = new Memory(personaDir, 'memory/')
+    for (const filename of [
+      '../runtime/secrets.env',
+      '/tmp/escape.md',
+      'nested/topic.md',
+      '..\\runtime\\secret.md',
+      'notes.txt',
+    ]) {
+      await assert.rejects(() => mem.read(filename), /invalid memory filename/)
+      await assert.rejects(() => mem.write(filename, 'nope'), /invalid memory filename/)
+      await assert.rejects(() => mem.append(filename, 'nope'), /invalid memory filename/)
+    }
+  })
+
+  it('does not follow symlinks for reads, writes, appends, sizes, or listings', async () => {
+    const { personaDir, memDir } = await makeMemoryDir()
+    const outside = join(personaDir, 'outside-secret')
+    await writeFile(outside, 'do-not-read-or-overwrite')
+    await symlink(outside, join(memDir, 'linked.md'))
+    const mem = new Memory(personaDir, 'memory/')
+
+    assert.equal(await mem.read('linked.md'), null)
+    assert.equal(await mem.sizeOf('linked.md'), null)
+    assert.ok(!(await mem.list()).includes('linked.md'))
+    await assert.rejects(() => mem.write('linked.md', 'overwrite'), /symlink|symbolic|ELOOP/i)
+    await assert.rejects(() => mem.append('linked.md', 'append'), /symlink|symbolic|ELOOP/i)
+    assert.equal(await readFile(outside, 'utf8'), 'do-not-read-or-overwrite')
   })
 
   describe('readCapped', () => {

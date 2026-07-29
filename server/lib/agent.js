@@ -183,6 +183,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
   let rescueFailed = false
 
   while (iterations < maxTurns) {
+    config.signal?.throwIfAborted()
     // Intent routing for providers that support it (open models).
     let toolChoice = undefined
     if (provider.supportsIntentRouting && tools.definitions.length > 0) {
@@ -211,6 +212,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
               system: systemPrompt,
               messages,
               tools: tools.definitions,
+              signal: config.signal,
             })
             console.log(`[intent-router] toolChoice=${toolChoice} (llm-classifier)`)
           } catch (err) {
@@ -246,6 +248,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
           serverTools: config.serverTools || [],
           thinkingBudget: config.thinkingBudget || null,
           toolChoice: toolChoice === 'none' ? undefined : toolChoice,
+          signal: config.signal,
         },
         onEvent,
       )
@@ -344,6 +347,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     // Execute tools
     const toolResults = []
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
+      config.signal?.throwIfAborted()
       let result
       try {
         result = await tools.execute(block.name, block.input, { onEvent, model: config.model })

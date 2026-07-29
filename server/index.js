@@ -10,14 +10,10 @@ import chatRouter from './routes/chat.js'
 import healthRouter from './routes/health.js'
 import webhookRouter from './routes/webhook.js'
 import harnessRouter from './routes/harness.js'
+import { setUiSecurityHeaders } from './lib/security-headers.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
-
-// Deployments sit behind a reverse proxy (Caddy + auth proxy) — without
-// this, req.ip is the proxy address and per-IP throttles become one
-// global bucket.
-app.set('trust proxy', 1)
 
 app.use(express.json())
 
@@ -26,6 +22,11 @@ const personaName = process.env.PERSONA || 'example'
 const personaDir = join(__dirname, '..', 'personas', personaName)
 const persona = await loadPersona(personaDir)
 console.log(`Loaded persona: ${persona.config.display_name} (${persona.config.name})`)
+
+// Only trust forwarding headers when the operator explicitly declares the
+// authenticated reverse-proxy boundary. Direct deployments must use the
+// socket address so X-Forwarded-For cannot bypass per-IP throttles.
+app.set('trust proxy', persona.config.auth_proxy === true ? 1 : false)
 
 // Only require ANTHROPIC_API_KEY if anthropic is actually needed: no
 // providers block, no non-anthropic provider, and no OpenRouter key (which
@@ -44,6 +45,7 @@ if (!persona.config.headless) {
     const theme = persona.config.theme || 'terminal'
     const dataTheme = persona.config.data_theme || theme
     const html = await readFile(join(__dirname, 'public', 'index.html'), 'utf8')
+    setUiSecurityHeaders(res)
     res.type('html').send(
       html.replace('{{THEME}}', theme).replace('{{DATA_THEME}}', dataTheme)
     )
@@ -60,7 +62,21 @@ Object.defineProperty(app.locals, 'room', {
 })
 // Runtime ad-hoc peers authenticate alongside config-declared agents.
 const peerStore = app.locals.rooms.resolve()?.harness?.peers || null
-app.locals.authMiddleware = createAuthMiddleware(persona.config.agents || null, peerStore)
+app.locals.authMiddleware = createAuthMiddleware(persona.config.agents || null, peerStore, {
+  trustProxyHeaders: persona.config.auth_proxy === true,
+})
+
+// Global JSON egress projection: a credential can be dropped after state,
+// memory, wiki, peer, schedule, task, or chat data was persisted. Redacting
+// at the application boundary covers current and future JSON endpoints.
+app.use((req, res, next) => {
+  const sendJson = res.json.bind(res)
+  res.json = (body) => {
+    const secrets = app.locals.rooms.resolve()?.harness?.secrets
+    return sendJson(secrets?.redactDeep ? secrets.redactDeep(body) : body)
+  }
+  next()
+})
 
 const requiredPaths = persona.config.startup_checks?.required_paths || []
 app.locals.startupCheckResults = runStartupChecks(requiredPaths)
@@ -73,6 +89,26 @@ app.use(harnessRouter)
 
 // Start
 const port = process.env.PORT || 3000
-app.listen(port, () => {
+const server = app.listen(port, () => {
   console.log(`Cheesoid running on port ${port}`)
 })
+
+let shuttingDown = false
+async function shutdown(signal) {
+  if (shuttingDown) return
+  shuttingDown = true
+  console.log(`Cheesoid shutting down (${signal})`)
+  await app.locals.rooms.destroy()
+  await new Promise(resolve => server.close(resolve))
+}
+
+for (const signal of ['SIGINT', 'SIGTERM']) {
+  process.once(signal, () => {
+    shutdown(signal)
+      .then(() => process.exit(0))
+      .catch((err) => {
+        console.error(`Shutdown failed: ${err.message}`)
+        process.exit(1)
+      })
+  })
+}

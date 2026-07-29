@@ -12,6 +12,8 @@ import { join } from 'node:path'
 // yet without every caller having to remember to `mkdir` first.
 
 export const MEDIA_MAX_BYTES = 20 * 1024 * 1024
+export const MEDIA_MAX_TOTAL_BYTES = 200 * 1024 * 1024
+export const MEDIA_MAX_FILES = 200
 
 // image/audio/pdf/text/json only — the set the chat UI can render inline or
 // hand to a vision-capable model. Case-insensitive: uploads arrive with
@@ -76,33 +78,89 @@ function isText(meta) {
  * Create a media store rooted at `${runtimeDir}/media`. Returns
  * { save, load, meta, list, remove, isImage, isText }.
  */
-export function createMediaStore(runtimeDir) {
+export function createMediaStore(runtimeDir, {
+  maxTotalBytes = MEDIA_MAX_TOTAL_BYTES,
+  maxFiles = MEDIA_MAX_FILES,
+} = {}) {
   const dir = join(runtimeDir, 'media')
   const ready = mkdir(dir, { recursive: true })
+  let mutation = Promise.resolve()
 
   const filePath = (id, ext) => join(dir, `${id}.${ext}`)
   const sidecarPath = (id) => join(dir, `${id}.json`)
+
+  function serializeMutation(fn) {
+    const result = mutation.then(fn, fn)
+    mutation = result.catch(() => {})
+    return result
+  }
+
+  async function allMetadata() {
+    await ready
+    let entries
+    try {
+      entries = await readdir(dir)
+    } catch {
+      return []
+    }
+    const metas = []
+    for (const entry of entries) {
+      if (!entry.endsWith('.json')) continue
+      try {
+        metas.push(JSON.parse(await readFile(join(dir, entry), 'utf8')))
+      } catch (err) {
+        console.log(`[media] skipping corrupt sidecar ${entry}: ${err.message}`)
+      }
+    }
+    return metas
+  }
+
+  async function preflight(bytes) {
+    const requestedBytes = Number(bytes)
+    if (!Number.isFinite(requestedBytes) || requestedBytes < 0) {
+      throw new Error('invalid media size')
+    }
+    if (requestedBytes > MEDIA_MAX_BYTES) throw new Error('media too large')
+    const existing = await allMetadata()
+    const totalBytes = existing.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0)
+    if (totalBytes + requestedBytes > maxTotalBytes) {
+      throw new Error(`aggregate media byte quota exceeded (${maxTotalBytes} bytes)`)
+    }
+    if (existing.length >= maxFiles) {
+      throw new Error(`media file-count quota exceeded (${maxFiles} files)`)
+    }
+    return true
+  }
 
   async function save({ buffer, mime, name, by } = {}) {
     if (!Buffer.isBuffer(buffer) || buffer.length === 0) throw new Error('empty media')
     if (buffer.length > MEDIA_MAX_BYTES) throw new Error('media too large')
     if (typeof mime !== 'string' || !ALLOWED_MIME.test(mime)) throw new Error(`unsupported media type: ${mime}`)
 
-    await ready
-    const id = randomUUID().replace(/-/g, '').slice(0, 8)
-    const ext = extFor(mime)
-    const meta = {
-      id,
-      name: sanitizeName(name),
-      mime,
-      bytes: buffer.length,
-      ext,
-      uploaded: new Date().toISOString(),
-      by: by ?? null,
-    }
-    await writeFile(filePath(id, ext), buffer)
-    await writeFile(sidecarPath(id), JSON.stringify(meta, null, 2))
-    return meta
+    return serializeMutation(async () => {
+      const existing = await allMetadata()
+      const totalBytes = existing.reduce((sum, item) => sum + (Number(item.bytes) || 0), 0)
+      if (totalBytes + buffer.length > maxTotalBytes) {
+        throw new Error(`aggregate media byte quota exceeded (${maxTotalBytes} bytes)`)
+      }
+      if (existing.length >= maxFiles) {
+        throw new Error(`media file-count quota exceeded (${maxFiles} files)`)
+      }
+      const id = randomUUID().replace(/-/g, '').slice(0, 8)
+      const ext = extFor(mime)
+      const meta = {
+        id,
+        name: sanitizeName(name),
+        mime,
+        bytes: buffer.length,
+        ext,
+        uploaded: new Date().toISOString(),
+        by: by ?? null,
+      }
+      await writeFile(filePath(id, ext), buffer)
+      await writeFile(sidecarPath(id), JSON.stringify(meta, null, 2))
+      return meta
+    })
   }
 
   async function meta(id) {
@@ -127,32 +185,19 @@ export function createMediaStore(runtimeDir) {
   }
 
   async function list({ limit = 50 } = {}) {
-    await ready
-    let entries
-    try {
-      entries = await readdir(dir)
-    } catch {
-      return []
-    }
-    const metas = []
-    for (const entry of entries) {
-      if (!entry.endsWith('.json')) continue
-      try {
-        metas.push(JSON.parse(await readFile(join(dir, entry), 'utf8')))
-      } catch (err) {
-        console.log(`[media] skipping corrupt sidecar ${entry}: ${err.message}`)
-      }
-    }
+    const metas = await allMetadata()
     metas.sort((a, b) => new Date(b.uploaded) - new Date(a.uploaded))
     return metas.slice(0, limit)
   }
 
-  async function remove(id) {
-    const m = await meta(id)
-    if (!m) return false
-    await Promise.allSettled([unlink(filePath(id, m.ext)), unlink(sidecarPath(id))])
-    return true
+  function remove(id) {
+    return serializeMutation(async () => {
+      const m = await meta(id)
+      if (!m) return false
+      await Promise.allSettled([unlink(filePath(id, m.ext)), unlink(sidecarPath(id))])
+      return true
+    })
   }
 
-  return { save, load, meta, list, remove, isImage, isText }
+  return { save, load, meta, list, remove, preflight, isImage, isText }
 }

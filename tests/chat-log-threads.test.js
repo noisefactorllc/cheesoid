@@ -4,6 +4,7 @@ import { mkdtemp, mkdir, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { ChatLog } from '../server/lib/chat-log.js'
+import { persistedThreadIdForReply } from '../server/lib/chat-session.js'
 
 async function makeHistory(days) {
   const dir = await mkdtemp(join(tmpdir(), 'chatlog-threads-'))
@@ -31,6 +32,18 @@ const DAYS = {
   ],
 }
 
+test('a reply to an old mid-thread entry preserves the persisted root id', () => {
+  assert.strictEqual(
+    persistedThreadIdForReply('reply901', {
+      id: 'reply901',
+      replyTo: 'root9000',
+      threadId: 'root9000',
+    }),
+    'root9000',
+  )
+  assert.strictEqual(persistedThreadIdForReply('missing1', null), 'missing1')
+})
+
 test('findById reaches entries in old files', async () => {
   const log = await makeHistory(DAYS)
   const entry = await log.findById('aaaa0001')
@@ -52,6 +65,12 @@ test('threadEntries reconstructs a chain spanning months of files', async () => 
   const mid = await log.threadEntries('aaaa0002')
   assert.strictEqual(mid.threadId, 'aaaa0001')
   assert.strictEqual(mid.entries.length, 4)
+
+  // A legacy root has no explicit threadId. It must use link reconstruction
+  // instead of the modern persisted-id fast path.
+  const root = await log.threadEntries('aaaa0001')
+  assert.strictEqual(root.threadId, 'aaaa0001')
+  assert.deepStrictEqual(root.entries.map(e => e.id), ['aaaa0001', 'aaaa0002', 'aaaa0003', 'aaaa0004'])
 })
 
 test('threadEntries isolates unrelated messages and handles singletons', async () => {
@@ -83,12 +102,18 @@ test('threadEntries truncates the middle but pins the root and newest', async ()
   assert.strictEqual(result.entries.at(-1).id, 'msg00030')
 })
 
-test('threadEntries degrades to a single-entry thread when the anchor fell out of the link index', async () => {
-  // Tiny index cap forces eviction of the oldest entries — the anchor must
-  // still resolve via findById rather than being reported unknown.
-  const log = await makeHistory(DAYS)
-  const result = await log.threadEntries('aaaa0001', { maxIndex: 2 })
-  assert.ok(result, 'system-surfaced ids must always resolve')
-  assert.strictEqual(result.entries.length >= 1, true)
-  assert.strictEqual(result.entries.some(e => e.id === 'aaaa0001'), true)
+test('persisted threadId reconstructs a full thread even beyond the legacy link-index cap', async () => {
+  const root = { type: 'user_message', id: 'root9000', threadId: 'root9000', text: 'root' }
+  const filler = Array.from({ length: 20 }, (_, i) => ({
+    type: 'user_message',
+    id: `fill${String(i).padStart(4, '0')}`,
+    text: `unrelated ${i}`,
+  }))
+  const replies = [
+    { type: 'assistant_message', id: 'reply901', replyTo: 'root9000', threadId: 'root9000', text: 'one' },
+    { type: 'user_message', id: 'reply902', replyTo: 'reply901', threadId: 'root9000', text: 'two' },
+  ]
+  const log = await makeHistory({ '2026-07-01': [root, ...filler, ...replies] })
+  const result = await log.threadEntries('root9000', { maxIndex: 2 })
+  assert.deepStrictEqual(result.entries.map(entry => entry.id), ['root9000', 'reply901', 'reply902'])
 })

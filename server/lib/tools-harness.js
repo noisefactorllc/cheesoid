@@ -1,8 +1,7 @@
 import { execFile } from 'node:child_process'
 import { promisify } from 'node:util'
-import { lookup } from 'node:dns/promises'
-import { isIP } from 'node:net'
-import { RoomClient } from './room-client.js'
+import { minimalChildEnv } from './task-manager.js'
+import { requestPublic } from './network-policy.js'
 
 const execFileAsync = promisify(execFile)
 
@@ -11,43 +10,6 @@ const SHELL_TIMEOUT_MS = 120 * 1000
 const FETCH_CAP_BYTES = 1024 * 1024
 const FETCH_TIMEOUT_MS = 20 * 1000
 const FETCH_MAX_REDIRECTS = 5
-
-// fetch_url must not reach the host's internal network — an agent tool that
-// can is an SSRF primitive. Checked per redirect hop, against both the
-// hostname AND every address it resolves to (a public name pointing at a
-// private IP is the classic bypass).
-const PRIVATE_HOSTNAME = /^(localhost|.*\.localhost|host\.docker\.internal|.*\.internal)$/i
-
-function isPrivateAddress(ip) {
-  if (isIP(ip) === 4) {
-    const [a, b] = ip.split('.').map(Number)
-    return a === 127 || a === 10 || a === 0
-      || (a === 169 && b === 254)
-      || (a === 172 && b >= 16 && b <= 31)
-      || (a === 192 && b === 168)
-      || (a === 100 && b >= 64 && b <= 127) // CGNAT
-  }
-  const v6 = ip.toLowerCase()
-  return v6 === '::1' || v6 === '::'
-    || v6.startsWith('fe80') || v6.startsWith('fc') || v6.startsWith('fd')
-    || v6.startsWith('::ffff:127.') || v6.startsWith('::ffff:10.') || v6.startsWith('::ffff:192.168.')
-    || /^::ffff:172\.(1[6-9]|2\d|3[01])\./.test(v6) || v6.startsWith('::ffff:169.254.')
-}
-
-/** Throws unless the URL's host is public — by name and by every resolved address. */
-async function assertPublicHost(url) {
-  const hostname = url.hostname.replace(/^\[|\]$/g, '')
-  if (process.env.CHEESOID_ALLOW_LOCAL_FETCH) return
-  if (PRIVATE_HOSTNAME.test(hostname)) throw new Error(`refusing private host ${hostname}`)
-  if (isIP(hostname)) {
-    if (isPrivateAddress(hostname)) throw new Error(`refusing private address ${hostname}`)
-    return
-  }
-  const addrs = await lookup(hostname, { all: true, verbatim: true })
-  for (const { address } of addrs) {
-    if (isPrivateAddress(address)) throw new Error(`refusing ${hostname} — it resolves to private address ${address}`)
-  }
-}
 
 const cap = (text, limit = OUTPUT_CAP) => {
   const s = String(text ?? '')
@@ -95,15 +57,6 @@ export function buildHarnessTools(harness, room, config, memory) {
       },
     },
     {
-      name: 'task_stop',
-      description: 'Stop a running background task.',
-      input_schema: {
-        type: 'object',
-        properties: { id: { type: 'string', description: 'The 8-character task id' } },
-        required: ['id'],
-      },
-    },
-    {
       name: 'schedule_create',
       description: 'Schedule future work for yourself. Provide cron ("0 9 * * 1-5", fires repeatedly, interpreted in server local time) OR at (an ISO timestamp, fires once). The prompt is delivered to you as a wakeup message at fire time. Use this for reminders, recurring reviews, and deferred work — "remind me tomorrow at 9" is one schedule_create with at.',
       input_schema: {
@@ -122,15 +75,6 @@ export function buildHarnessTools(harness, room, config, memory) {
       name: 'schedule_list',
       description: 'List your schedules (both persona-configured wakeups and runtime schedules) with next fire times.',
       input_schema: { type: 'object', properties: {} },
-    },
-    {
-      name: 'schedule_delete',
-      description: 'Delete a runtime schedule by id. Persona-configured wakeups cannot be deleted from here.',
-      input_schema: {
-        type: 'object',
-        properties: { id: { type: 'string', description: 'The 8-character schedule id' } },
-        required: ['id'],
-      },
     },
     {
       name: 'spawn_subagent',
@@ -216,28 +160,6 @@ export function buildHarnessTools(harness, room, config, memory) {
       input_schema: { type: 'object', properties: {} },
     },
     {
-      name: 'remove_peer',
-      description: 'Revoke a runtime peer (approved or pending). Their secret stops authenticating immediately. Config-declared agents cannot be removed here.',
-      input_schema: {
-        type: 'object',
-        properties: { name: { type: 'string', description: 'Peer name to revoke' } },
-        required: ['name'],
-      },
-    },
-    {
-      name: 'join_room',
-      description: 'Join a remote cheesoid room as a visiting agent, using its URL and a shared key. The remote host\'s owner must approve you there before your messages flow. Only do this when your operator asked for it or gave you standing permission.',
-      input_schema: {
-        type: 'object',
-        properties: {
-          url: { type: 'string', description: 'Base URL of the remote cheesoid (e.g. https://brad.example.com)' },
-          secret: { type: 'string', description: 'The shared key for that room' },
-          name: { type: 'string', description: 'Short name for this connection (defaults to the hostname)' },
-        },
-        required: ['url', 'secret'],
-      },
-    },
-    {
       name: 'share_media',
       description: 'Share a stored media file into the room (image, audio, pdf, text). Use a media id from an upload, or a path in the shared workspace to import and share.',
       input_schema: {
@@ -260,7 +182,7 @@ export function buildHarnessTools(harness, room, config, memory) {
     },
     {
       name: 'list_secrets',
-      description: 'List the NAMES of secrets your operator has dropped for your tools (values are never readable — they are injected into tool environments automatically as environment variables).',
+      description: 'List configured destination-bound credential bindings and whether each is available. Backing secret names and values are never readable.',
       input_schema: { type: 'object', properties: {} },
     },
     {
@@ -277,10 +199,10 @@ export function buildHarnessTools(harness, room, config, memory) {
     },
   ]
 
-  if ((config.builtin_tools || []).includes('shell')) {
+  if (harness.shellPolicy.available()) {
     definitions.push({
       name: 'shell',
-      description: 'Run a shell command in your workspace (bash, 120s timeout, output capped). Operator-dropped secrets are available as environment variables. For anything long-running, use task_start instead.',
+      description: 'Run a shell command in your workspace (bash, 120s timeout, output capped) with a minimal environment and no server credentials. For anything long-running, use task_start instead.',
       input_schema: {
         type: 'object',
         properties: { command: { type: 'string', description: 'The command to run' } },
@@ -294,7 +216,10 @@ export function buildHarnessTools(harness, room, config, memory) {
       description: 'Fetch a public http(s) URL and return its text content (HTML is stripped to text, 1MB cap). Complements web_search: search finds pages, fetch_url reads one.',
       input_schema: {
         type: 'object',
-        properties: { url: { type: 'string', description: 'The URL to fetch' } },
+        properties: {
+          url: { type: 'string', description: 'The URL to fetch' },
+          credential: { type: 'string', description: 'Optional preconfigured secret binding name for this destination' },
+        },
         required: ['url'],
       },
     })
@@ -302,8 +227,8 @@ export function buildHarnessTools(harness, room, config, memory) {
 
   const toolNames = new Set(definitions.map(d => d.name))
 
-  async function execute(name, input, options) {
-    const origin = room?._turnOrigin || 'user'
+  async function executeRaw(name, input, options) {
+    const origin = options?.origin || room?._turnOrigin || 'user'
     const gate = harness.autonomy.gate(name, origin)
     if (!gate.allowed) return { output: gate.reason, is_error: true }
 
@@ -319,12 +244,15 @@ export function buildHarnessTools(harness, room, config, memory) {
           const timeoutMs = (Number(input.timeout_minutes) > 0) ? Math.min(Number(input.timeout_minutes), 240) * 60 * 1000 : undefined
           let record
           if (input.command) {
+            if (!harness.shellPolicy.available()) {
+              return { output: harness.shellPolicy.denialReason(), is_error: true }
+            }
             record = await harness.tasks.startShell({ name: input.name, command: input.command, timeoutMs })
           } else {
             record = await harness.tasks.startJob({
               name: input.name || cap(input.prompt, 40),
-              run: async () => {
-                const result = await harness.subagents.run({ prompt: input.prompt, model: input.model })
+              run: async ({ signal }) => {
+                const result = await harness.subagents.run({ prompt: input.prompt, model: input.model, signal })
                 return result.text
               },
             })
@@ -343,11 +271,6 @@ export function buildHarnessTools(harness, room, config, memory) {
           if (!record) return { output: `No task ${input.id}`, is_error: true }
           const tail = harness.secrets.redact(await harness.tasks.tail(input.id))
           return { output: `${JSON.stringify(record, null, 2)}\n--- log tail ---\n${cap(tail, 8192)}` }
-        }
-        case 'task_stop': {
-          const record = await harness.tasks.stop(input.id)
-          if (!record) return { output: `No task ${input.id}`, is_error: true }
-          return { output: `Task ${input.id} stopped (status: ${record.status}).` }
         }
         case 'schedule_create': {
           const record = await harness.schedules.create({
@@ -371,18 +294,12 @@ export function buildHarnessTools(harness, room, config, memory) {
           ]
           return { output: lines.length ? lines.join('\n') : '(no schedules)' }
         }
-        case 'schedule_delete': {
-          const removed = await harness.schedules.remove(input.id)
-          return removed
-            ? { output: `Schedule ${input.id} deleted.` }
-            : { output: `No runtime schedule ${input.id}`, is_error: true }
-        }
         case 'spawn_subagent': {
           if (input.background) {
             const record = await harness.tasks.startJob({
               name: `subagent: ${cap(input.prompt, 40)}`,
-              run: async () => {
-                const result = await harness.subagents.run({ prompt: input.prompt, model: input.model })
+              run: async ({ signal }) => {
+                const result = await harness.subagents.run({ prompt: input.prompt, model: input.model, signal })
                 return result.text
               },
             })
@@ -475,34 +392,6 @@ export function buildHarnessTools(harness, room, config, memory) {
           ]
           return { output: lines.length ? lines.join('\n') : '(no peers)' }
         }
-        case 'remove_peer': {
-          const removed = await harness.peers.remove(input.name)
-          return removed
-            ? { output: `Peer "${input.name}" revoked.` }
-            : { output: `No runtime peer "${input.name}" (config-declared agents cannot be removed here).`, is_error: true }
-        }
-        case 'join_room': {
-          let url
-          try {
-            url = new URL(input.url)
-            if (!/^https?:$/.test(url.protocol)) throw new Error('http(s) only')
-          } catch (err) {
-            return { output: `Invalid url: ${err.message}`, is_error: true }
-          }
-          const connName = (input.name || url.hostname.split('.')[0]).slice(0, 40)
-          if (room.roomClients.has(connName)) {
-            return { output: `Already connected to a room named "${connName}".`, is_error: true }
-          }
-          const roomConfig = { url: input.url.replace(/\/$/, ''), name: connName, domain: url.hostname, secret: input.secret }
-          const client = new RoomClient(roomConfig, {
-            agentName: config.display_name,
-            onMessage: (event) => room._handleRemoteEvent(event, connName),
-          })
-          room.roomClients.set(connName, client)
-          client.connect()
-          await harness.peers.addOutbound({ name: connName, url: roomConfig.url, addedBy: origin })
-          return { output: `Connecting to ${roomConfig.url} as "${connName}". If the host runs ad-hoc peering, their owner must approve you before your messages flow.` }
-        }
         case 'share_media': {
           let meta
           if (input.media_id) {
@@ -527,9 +416,13 @@ export function buildHarnessTools(harness, room, config, memory) {
           return { output: `${loaded.meta.name}: ${loaded.meta.mime}, ${loaded.meta.bytes} bytes, uploaded ${loaded.meta.uploaded}${loaded.meta.by ? ` by ${loaded.meta.by}` : ''}. Binary content — images attached to messages are already visible to you.` }
         }
         case 'list_secrets': {
-          const entries = await harness.secrets.list()
-          if (!entries.length) return { output: '(no secrets dropped — the operator can add them from the Secrets panel)' }
-          return { output: entries.map(s => `${s.name}${s.updated ? ` (updated ${s.updated})` : ''}`).join('\n') }
+          const bindings = harness.secretBroker.status()
+          if (!bindings.length) return { output: '(no secret bindings configured)' }
+          return {
+            output: bindings
+              .map(binding => `${binding.name}: ${binding.available ? 'available' : 'unavailable'}`)
+              .join('\n'),
+          }
         }
         case 'set_model': {
           const tierKey = input.tier === 'executor' ? 'model' : input.tier
@@ -550,12 +443,15 @@ export function buildHarnessTools(harness, room, config, memory) {
         }
         case 'shell': {
           if (!input.command) return { output: 'command required', is_error: true }
+          if (!harness.shellPolicy.available()) {
+            return { output: harness.shellPolicy.denialReason(), is_error: true }
+          }
           try {
-            const { stdout, stderr } = await execFileAsync('bash', ['-lc', input.command], {
+            const { stdout, stderr } = await execFileAsync('bash', ['--noprofile', '--norc', '-c', input.command], {
               cwd: harness.workDir,
               timeout: SHELL_TIMEOUT_MS,
               maxBuffer: 1024 * 1024,
-              env: { ...process.env, ...harness.secrets.env() },
+              env: minimalChildEnv(harness.workDir),
             })
             const out = [stdout, stderr && `[stderr]\n${stderr}`].filter(Boolean).join('\n')
             return { output: harness.secrets.redact(cap(out)) || '(no output)' }
@@ -576,46 +472,46 @@ export function buildHarnessTools(harness, room, config, memory) {
           // check — redirect: 'follow' would let a public URL 302 straight
           // into localhost or the cloud metadata service.
           let res = null
-          const deadline = AbortSignal.timeout(FETCH_TIMEOUT_MS)
+          const deadlineAt = Date.now() + FETCH_TIMEOUT_MS
           for (let hop = 0; hop <= FETCH_MAX_REDIRECTS; hop++) {
+            let credentialHeaders = {}
+            if (input.credential) {
+              try {
+                credentialHeaders = harness.secretBroker.headersFor(input.credential, url)
+              } catch (err) {
+                return { output: `Refused credential: ${err.message}`, is_error: true }
+              }
+            }
             try {
-              await assertPublicHost(url)
+              res = await requestPublic(url, {
+                timeoutMs: FETCH_TIMEOUT_MS,
+                deadlineAt,
+                maxBytes: FETCH_CAP_BYTES,
+                allowPrivate: process.env.CHEESOID_ALLOW_LOCAL_FETCH === '1',
+                headers: {
+                  'User-Agent': 'cheesoid-agent/1.0 (+https://cheesoid.noisefactor.io)',
+                  ...credentialHeaders,
+                },
+              })
             } catch (err) {
               return { output: `Refused: ${err.message}`, is_error: true }
             }
-            res = await fetch(url, {
-              signal: deadline,
-              headers: { 'User-Agent': 'cheesoid-agent/1.0 (+https://cheesoid.noisefactor.io)' },
-              redirect: 'manual',
-            })
-            if (res.status >= 300 && res.status < 400 && res.headers.get('location')) {
+            const location = res.headers.location
+            if (res.statusCode >= 300 && res.statusCode < 400 && location) {
               if (hop === FETCH_MAX_REDIRECTS) {
                 return { output: `Too many redirects (>${FETCH_MAX_REDIRECTS}) from ${input.url}`, is_error: true }
               }
-              const next = new URL(res.headers.get('location'), url)
+              const next = new URL(location, url)
               if (!/^https?:$/.test(next.protocol)) {
                 return { output: `Refused: redirect to non-http(s) URL ${next.protocol}//…`, is_error: true }
               }
-              res.body?.cancel?.().catch?.(() => {})
               url = next
               continue
             }
             break
           }
-          const reader = res.body?.getReader()
-          let received = 0
-          const chunks = []
-          if (reader) {
-            while (received < FETCH_CAP_BYTES) {
-              const { done, value } = await reader.read()
-              if (done) break
-              chunks.push(value)
-              received += value.length
-            }
-            reader.cancel().catch(() => {})
-          }
-          let text = Buffer.concat(chunks.map(c => Buffer.from(c))).toString('utf8')
-          const contentType = res.headers.get('content-type') || ''
+          let text = res.body.toString('utf8')
+          const contentType = res.headers['content-type'] || ''
           if (contentType.includes('html')) {
             text = text
               .replace(/<script[\s\S]*?<\/script>/gi, ' ')
@@ -625,7 +521,7 @@ export function buildHarnessTools(harness, room, config, memory) {
               .replace(/[ \t]+/g, ' ').replace(/\n{3,}/g, '\n\n')
               .trim()
           }
-          return { output: `[${res.status} ${contentType.split(';')[0]}] ${url}\n\n${cap(text)}` }
+          return { output: `[${res.statusCode} ${contentType.split(';')[0]}] ${url}\n\n${cap(text)}` }
         }
         default:
           return { output: `Unknown harness tool: ${name}`, is_error: true }
@@ -633,6 +529,10 @@ export function buildHarnessTools(harness, room, config, memory) {
     } catch (err) {
       return { output: `${name} failed: ${err.message}`, is_error: true }
     }
+  }
+
+  async function execute(name, input, options) {
+    return harness.secrets.redactDeep(await executeRaw(name, input, options))
   }
 
   return { definitions, handles: (name) => toolNames.has(name), execute }

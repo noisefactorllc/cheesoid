@@ -14,17 +14,10 @@ const TRANSCRIBE_TIMEOUT_MS = 45 * 1000
  * @returns {{ text: string, model: string }}
  * @throws {Error} err.status is set for HTTP-shaped failures
  */
-export async function transcribe({ buffer, mime, config, hints = [] }) {
+export async function transcribe({ buffer, mime, config, registry = null, hints = [], signal = null }) {
   const chain = tierChain(config, 'transcription') || []
   if (!chain.length) {
     const err = new Error('voice transcription not configured (no transcription tier — set OPENROUTER_API_KEY or a transcription model)')
-    err.status = 501
-    throw err
-  }
-
-  const { baseUrl, apiKey } = resolveOpenRouterCreds(config)
-  if (!apiKey) {
-    const err = new Error('voice transcription needs an OpenRouter-compatible provider or OPENROUTER_API_KEY')
     err.status = 501
     throw err
   }
@@ -40,13 +33,54 @@ export async function transcribe({ buffer, mime, config, hints = [] }) {
     ? ` Names that may appear: ${[...new Set(hints.filter(Boolean))].join(', ')}.`
     : ''
 
+  if (registry) {
+    let lastErr = null
+    for (const modelString of chain) {
+      try {
+        const { modelId, provider } = registry.resolve(modelString)
+        if (typeof provider.transcribeAudio !== 'function') {
+          throw new Error(`provider for ${modelString} does not support audio transcription`)
+        }
+        const result = await provider.transcribeAudio({
+          buffer,
+          mime,
+          format,
+          model: modelId,
+          hints,
+          prompt: `Transcribe this audio verbatim. Output ONLY the transcription text, nothing else.${hintText}`,
+          signal,
+          timeoutMs: TRANSCRIBE_TIMEOUT_MS,
+        })
+        const text = String(result?.text || '').trim()
+        if (!text) throw new Error('empty transcription')
+        return { text, model: modelString }
+      } catch (err) {
+        signal?.throwIfAborted()
+        lastErr = err
+        console.log(`[voice] ${modelString} transcription failed (${err.message}) — trying next`)
+      }
+    }
+    const err = new Error(`transcription failed: ${lastErr?.message || 'no models available'}`)
+    err.status = 502
+    throw err
+  }
+
+  const { baseUrl, apiKey } = resolveOpenRouterCreds(config)
+  if (!apiKey) {
+    const err = new Error('voice transcription needs an OpenRouter-compatible provider or OPENROUTER_API_KEY')
+    err.status = 501
+    throw err
+  }
+
   let lastErr = null
   for (const modelString of chain) {
     const modelId = modelString.replace(/:[a-z0-9_-]+$/i, '')
     try {
+      const timeoutSignal = AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS)
+      const requestSignal = signal ? AbortSignal.any([signal, timeoutSignal]) : timeoutSignal
       const res = await fetch(`${baseUrl}/chat/completions`, {
         method: 'POST',
-        signal: AbortSignal.timeout(TRANSCRIBE_TIMEOUT_MS),
+        signal: requestSignal,
         headers: { Authorization: `Bearer ${apiKey}`, 'Content-Type': 'application/json' },
         body: JSON.stringify({
           model: modelId,
@@ -66,6 +100,7 @@ export async function transcribe({ buffer, mime, config, hints = [] }) {
       if (!text) throw new Error('empty transcription')
       return { text, model: modelId }
     } catch (err) {
+      signal?.throwIfAborted()
       lastErr = err
       console.log(`[voice] ${modelId} transcription failed (${err.message}) — trying next`)
     }

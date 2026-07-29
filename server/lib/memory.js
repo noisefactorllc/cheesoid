@@ -1,4 +1,5 @@
-import { readFile, writeFile, appendFile, readdir, stat } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { open, readdir } from 'node:fs/promises'
 import { join } from 'node:path'
 
 // read_memory returns the whole file — a 104KB MEMORY.md became ~26K tokens of
@@ -8,6 +9,14 @@ export const MEMORY_READ_CAP_BYTES = 32 * 1024
 // append_memory keeps working past this size, but nudges toward splitting the
 // file up before it becomes the next oversized read_memory dump.
 export const MEMORY_COMPACT_WARN_BYTES = 64 * 1024
+export const MEMORY_FILENAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]{0,100}\.md$/
+
+export function validateMemoryFilename(filename) {
+  if (typeof filename !== 'string' || !MEMORY_FILENAME_RE.test(filename)) {
+    throw new Error(`invalid memory filename: ${String(filename)}`)
+  }
+  return filename
+}
 
 /**
  * Cap a string to `capBytes` of UTF-8. Shared by the read_memory tool and the
@@ -37,11 +46,21 @@ export class Memory {
     return contents.join('\n\n')
   }
 
+  pathFor(filename) {
+    return join(this.dir, validateMemoryFilename(filename))
+  }
+
   async read(filename) {
+    const path = this.pathFor(filename)
+    let handle
     try {
-      return await readFile(join(this.dir, filename), 'utf8')
-    } catch {
-      return null
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      return await handle.readFile('utf8')
+    } catch (err) {
+      if (err?.code === 'ENOENT' || err?.code === 'ELOOP') return null
+      throw err
+    } finally {
+      await handle?.close()
     }
   }
 
@@ -62,26 +81,57 @@ export class Memory {
   }
 
   async write(filename, content) {
-    await writeFile(join(this.dir, filename), content)
+    const path = this.pathFor(filename)
+    let handle
+    try {
+      handle = await open(
+        path,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | constants.O_NOFOLLOW,
+        0o600,
+      )
+      await handle.writeFile(content, 'utf8')
+    } finally {
+      await handle?.close()
+    }
   }
 
   async append(filename, content) {
-    await appendFile(join(this.dir, filename), '\n' + content)
+    const path = this.pathFor(filename)
+    let handle
+    try {
+      handle = await open(
+        path,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW,
+        0o600,
+      )
+      await handle.writeFile('\n' + content, 'utf8')
+    } finally {
+      await handle?.close()
+    }
   }
 
   /** Byte size of a memory file on disk, or null if it doesn't exist. */
   async sizeOf(filename) {
+    const path = this.pathFor(filename)
+    let handle
     try {
-      return (await stat(join(this.dir, filename))).size
-    } catch {
-      return null
+      handle = await open(path, constants.O_RDONLY | constants.O_NOFOLLOW)
+      const stats = await handle.stat()
+      return stats.isFile() ? stats.size : null
+    } catch (err) {
+      if (err?.code === 'ENOENT' || err?.code === 'ELOOP') return null
+      throw err
+    } finally {
+      await handle?.close()
     }
   }
 
   async list() {
     try {
-      const entries = await readdir(this.dir)
-      return entries.filter(e => e.endsWith('.md'))
+      const entries = await readdir(this.dir, { withFileTypes: true })
+      return entries
+        .filter(entry => entry.isFile() && MEMORY_FILENAME_RE.test(entry.name))
+        .map(entry => entry.name)
     } catch {
       return []
     }

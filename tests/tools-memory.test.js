@@ -72,6 +72,24 @@ describe('memory tools (read_memory / append_memory) via loadTools', () => {
     assert.match(result.output, /File not found/)
   })
 
+  it('memory tools reject traversal and canonical SOUL bypasses', async () => {
+    const dir = await makeMemoryPersona()
+    await writeFile(join(dir, 'SOUL.md'), 'immutable')
+    const config = { memory: { dir: 'memory/', auto_read: [] } }
+    const mem = new Memory(dir, 'memory/')
+    const tools = await loadTools(dir, config, mem, stubState(), stubRoom(), null)
+
+    for (const filename of ['../runtime/secrets.env', '.././SOUL.md', 'nested/notes.md']) {
+      const read = await tools.execute('read_memory', { filename })
+      const write = await tools.execute('write_memory', { filename, content: 'overwrite' })
+      const append = await tools.execute('append_memory', { filename, content: 'append' })
+      assert.equal(read.is_error, true)
+      assert.equal(write.is_error, true)
+      assert.equal(append.is_error, true)
+    }
+    assert.equal(await (await import('node:fs/promises')).readFile(join(dir, 'SOUL.md'), 'utf8'), 'immutable')
+  })
+
   it('append_memory succeeds quietly when the resulting file stays under 64KB', async () => {
     const dir = await makeMemoryPersona({ 'notes.md': 'small' })
     const config = { memory: { dir: 'memory/', auto_read: [] } }

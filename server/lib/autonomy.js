@@ -19,12 +19,10 @@ const GATED = {
   task_start: 'medium',
   spawn_subagent: 'medium',
   schedule_create: 'medium',
-  schedule_delete: 'medium',
   send_chat_message: 'medium',
   shell: 'medium',
-  // high only: reshaping its own topology or model is the deepest form of
-  // initiative we grant.
-  join_room: 'high',
+  // high only: changing the active model is the deepest self-directed
+  // control still exposed to the agent. Network topology is human-only.
   set_model: 'high',
 }
 

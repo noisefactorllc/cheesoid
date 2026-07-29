@@ -7,6 +7,7 @@
  */
 
 import { flattenSystem } from './translate.js'
+import { abortableDelay } from '../abort.js'
 
 /**
  * Translate Anthropic tool defs to Responses API format.
@@ -216,7 +217,7 @@ export function createOpenAIResponsesProvider(config) {
   return {
     supportsIntentRouting: false, // Responses API handles this natively via reasoning
 
-    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }, onEvent) {
+    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice, signal }, onEvent) {
       const input = translateToResponsesInput(messages)
       const openaiTools = translateToolDefsForResponses(tools)
 
@@ -247,6 +248,7 @@ export function createOpenAIResponsesProvider(config) {
       let lastErr
 
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
+        signal?.throwIfAborted()
         try {
           response = await fetch(`${baseUrl}/responses`, {
             method: 'POST',
@@ -255,8 +257,10 @@ export function createOpenAIResponsesProvider(config) {
               'Authorization': `Bearer ${apiKey}`,
             },
             body: JSON.stringify(body),
+            signal,
           })
         } catch (err) {
+          signal?.throwIfAborted()
           const cause = err.cause ? `: ${err.cause.message || err.cause.code || err.cause}` : ''
           lastErr = new Error(`OpenAI Responses fetch failed${cause}`)
           response = null
@@ -269,13 +273,13 @@ export function createOpenAIResponsesProvider(config) {
           const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
           const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
           lastErr = new Error(`OpenAI Responses rate limited (429)`)
-          if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, delay))
+          if (attempt < MAX_RETRIES - 1) await abortableDelay(delay, signal)
         } else if (response && response.status >= 500) {
           const text = await response.text().catch(() => '')
           lastErr = new Error(`OpenAI Responses server error ${response.status}: ${text}`)
-          if (attempt < MAX_RETRIES - 1) await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)))
+          if (attempt < MAX_RETRIES - 1) await abortableDelay(RETRY_DELAY_MS * (attempt + 1), signal)
         } else if (!response && attempt < MAX_RETRIES - 1) {
-          await new Promise(r => setTimeout(r, RETRY_DELAY_MS * (attempt + 1)))
+          await abortableDelay(RETRY_DELAY_MS * (attempt + 1), signal)
         }
       }
 

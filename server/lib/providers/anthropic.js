@@ -21,8 +21,9 @@ function isUnavailableError(err) {
   return false
 }
 
-async function streamOnce(client, params, onEvent) {
-  const stream = client.messages.stream(params)
+async function streamOnce(client, params, onEvent, signal) {
+  signal?.throwIfAborted()
+  const stream = client.messages.stream(params, signal ? { signal } : undefined)
   const contentBlocks = []
   let stopReason = null
   const usage = { input_tokens: 0, output_tokens: 0 }
@@ -212,21 +213,22 @@ export function _buildParams({ model, maxTokens, system, messages, tools, server
 
 export function createAnthropicProvider(_config) {
   return {
-    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }, onEvent) {
+    async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice, signal }, onEvent) {
       const client = getClient()
       const activeModel = model
 
       const params = _buildParams({ model: activeModel, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice })
 
       try {
-        return await streamOnce(client, params, onEvent)
+        return await streamOnce(client, params, onEvent, signal)
       } catch (err) {
+        signal?.throwIfAborted()
         if (isOpusModel(activeModel) && isUnavailableError(err)) {
           console.warn(`[anthropic] ${activeModel} unavailable (${err.status}), falling back to ${SONNET_FALLBACK}`)
           onEvent({ type: 'model_fallback', from: activeModel, to: SONNET_FALLBACK })
           params.model = SONNET_FALLBACK
           delete params.thinking
-          return await streamOnce(client, params, onEvent)
+          return await streamOnce(client, params, onEvent, signal)
         }
         throw err
       }

@@ -71,7 +71,7 @@ router.post('/api/chat/send', async (req, res) => {
   } else if (req.isAgent && req.body.backchannel) {
     room.addBackchannelMessage(name, message, { trigger: req.body.trigger, target: req.body.target })
   } else if (req.isAgent) {
-    room.addAgentMessage(name, message, { source: 'room', model: req.body.model, replyTo: req.body.replyTo })
+    await room.addAgentMessage(name, message, { source: 'room', model: req.body.model, replyTo: req.body.replyTo })
   } else {
     const sendOpts = {}
     if (req.body.addressed) sendOpts._addressed = req.body.addressed
@@ -108,9 +108,10 @@ router.post('/api/chat/react', (req, res) => {
 router.post('/api/chat/event', (req, res) => {
   if (!req.isAgent) return res.status(403).json({ error: 'agent auth required' })
 
-  const { name, event } = req.body
+  const { event } = req.body
+  const name = req.principal?.name || req.userName
   if (!name || !event || !event.type) {
-    return res.status(400).json({ error: 'name and event with type required' })
+    return res.status(400).json({ error: 'authenticated name and event with type required' })
   }
 
   const room = resolveRoom(req, req.body.room)

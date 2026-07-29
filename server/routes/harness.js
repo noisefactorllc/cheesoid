@@ -5,6 +5,8 @@ import { redactHistoryEntry, redactKeys } from '../lib/chat-session.js'
 import { MEDIA_MAX_BYTES } from '../lib/media.js'
 
 const router = Router()
+const voiceAttempts = new Map()
+let activeVoice = 0
 
 // Same auth chain as chat routes — proxy header or agent bearer.
 // /api/peer/join is exempted inside the handler chain below (an unknown
@@ -26,11 +28,22 @@ function roomOf(req) {
 // A human at the UI — not a visiting agent. Secrets, peer approval, and
 // task control are operator surfaces.
 function requireHuman(req, res) {
-  if (req.isAgent) {
+  if (req.principal?.kind === 'agent' || req.isAgent) {
     res.status(403).json({ error: 'not available to agents' })
     return false
   }
+  if (req.principal?.kind !== 'human') {
+    res.status(401).json({ error: 'authenticated human required' })
+    return false
+  }
+  if (req.principal.source === 'development-bypass') {
+    console.log(`[auth] development-bypass operator action: ${req.method} ${req.originalUrl}`)
+  }
   return true
+}
+
+function requireHumanMiddleware(req, res, next) {
+  if (requireHuman(req, res)) next()
 }
 
 // ---------------- secrets (write-only) ----------------
@@ -54,7 +67,8 @@ router.post('/api/secrets', async (req, res) => {
     // forever — that is the point.
     res.json({ status: 'stored', name })
   } catch (err) {
-    res.status(400).json({ error: err.message })
+    const status = /shell capability is enabled/i.test(err.message) ? 409 : 400
+    res.status(status).json({ error: err.message })
   }
 })
 
@@ -71,7 +85,7 @@ router.delete('/api/secrets/:name', async (req, res) => {
 router.get('/api/tasks', async (req, res) => {
   const harness = harnessOf(req)
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
-  res.json({ tasks: await harness.tasks.list({ limit: 30 }) })
+  res.json({ tasks: harness.secrets.redactDeep(await harness.tasks.list({ limit: 30 })) })
 })
 
 router.get('/api/tasks/:id', async (req, res) => {
@@ -80,7 +94,10 @@ router.get('/api/tasks/:id', async (req, res) => {
   const task = await harness.tasks.get(req.params.id)
   if (!task) return res.status(404).json({ error: 'task not found' })
   const log = await harness.tasks.tail(req.params.id, { bytes: 8192 })
-  res.json({ task, log: redactKeys(log, harness.secrets.values()) })
+  res.json({
+    task: harness.secrets.redactDeep(task),
+    log: redactKeys(log, harness.secrets.values()),
+  })
 })
 
 router.post('/api/tasks/:id/stop', async (req, res) => {
@@ -89,7 +106,7 @@ router.post('/api/tasks/:id/stop', async (req, res) => {
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
   const task = await harness.tasks.stop(req.params.id)
   if (!task) return res.status(404).json({ error: 'task not found' })
-  res.json({ task })
+  res.json({ task: harness.secrets.redactDeep(task) })
 })
 
 // ---------------- schedules ----------------
@@ -143,12 +160,10 @@ router.post('/api/peer/join', async (req, res) => {
   }
   try {
     const record = await harness.peers.requestJoin({ name, secret, url: url || null, note: note || null })
-    // Surface the request to the owning humans: a UI banner event plus a
-    // system-sourced agent turn so the host announces it in the room.
+    // Surface the request only as an inert UI event. Persisting any
+    // peer-controlled field into chat history would replay it into model
+    // context after restart.
     room.broadcast({ type: 'peer_request', name: record.name, url: record.url, note: record.note, requested: record.requested })
-    room.recordHistory({ type: 'system', text: `Peer join request from "${record.name}"${record.url ? ` (${record.url})` : ''} — awaiting approval by a room owner.` })
-    room.sendMessage('system', `[peer request] Agent "${record.name}"${record.url ? ` at ${record.url}` : ''}${record.note ? ` says: ${record.note}` : ''} is asking to join as a peer. Only a human in the room can approve this (Peers panel). Let the room know it is pending; do not promise approval.`)
-      .catch(err => console.log(`[peering] announce failed: ${err.message}`))
     res.json({ status: 'pending', name: record.name, expires_in_hours: 24 })
   } catch (err) {
     res.status(400).json({ error: err.message })
@@ -170,11 +185,10 @@ router.post('/api/peer/approve', async (req, res) => {
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
   const { name } = req.body || {}
   if (!name) return res.status(400).json({ error: 'name required' })
-  const approver = req.userName || req.body.approver || 'operator'
+  const approver = req.principal.name
   try {
     const record = await harness.peers.approve(name, approver)
     room?.broadcast({ type: 'peer_resolved', name: record.name, state: 'approved', by: approver })
-    room?.recordHistory({ type: 'system', text: `Peer "${record.name}" approved by ${approver}.` })
     res.json({ status: 'approved', peer: record })
   } catch (err) {
     res.status(400).json({ error: err.message })
@@ -191,7 +205,6 @@ router.post('/api/peer/deny', async (req, res) => {
   const removed = await harness.peers.deny(name)
   if (removed) {
     room?.broadcast({ type: 'peer_resolved', name, state: 'denied' })
-    room?.recordHistory({ type: 'system', text: `Peer request "${name}" denied.` })
   }
   res.json({ status: removed ? 'denied' : 'not found' })
 })
@@ -200,7 +213,7 @@ router.delete('/api/peers/:name', async (req, res) => {
   if (!requireHuman(req, res)) return
   const harness = harnessOf(req)
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
-  const removed = await harness.peers.remove(req.params.name)
+  const removed = await harness.revokePeer(req.params.name, roomOf(req))
   res.json({ status: removed ? 'removed' : 'not found' })
 })
 
@@ -208,17 +221,42 @@ router.delete('/api/peers/:name', async (req, res) => {
 router.post('/api/peer/join-remote', async (req, res) => {
   if (!requireHuman(req, res)) return
   const room = roomOf(req)
-  if (!room) return res.status(503).json({ error: 'harness not ready' })
+  const harness = harnessOf(req)
+  if (!room || !harness) return res.status(503).json({ error: 'harness not ready' })
   const { url, secret, name } = req.body || {}
   if (!url || !secret) return res.status(400).json({ error: 'url and secret required' })
-  const result = await room.tools.execute('join_room', { url, secret, name })
-  if (result.is_error) return res.status(400).json({ error: result.output })
-  res.json({ status: 'connecting', detail: result.output })
+  try {
+    const connection = await harness.joinRemote({
+      url,
+      secret,
+      name,
+      actor: req.principal.name,
+    }, room)
+    res.json({ status: 'connecting', connection })
+  } catch (err) {
+    res.status(400).json({ error: err.message })
+  }
 })
 
 // ---------------- media ----------------
 
-router.post('/api/media', express.raw({ type: () => true, limit: MEDIA_MAX_BYTES + 1024 }), async (req, res) => {
+router.post(
+  '/api/media',
+  requireHumanMiddleware,
+  async (req, res, next) => {
+    const declaredBytes = Number(req.headers['content-length'])
+    if (!Number.isFinite(declaredBytes)) return next()
+    const harness = harnessOf(req)
+    if (!harness) return res.status(503).json({ error: 'harness not ready' })
+    try {
+      await harness.media.preflight(declaredBytes)
+      next()
+    } catch (err) {
+      res.status(413).json({ error: err.message })
+    }
+  },
+  express.raw({ type: () => true, limit: MEDIA_MAX_BYTES + 1024 }),
+  async (req, res) => {
   const harness = harnessOf(req)
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
   const mime = (req.headers['content-type'] || '').split(';')[0].trim()
@@ -257,21 +295,68 @@ router.get('/api/media/:id', async (req, res) => {
 
 // ---------------- voice ----------------
 
-router.post('/api/voice', express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
+function reserveVoiceRequest(req, res, next) {
+  if (!requireHuman(req, res)) return
+  const limits = {
+    maxPerWindow: 10,
+    windowMs: 10 * 60 * 1000,
+    maxConcurrent: 2,
+    ...(req.app.locals.voiceLimits || {}),
+  }
+  if (activeVoice >= limits.maxConcurrent) {
+    return res.status(503).json({ error: 'voice transcription concurrency limit reached' })
+  }
+  const principalKey = req.principal.email || req.principal.name
+  const now = Date.now()
+  const attempts = (voiceAttempts.get(principalKey) || [])
+    .filter(timestamp => now - timestamp < limits.windowMs)
+  if (attempts.length >= limits.maxPerWindow) {
+    res.setHeader('Retry-After', Math.ceil(limits.windowMs / 1000))
+    return res.status(429).json({ error: 'voice transcription rate limit reached' })
+  }
+  attempts.push(now)
+  voiceAttempts.set(principalKey, attempts)
+  activeVoice++
+  let released = false
+  const release = () => {
+    if (released) return
+    released = true
+    activeVoice = Math.max(0, activeVoice - 1)
+  }
+  const controller = new AbortController()
+  req.voiceReservation = { release, signal: controller.signal }
+  req.once('aborted', () => controller.abort(new Error('voice request disconnected')))
+  res.once('finish', release)
+  res.once('close', () => {
+    controller.abort(new Error('voice request disconnected'))
+    // If body parsing failed, no handler finally will run. Once transcription
+    // starts, however, retain the slot until that provider call settles.
+    if (!req.voiceHandlerStarted) release()
+  })
+  next()
+}
+
+router.post('/api/voice', reserveVoiceRequest, express.raw({ type: () => true, limit: '25mb' }), async (req, res) => {
+  req.voiceHandlerStarted = true
   const room = roomOf(req)
   const config = req.app.locals.persona.config
   const mime = (req.headers['content-type'] || '').split(';')[0].trim()
   try {
-    const hints = [config.display_name, ...(room ? room.participantList : [])]
-    const { text, model } = await transcribe({
+    const hints = [config.display_name, ...(room?.participantList || [])]
+    const transcribeImpl = req.app.locals.transcribe || transcribe
+    const { text, model } = await transcribeImpl({
       buffer: Buffer.isBuffer(req.body) ? req.body : Buffer.from(req.body || ''),
       mime,
       config,
+      registry: room?.registry,
       hints,
+      signal: req.voiceReservation?.signal,
     })
     res.json({ text, model })
   } catch (err) {
-    res.status(err.status || 500).json({ error: err.message })
+    if (!res.headersSent) res.status(err.status || 500).json({ error: err.message })
+  } finally {
+    req.voiceReservation?.release()
   }
 })
 
