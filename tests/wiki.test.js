@@ -1,7 +1,7 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { createWiki, WIKI_SLUG_RE, WIKI_CONTENT_CAP_BYTES } from '../server/lib/wiki.js'
-import { mkdtemp } from 'node:fs/promises'
+import { mkdtemp, mkdir, readFile, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -61,6 +61,26 @@ describe('Wiki', () => {
     const pages = await wiki.list()
     assert.ok(!pages.some(p => p.slug === 'index'), 'index is not listed among pages')
     await assert.rejects(() => wiki.write('index', 'hijack'), /index\.md is generated/)
+  })
+
+  it('refuses to follow a symlinked page file (O_NOFOLLOW parity with memory.js)', { skip: process.platform === 'win32' }, async () => {
+    const personaDir = await mkdtemp(join(tmpdir(), 'cheesoid-wiki-nofollow-'))
+    const wiki = createWiki(personaDir)
+    const wikiDir = join(personaDir, 'wiki')
+    await mkdir(wikiDir, { recursive: true })
+
+    // Plant a symlink where the 'evil' page file would live, pointing at a file
+    // outside the wiki directory. Following it would read/clobber the target.
+    const outside = join(personaDir, 'outside-secret.txt')
+    await writeFile(outside, 'SECRET OUTSIDE CONTENT')
+    await symlink(outside, join(wikiDir, 'evil.md'))
+
+    // read must not traverse the symlink to the outside file.
+    assert.equal(await wiki.read('evil'), null)
+
+    // write must refuse rather than truncate/overwrite the symlink target.
+    await assert.rejects(() => wiki.write('evil', 'pwned'))
+    assert.equal(await readFile(outside, 'utf8'), 'SECRET OUTSIDE CONTENT')
   })
 
   it('rejects invalid slugs (traversal chars, uppercase, dots)', async () => {

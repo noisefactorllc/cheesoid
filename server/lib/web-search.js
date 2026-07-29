@@ -5,6 +5,42 @@ import { resolveModel } from './providers/resolve.js'
 const DEFAULT_MAX_RESULTS = 5
 
 /**
+ * Resolve the provider that backs web search via OpenRouter's `web` plugin,
+ * together with the base_url and api_key needed to reach it.
+ *
+ * A `type: openrouter` provider — and the auto-registered openrouter provider
+ * a zero-config persona runs on — derive base_url/api_key from the environment
+ * (see registry.js / voice.js). Reading provider.base_url / provider.api_key
+ * directly finds them empty, so the search silently POSTs to "/chat/completions"
+ * with "Bearer undefined". This resolves them the same way voice.js does.
+ *
+ * @param {object} config the loaded persona config
+ * @returns {{ webCfg: object, baseUrl: string, apiKey: string } | null}
+ */
+export function resolveWebSearchProvider(config) {
+  for (const p of Object.values(config.providers || {})) {
+    if (!p.web_search) continue
+    const type = p.type || 'openai-compat'
+    const webCfg = p.web_search === true ? {} : p.web_search
+    if (type === 'openrouter') {
+      const apiKey = p.api_key || process.env.OPENROUTER_API_KEY
+      if (apiKey) return { webCfg, baseUrl: 'https://openrouter.ai/api/v1', apiKey }
+      continue
+    }
+    const baseUrl = String(p.base_url || '').replace(/\/$/, '')
+    if (baseUrl && p.api_key) return { webCfg, baseUrl, apiKey: p.api_key }
+  }
+  // The auto-registered openrouter provider: present when OPENROUTER_API_KEY is
+  // set and the persona declared no openrouter provider of its own. It defaults
+  // web_search on (registry.js), so a declared web_search server tool is backed
+  // by it even though it never appears in config.providers.
+  if (!config.providers?.openrouter && process.env.OPENROUTER_API_KEY) {
+    return { webCfg: {}, baseUrl: 'https://openrouter.ai/api/v1', apiKey: process.env.OPENROUTER_API_KEY }
+  }
+  return null
+}
+
+/**
  * Web search as a model-invoked tool, backed by OpenRouter's `web` plugin.
  *
  * Only the anthropic provider implements native server_tools; every
@@ -42,13 +78,11 @@ export function buildWebSearchTools(config, deps = {}) {
   )
   if (!declared) return empty
 
-  const entry = Object.entries(config.providers || {}).find(([, p]) => p.web_search)
-  if (!entry) return empty
+  const resolved = resolveWebSearchProvider(config)
+  if (!resolved) return empty
 
-  const [, provider] = entry
-  const webCfg = provider.web_search === true ? {} : provider.web_search
+  const { webCfg, baseUrl, apiKey } = resolved
   const maxResults = webCfg.max_results || DEFAULT_MAX_RESULTS
-  const baseUrl = String(provider.base_url || '').replace(/\/$/, '')
   const toolName = declared.name || 'web_search'
 
   // The plugin does the searching, so the model here only has to be a valid
@@ -77,7 +111,7 @@ export function buildWebSearchTools(config, deps = {}) {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          'Authorization': `Bearer ${provider.api_key}`,
+          'Authorization': `Bearer ${apiKey}`,
         },
         body: JSON.stringify({
           model: searchModel,

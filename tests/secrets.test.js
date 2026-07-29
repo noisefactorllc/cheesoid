@@ -13,11 +13,12 @@ describe('secrets store', () => {
     return join(base, 'runtime')
   }
 
-  it('round-trips a value through set() and env(), including multi-line values', async () => {
+  it('round-trips a value through set() and resolveForBroker(), including multi-line values', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
     await store.set('API_KEY', 'line one\nline two\nline three')
-    assert.deepEqual(store.env(), { API_KEY: 'line one\nline two\nline three' })
+    assert.equal(store.resolveForBroker('API_KEY'), 'line one\nline two\nline three')
+    assert.deepEqual(await store.names(), ['API_KEY'])
   })
 
   it('list() reports names and timestamps but never values', async () => {
@@ -36,8 +37,8 @@ describe('secrets store', () => {
   it('names() returns just the names', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
-    await store.set('FOO', 'value-a')
-    await store.set('BAR', 'value-b')
+    await store.set('FOO', 'value-aaa')
+    await store.set('BAR', 'value-bbb')
     const names = await store.names()
     assert.deepEqual([...names].sort(), ['BAR', 'FOO'])
   })
@@ -51,13 +52,15 @@ describe('secrets store', () => {
     assert.equal(await store.remove('NEVER_SET'), false)
   })
 
-  it('env() excludes removed names', async () => {
+  it('resolveForBroker() and names() exclude removed names', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
-    await store.set('KEEP', 'keep-me')
-    await store.set('DROP', 'drop-me')
+    await store.set('KEEP', 'keep-value')
+    await store.set('DROP', 'drop-value')
     await store.remove('DROP')
-    assert.deepEqual(store.env(), { KEEP: 'keep-me' })
+    assert.deepEqual(await store.names(), ['KEEP'])
+    assert.equal(store.resolveForBroker('KEEP'), 'keep-value')
+    assert.equal(store.resolveForBroker('DROP'), null)
   })
 
   it('values() contains the decoded secret values', async () => {
@@ -87,8 +90,8 @@ describe('secrets store', () => {
   it('redacts accepted multibyte secrets by bytes rather than code units', async () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
-    await store.set('UNICODE_KEY', '密钥')
-    assert.equal(store.redact('echoed 密钥'), 'echoed **[Redacted by Cheesoid]**')
+    await store.set('UNICODE_KEY', '密钥值')
+    assert.equal(store.redact('echoed 密钥值'), 'echoed **[Redacted by Cheesoid]**')
   })
 
   it('rejects invalid secret names', async () => {
@@ -105,10 +108,10 @@ describe('secrets store', () => {
     const runtimeDir = await makeRuntimeDir()
     const store = createSecretsStore(runtimeDir)
     await assert.rejects(() => store.set('EMPTY', ''), /invalid secret value/)
-    await assert.rejects(() => store.set('TOO_SHORT', 'short'), /at least 6 bytes/)
+    await assert.rejects(() => store.set('TOO_SHORT', 'short'), /at least 8 bytes/)
     await assert.rejects(() => store.set('TOO_BIG', 'x'.repeat(MAX_SECRET_VALUE_BYTES + 1)), /invalid secret value/)
     await store.set('AT_LIMIT', 'x'.repeat(MAX_SECRET_VALUE_BYTES))
-    assert.equal(store.env().AT_LIMIT.length, MAX_SECRET_VALUE_BYTES)
+    assert.equal(store.resolveForBroker('AT_LIMIT').length, MAX_SECRET_VALUE_BYTES)
   })
 
   it('sets secrets.env file mode to 0o600', { skip: process.platform === 'win32' }, async () => {
@@ -125,7 +128,7 @@ describe('secrets store', () => {
     await store1.set('SHARED', 'shared-value')
 
     const store2 = createSecretsStore(runtimeDir)
-    assert.deepEqual(store2.env(), { SHARED: 'shared-value' })
+    assert.equal(store2.resolveForBroker('SHARED'), 'shared-value')
     assert.deepEqual(store2.values(), ['shared-value'])
   })
 
@@ -137,7 +140,7 @@ describe('secrets store', () => {
     await symlink(outside, join(runtimeDir, 'secrets.env'))
 
     const store = createSecretsStore(runtimeDir)
-    assert.throws(() => store.env(), /unsafe secrets file/)
+    assert.throws(() => store.values(), /unsafe secrets file/)
   })
 
   it('refuses a symlinked runtime directory', { skip: process.platform === 'win32' }, async () => {
@@ -164,11 +167,11 @@ describe('secrets store', () => {
     ])
 
     const fresh = createSecretsStore(runtimeDir)
-    assert.deepEqual(fresh.env(), {
-      ONE: 'first-value',
-      THREE: 'third-value',
-      FOUR: 'fourth-value',
-    })
+    assert.deepEqual((await fresh.names()).sort(), ['FOUR', 'ONE', 'THREE'])
+    assert.equal(fresh.resolveForBroker('ONE'), 'first-value')
+    assert.equal(fresh.resolveForBroker('THREE'), 'third-value')
+    assert.equal(fresh.resolveForBroker('FOUR'), 'fourth-value')
+    assert.equal(fresh.resolveForBroker('TWO'), null)
     const files = await readFile(join(runtimeDir, 'secrets.env'), 'utf8')
     assert.doesNotMatch(files, /\.tmp/)
   })
@@ -178,7 +181,97 @@ describe('secrets store', () => {
     const store = createSecretsStore(runtimeDir)
     await store.set('ROTATING', 'old-value')
     await store.set('ROTATING', 'new-value')
-    assert.deepEqual(store.env(), { ROTATING: 'new-value' })
+    assert.equal(store.resolveForBroker('ROTATING'), 'new-value')
     assert.equal((await store.list()).length, 1)
+  })
+
+  // Finding 1 (I4): parse() must enforce the same minimum length redact()
+  // requires, or a short hand-edited/legacy value is live but never masked.
+  it('does not admit a stored value below the minimum length (parse floor)', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    await mkdir(runtimeDir, { recursive: true })
+    const short = Buffer.from('abcdefg', 'utf8').toString('base64') // 7 bytes < floor
+    const ok = Buffer.from('long-enough-value', 'utf8').toString('base64')
+    await writeFile(join(runtimeDir, 'secrets.env'), `TOO_SHORT=${short}\nOK_SECRET=${ok}\n`)
+    const store = createSecretsStore(runtimeDir)
+    assert.deepEqual(await store.names(), ['OK_SECRET'])
+    assert.equal(store.resolveForBroker('TOO_SHORT'), null)
+    assert.equal(store.resolveForBroker('OK_SECRET'), 'long-enough-value')
+  })
+
+  // Finding 2 (I3): raise the hard floor above trivially-short common words.
+  it('enforces an 8-byte minimum floor in set()', async () => {
+    const store = createSecretsStore(await makeRuntimeDir())
+    await assert.rejects(() => store.set('SEVEN', '1234567'), /at least 8 bytes/)
+    await store.set('EIGHT', '12345678')
+    assert.equal(store.resolveForBroker('EIGHT'), '12345678')
+  })
+
+  // Finding 2 (I3): weak values above the floor are warned about, not rejected,
+  // and the warning must never contain the value itself.
+  it('stores but logs a warning for short/low-entropy values above the floor', async () => {
+    const store = createSecretsStore(await makeRuntimeDir())
+    const logs = []
+    const orig = console.log
+    console.log = (...a) => logs.push(a.join(' '))
+    try {
+      await store.set('WEAKISH', 'aaaaaaaa') // 8 bytes: passes floor, low entropy
+    } finally {
+      console.log = orig
+    }
+    assert.equal(store.resolveForBroker('WEAKISH'), 'aaaaaaaa')
+    const joined = logs.join('\n')
+    assert.match(joined, /warn/i)
+    assert.ok(!joined.includes('aaaaaaaa'), 'the warning must not contain the value')
+  })
+
+  // Finding 3 (M6/M7): redactDeep runs on every res.json body; it must not
+  // mangle Date/Buffer/class instances, and must still redact plain objects.
+  it('redactDeep passes Date and Buffer through untouched but still redacts plain objects', async () => {
+    const store = createSecretsStore(await makeRuntimeDir())
+    await store.set('TOKEN', 'plain-object-secret')
+    const when = new Date('2020-01-02T03:04:05.000Z')
+    const buf = Buffer.from('binary-bytes')
+    const out = store.redactDeep({
+      when,
+      buf,
+      note: 'saw plain-object-secret',
+      nested: { when, list: ['plain-object-secret'] },
+    })
+    assert.ok(out.when instanceof Date, 'Date must survive redactDeep intact')
+    assert.equal(out.when.getTime(), when.getTime())
+    assert.ok(Buffer.isBuffer(out.buf), 'Buffer must survive redactDeep intact')
+    assert.equal(out.buf.toString(), 'binary-bytes')
+    assert.ok(out.nested.when instanceof Date)
+    assert.equal(out.note, 'saw **[Redacted by Cheesoid]**')
+    assert.deepEqual(out.nested.list, ['**[Redacted by Cheesoid]**'])
+  })
+
+  // Finding 4 (M5): the invalid-name skip branch must log the name only, never
+  // the base64 value that follows the '='.
+  it('never logs the secret value when skipping a corrupt invalid-name line', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    await mkdir(runtimeDir, { recursive: true })
+    const secretB64 = Buffer.from('super-secret-payload', 'utf8').toString('base64')
+    await writeFile(join(runtimeDir, 'secrets.env'), `badname=${secretB64}\n`)
+    const logs = []
+    const orig = console.log
+    console.log = (...a) => logs.push(a.join(' '))
+    try {
+      const store = createSecretsStore(runtimeDir)
+      await store.names() // triggers ensureLoaded -> parse
+    } finally {
+      console.log = orig
+    }
+    const joined = logs.join('\n')
+    assert.match(joined, /invalid name/)
+    assert.ok(!joined.includes(secretB64), 'must not log the base64 secret value')
+    assert.ok(!joined.includes('super-secret-payload'), 'must not log the decoded value')
+  })
+
+  // Finding 5 (M8): the dead env() exfiltration surface is removed.
+  it('does not expose an env() method', async () => {
+    const store = createSecretsStore(await makeRuntimeDir())
+    assert.equal(typeof store.env, 'undefined')
   })
 })

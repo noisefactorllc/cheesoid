@@ -43,10 +43,18 @@ const API_KEY_PATTERN = /\b(sk-[a-zA-Z0-9_-]{20,}|[a-zA-Z0-9]+_sk_[a-zA-Z0-9_-]{
  * Redact a history entry's text fields (including the reply quote) for
  * serving over any JSON endpoint. Returns the entry unchanged when clean.
  */
+function isPlainObject(v) {
+  if (!v || typeof v !== 'object') return false
+  const proto = Object.getPrototypeOf(v)
+  return proto === Object.prototype || proto === null
+}
+
 export function redactHistoryEntry(entry, extraValues = null) {
   if (typeof entry === 'string') return redactKeys(entry, extraValues)
   if (Array.isArray(entry)) return entry.map(value => redactHistoryEntry(value, extraValues))
-  if (entry && typeof entry === 'object') {
+  // Only recurse plain objects/arrays. Non-plain instances (Date, Buffer, …)
+  // pass through untouched rather than being mangled by Object.fromEntries.
+  if (isPlainObject(entry)) {
     return Object.fromEntries(
       Object.entries(entry).map(([key, value]) => [key, redactHistoryEntry(value, extraValues)]),
     )
@@ -70,6 +78,46 @@ export function redactKeys(str, extraValues = null) {
     }
   }
   return out
+}
+
+const SECRET_SUPPRESSED_DELTA_TYPES = new Set(['text_delta', 'thought_delta', 'thinking_delta', 'idle_text_delta'])
+
+// Control / host-authority event types a VISITING agent must never be able to
+// inject through relayAgentEvent: scrollback (wipes + reseeds the transcript),
+// moderator_pool/presence (room control), and system/error/user_message/
+// dm_request/peer_request (forged host authority). Visiting agents relay their
+// own streaming, tool, and message events only.
+const NON_RELAYABLE_EVENT_TYPES = new Set([
+  'scrollback', 'moderator_pool', 'presence', 'system', 'error',
+  'user_message', 'dm_request', 'peer_request',
+])
+
+function redactSecretValues(str, values) {
+  if (!values || !values.length) return str
+  let out = str
+  for (const value of values) {
+    if (value && Buffer.byteLength(value, 'utf8') >= MIN_SECRET_VALUE_BYTES && out.includes(value)) {
+      out = out.split(value).join('**[Redacted by Cheesoid]**')
+    }
+  }
+  return out
+}
+
+/**
+ * Write-time redaction: strip only exact stored-secret values from an entry.
+ * The API-key heuristic pattern is deliberately NOT applied here — the JSONL
+ * store is authoritative and must never permanently corrupt legitimate long
+ * strings (git SHAs, content hashes, base64). The pattern runs at egress.
+ */
+function redactSecretValuesDeep(entry, values) {
+  if (typeof entry === 'string') return redactSecretValues(entry, values)
+  if (Array.isArray(entry)) return entry.map(v => redactSecretValuesDeep(v, values))
+  if (isPlainObject(entry)) {
+    return Object.fromEntries(
+      Object.entries(entry).map(([k, v]) => [k, redactSecretValuesDeep(v, values)]),
+    )
+  }
+  return entry
 }
 
 function replaceTimestamp(prompt) {
@@ -229,12 +277,28 @@ If nothing is on your mind, say so in one line and stop.`
  * structural overhead. Deliberately cheap — it runs every turn and only needs
  * to be good enough to bound the prompt, not exact.
  */
+// Approximate token cost of one vision block. Anthropic bills an image at
+// (w*h)/750 tokens, ~1.6k for a typical photo; the base64 length is irrelevant.
+const IMAGE_BLOCK_TOKEN_ESTIMATE = 1600
+
 export function estimateMessageTokens(message) {
   const c = message?.content
+  if (typeof c === 'string') return Math.ceil(c.length / 4) + 8
+  if (c == null) return 8
+  if (Array.isArray(c)) {
+    // Sum per block. An image block costs a roughly fixed number of tokens; its
+    // base64 payload length is NOT a token proxy — counting it as text made a
+    // single photo estimate hundreds of thousands of tokens and evict the whole
+    // conversation on the very next trim.
+    let total = 8
+    for (const block of c) {
+      if (block?.type === 'image') { total += IMAGE_BLOCK_TOKEN_ESTIMATE; continue }
+      try { total += Math.ceil(JSON.stringify(block).length / 4) } catch { /* skip unserializable */ }
+    }
+    return total
+  }
   let chars
-  if (typeof c === 'string') chars = c.length
-  else if (c == null) chars = 0
-  else { try { chars = JSON.stringify(c).length } catch { chars = 0 } }
+  try { chars = JSON.stringify(c).length } catch { chars = 0 }
   return Math.ceil(chars / 4) + 8
 }
 
@@ -658,6 +722,7 @@ export class Room {
       console.log(`[SSE] error conn=${connId} name=${name || 'anon'} code=${err.code || '-'} msg=${err.message}`)
     })
 
+    res._clientName = name
     this.clients.add(res)
     if (name) {
       this.participants.set(name, Date.now())
@@ -668,13 +733,15 @@ export class Room {
     // reappears on refresh is not masked.
     const scrollback = this.getScrollback()
     if (scrollback.length > 0) {
-      const data = redactKeys(`data: ${JSON.stringify({ type: 'scrollback', messages: scrollback })}\n\n`, this.harness?.secrets?.values?.())
-      res.write(data)
+      // Redact the OBJECT, then serialize — a secret containing quotes/newlines
+      // would survive a redactor that ran on the already-escaped JSON string.
+      const safe = redactHistoryEntry({ type: 'scrollback', messages: scrollback }, this.harness?.secrets?.values?.())
+      res.write(`data: ${JSON.stringify(safe)}\n\n`)
     }
 
     // Send moderator pool to agents so they know the full participant list
     if (isAgent && this._moderatorPool.length > 1) {
-      res.write(redactKeys(`data: ${JSON.stringify({ type: 'moderator_pool', pool: this._moderatorPool })}\n\n`, this.harness?.secrets?.values?.()))
+      res.write(`data: ${JSON.stringify(redactHistoryEntry({ type: 'moderator_pool', pool: this._moderatorPool }, this.harness?.secrets?.values?.()))}\n\n`)
     }
 
     // Start heartbeat if this is the first client
@@ -706,7 +773,10 @@ export class Room {
     // what lands here. Egress-side redaction still runs for entries recorded
     // before a secret existed.
     if (this.harness?.secrets) {
-      entry = redactHistoryEntry(entry, this.harness.secrets.values())
+      // Write-time: strip only exact stored-secret values. The heuristic
+      // API-key pattern is applied at egress, never to the authoritative store,
+      // so an ordinary 40-char hash in chat is not permanently corrupted.
+      entry = redactSecretValuesDeep(entry, this.harness.secrets.values())
     }
 
     if (entry.id && !entry.replyTo && !entry.threadId && THREADABLE_HISTORY_TYPES.has(entry.type)) {
@@ -758,6 +828,34 @@ export class Room {
   /**
    * Post a message from the agent carrying a media attachment (share_media).
    */
+  /**
+   * Build anthropic-format vision blocks from attachments. The image/non-image
+   * decision and media_type are taken from the STORED mime (loaded.meta.mime),
+   * never the client-declared `a.mime`: a crafted attachment claiming
+   * image/png over a text/svg file would otherwise produce an image block with
+   * a non-image media_type and hard-fail every subsequent turn (400) until
+   * restart. translate.js maps these for openai-compat backends.
+   */
+  async _imageBlocksFor(attachments) {
+    const blocks = []
+    if (!this.harness?.media || !attachments?.length) return blocks
+    for (const a of attachments) {
+      try {
+        const loaded = await this.harness.media.load(a.id)
+        if (!loaded) continue
+        const mime = loaded.meta?.mime
+        if (!mime?.startsWith('image/') || mime === 'image/svg+xml') continue
+        if (loaded.meta.bytes <= 5 * 1024 * 1024) {
+          blocks.push({
+            type: 'image',
+            source: { type: 'base64', media_type: mime, data: loaded.buffer.toString('base64') },
+          })
+        }
+      } catch { /* skip unreadable attachment */ }
+    }
+    return blocks
+  }
+
   postAgentAttachment(meta, note = '') {
     const id = shortMsgId()
     const attachment = { id: meta.id, name: meta.name, mime: meta.mime, bytes: meta.bytes }
@@ -766,20 +864,43 @@ export class Room {
     this.recordHistory({ type: 'assistant_message', text: note, id, room: this.roomName, attachments: [attachment] })
   }
 
+  // Stateful streaming and exact-value redaction are incompatible: a secret
+  // can be split across arbitrary provider chunks. When any secret exists,
+  // suppress content deltas everywhere (local and remote) and deliver only the
+  // complete, recursively redacted turn.
+  _suppressWhenSecrets(event) {
+    return !!this.harness?.secrets?.hasAny?.() && SECRET_SUPPRESSED_DELTA_TYPES.has(event?.type)
+  }
+
+  // Sever every live SSE client belonging to a named participant. Used on peer
+  // revocation: a revoked peer must stop receiving broadcasts and lose its
+  // scrollback re-read immediately, not linger until it chooses to disconnect.
+  disconnectClientsByName(name) {
+    if (!name) return 0
+    let cut = 0
+    for (const res of [...this.clients]) {
+      if (res._clientName === name) {
+        this.clients.delete(res)
+        try { res.end() } catch { /* already closed */ }
+        cut++
+      }
+    }
+    if (this.clients.size === 0) this._stopHeartbeat()
+    return cut
+  }
+
   // Send event to all connected clients
   broadcast(event) {
     // Stateful streaming and exact-value redaction are incompatible: a secret
     // can be split across arbitrary provider chunks. When any secret exists,
     // suppress content deltas and deliver only the complete, recursively
     // redacted turn below. Non-content progress events still stream.
-    if (
-      this.harness?.secrets?.hasAny?.()
-      && new Set(['text_delta', 'thought_delta', 'thinking_delta', 'idle_text_delta']).has(event.type)
-    ) return
+    if (this._suppressWhenSecrets(event)) return
     const tagged = this.roomName ? { ...event, room: this.roomName } : event
-    const safe = this.harness?.secrets?.redactDeep
-      ? this.harness.secrets.redactDeep(tagged)
-      : redactHistoryEntry(tagged, this.harness?.secrets?.values?.())
+    // Egress redaction: exact stored values AND the API-key heuristic, applied
+    // to the object before serialization. redactDeep alone (stored values only)
+    // would let a non-stored key a tool echoes stream to every client.
+    const safe = redactHistoryEntry(tagged, this.harness?.secrets?.values?.())
     const data = `data: ${JSON.stringify(safe)}\n\n`
     for (const client of this.clients) {
       try {
@@ -1118,6 +1239,10 @@ export class Room {
     //
     // For tool_start/tool_result and idle streaming events: broadcast to SSE.
     // For idle_thought: also record in host history for scrollback.
+    if (NON_RELAYABLE_EVENT_TYPES.has(event?.type)) {
+      console.warn(`[${this.persona.config.name}] dropping non-relayable event type=${event?.type} from visiting agent ${name}`)
+      return
+    }
     const authenticatedEvent = { ...event, name, agentName: name, visiting: true }
     this.broadcast(authenticatedEvent)
     if (event.type === 'idle_thought') {
@@ -1636,21 +1761,7 @@ export class Room {
       // Image attachments become vision blocks (anthropic-format; translate.js
       // maps them for openai-compat backends). Oversized or svg images stay
       // notice-only.
-      const imageBlocks = []
-      if (this.harness && attachments.length > 0) {
-        for (const a of attachments) {
-          if (!a.mime?.startsWith('image/') || a.mime === 'image/svg+xml') continue
-          try {
-            const loaded = await this.harness.media.load(a.id)
-            if (loaded && loaded.meta.bytes <= 5 * 1024 * 1024) {
-              imageBlocks.push({
-                type: 'image',
-                source: { type: 'base64', media_type: loaded.meta.mime, data: loaded.buffer.toString('base64') },
-              })
-            }
-          } catch { }
-        }
-      }
+      const imageBlocks = await this._imageBlocksFor(attachments)
       this.messages.push(this._redactContextMessage(imageBlocks.length > 0
         ? { role: 'user', content: [{ type: 'text', text: contextText }, ...imageBlocks] }
         : { role: 'user', content: contextText }))
@@ -1961,11 +2072,10 @@ export class Room {
         this._recordToolUse(event)
         if (this._pendingRoom === 'home') {
           this.broadcast(event)
-        } else {
+        } else if (!this._suppressWhenSecrets(event)) {
           const client = this.roomClients.get(this._pendingRoom)
           if (client) {
-            const safeEvent = this.harness?.secrets?.redactDeep?.(event)
-              || redactHistoryEntry(event, this.harness?.secrets?.values?.())
+            const safeEvent = redactHistoryEntry(event, this.harness?.secrets?.values?.())
             client.sendEvent(safeEvent, this._pendingRoomChannel)
           }
         }

@@ -213,7 +213,12 @@ router.delete('/api/peers/:name', async (req, res) => {
   if (!requireHuman(req, res)) return
   const harness = harnessOf(req)
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
-  const removed = await harness.revokePeer(req.params.name, roomOf(req))
+  const room = roomOf(req)
+  const removed = await harness.revokePeer(req.params.name, room)
+  // Revocation must also sever the peer's LIVE inbound stream — otherwise a
+  // revoked peer keeps receiving broadcasts and can re-read scrollback until it
+  // chooses to disconnect.
+  room?.disconnectClientsByName?.(req.params.name)
   res.json({ status: removed ? 'removed' : 'not found' })
 })
 
@@ -280,6 +285,7 @@ router.post(
 })
 
 router.get('/api/media/:id', async (req, res) => {
+  if (!requireHuman(req, res)) return
   const harness = harnessOf(req)
   if (!harness) return res.status(503).json({ error: 'harness not ready' })
   const loaded = await harness.media.load(req.params.id)

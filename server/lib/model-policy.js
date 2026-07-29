@@ -70,6 +70,14 @@ export const TIER_DEFAULTS = {
 const CORE_TIERS = ['model', 'attention', 'cognition', 'reasoner']
 const EXTENDED_TIERS = ['reflection', 'transcription', 'subagent']
 
+// Keys recognized inside a `model_policy: { ... }` object. `executor` and
+// `model` both target the execution tier; `allow` is an allow-list, not a tier.
+// Anything else is almost certainly a typo, which today silently no-ops.
+const POLICY_OBJECT_KEYS = new Set(['allow', 'executor', 'model', ...CORE_TIERS, ...EXTENDED_TIERS])
+
+// Operator-facing name for a tier config key (the `model` tier is "execution").
+const tierLabel = (tier) => (tier === 'model' ? 'execution' : tier)
+
 /**
  * Fill empty tiers from policy defaults.
  *
@@ -89,12 +97,29 @@ const EXTENDED_TIERS = ['reflection', 'transcription', 'subagent']
 export function applyModelPolicy(config, opts = {}) {
   if (config.model_policy === 'none') return []
   const hasOpenRouter = opts.hasOpenRouter ?? Boolean(process.env.OPENROUTER_API_KEY)
+  const name = config.name || 'unknown'
 
-  const policy = (typeof config.model_policy === 'object' && config.model_policy !== null)
-    ? config.model_policy
-    : {}
+  const policyIsObject = typeof config.model_policy === 'object' && config.model_policy !== null
+  const policy = policyIsObject ? config.model_policy : {}
   const explicitDefaults = config.model_policy === 'default'
   const filled = []
+
+  // Tiers the operator set explicitly at the top level, captured before any
+  // fill or override so a model_policy override of one can be flagged.
+  const explicitTiers = new Set([...CORE_TIERS, ...EXTENDED_TIERS].filter(t => config[t]))
+
+  // Typo protection: a misspelled key inside a model_policy object silently
+  // does nothing today (it matches no tier). Surface it.
+  if (policyIsObject) {
+    for (const key of Object.keys(policy)) {
+      if (!POLICY_OBJECT_KEYS.has(key)) {
+        console.log(
+          `[${name}] WARN: unrecognized model_policy key "${key}" — ignored ` +
+          `(valid keys: ${[...POLICY_OBJECT_KEYS].join(', ')})`,
+        )
+      }
+    }
+  }
 
   // Whether the persona configured any loop model itself — measured before
   // model_policy overrides, so overriding one tier through the policy still
@@ -105,9 +130,17 @@ export function applyModelPolicy(config, opts = {}) {
     for (const tier of [...CORE_TIERS, ...EXTENDED_TIERS]) {
       const key = tier === 'model' ? 'executor' : tier
       const override = policy[key] ?? (tier === 'model' ? policy.model : undefined)
-      if (override !== undefined) {
-        config[tier] = Array.isArray(override) ? [...override] : [override]
+      if (override === undefined) continue
+      // Both a top-level tier and a model_policy override are operator config;
+      // the override still wins, but clobbering an explicit tier silently hides
+      // which one is live. Warn on that conflict.
+      if (explicitTiers.has(tier)) {
+        const opKey = tier === 'model' && policy.executor === undefined ? 'model' : key
+        console.log(
+          `[${name}] WARN: model_policy.${opKey} overrides the explicit top-level ${tierLabel(tier)} tier`,
+        )
       }
+      config[tier] = Array.isArray(override) ? [...override] : [override]
     }
   }
 
@@ -115,7 +148,7 @@ export function applyModelPolicy(config, opts = {}) {
     applyOverrides()
     if (coreAbsent && CORE_TIERS.every(t => !config[t])) {
       console.log(
-        `[${config.name || 'unknown'}] WARN: no models configured and no OPENROUTER_API_KEY — ` +
+        `[${name}] WARN: no models configured and no OPENROUTER_API_KEY — ` +
         `set one or configure tiers in persona.yaml`,
       )
     }
@@ -140,11 +173,45 @@ export function applyModelPolicy(config, opts = {}) {
 
   applyOverrides()
 
+  // The default schedule (sleep) keys off defaultsEnabled. It must reflect
+  // whether the persona is running on policy defaults at all — the zero-config
+  // case (coreAbsent) or an explicit `model_policy: default` — not merely
+  // whether a tier happened to need filling. A default persona that set every
+  // extended tier by hand fills nothing, yet is still policy-default, so the
+  // marker (and therefore sleep) must not depend on filled.length.
+  const defaultsEnabled = coreAbsent || explicitDefaults
+  if (defaultsEnabled || filled.length) {
+    config._modelPolicy = { filled, source: 'eval-2026-07-27', defaultsEnabled }
+  }
   if (filled.length) {
-    config._modelPolicy = { filled, source: 'eval-2026-07-27', defaultsEnabled: true }
-    console.log(`[${config.name || 'unknown'}] Model policy filled tiers: ${filled.join(', ')}`)
+    console.log(`[${name}] Model policy filled tiers: ${filled.join(', ')}`)
   }
   return filled
+}
+
+/**
+ * After the policy has run, a persona needs at least one tier that can drive a
+ * turn — an executor (`model`), a cognition tier, a reasoner, an attention
+ * tier, or an orchestrator. The zero-config case with no OPENROUTER_API_KEY
+ * leaves all of them empty: boot only WARNs, then the first turn dereferences
+ * `config.model[0]` and throws inside the turn-catch, so the agent looks alive
+ * but silently never answers. This makes that dead state detectable so a caller
+ * can hard-fail at startup or post a clear in-room notice instead.
+ *
+ * Pure and side-effect free — safe to call from a validation path.
+ *
+ * @param {object} config persona config, after applyModelPolicy
+ * @returns {{ ok: boolean, reason?: string }}
+ */
+export function validateRunnableModel(config) {
+  const runnable = config.model || config.cognition || config.reasoner ||
+    config.attention || config.orchestrator
+  if (runnable) return { ok: true }
+  return {
+    ok: false,
+    reason: 'no model configured and none could be filled from defaults — ' +
+      'set OPENROUTER_API_KEY, or configure a model/cognition/orchestrator tier in persona.yaml',
+  }
 }
 
 export function shouldEnableSleep(config) {

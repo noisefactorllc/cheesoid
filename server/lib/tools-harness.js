@@ -249,6 +249,9 @@ export function buildHarnessTools(harness, room, config, memory) {
             }
             record = await harness.tasks.startShell({ name: input.name, command: input.command, timeoutMs })
           } else {
+            if (input.model && !harness.modelAllowList().includes(input.model)) {
+              return { output: `"${input.model}" is not on your allow list. Allowed: ${harness.modelAllowList().join(', ')}`, is_error: true }
+            }
             record = await harness.tasks.startJob({
               name: input.name || cap(input.prompt, 40),
               run: async ({ signal }) => {
@@ -295,6 +298,9 @@ export function buildHarnessTools(harness, room, config, memory) {
           return { output: lines.length ? lines.join('\n') : '(no schedules)' }
         }
         case 'spawn_subagent': {
+          if (input.model && !harness.modelAllowList().includes(input.model)) {
+            return { output: `"${input.model}" is not on your allow list. Allowed: ${harness.modelAllowList().join(', ')}`, is_error: true }
+          }
           if (input.background) {
             const record = await harness.tasks.startJob({
               name: `subagent: ${cap(input.prompt, 40)}`,
@@ -437,7 +443,11 @@ export function buildHarnessTools(harness, room, config, memory) {
           if (!chain) return { output: `You have no ${input.tier} tier configured.`, is_error: true }
           const previous = chain[0]
           const rest = chain.filter(m => m !== input.model)
-          config[tierKey] = [input.model, ...rest]
+          // Mutate the array IN PLACE — the live Modality captured this exact
+          // array reference at construction, so replacing the reference would
+          // leave the agent serving the old primary while reporting success.
+          chain.length = 0
+          chain.push(input.model, ...rest)
           await harness.persistModelOverride(tierKey, input.model)
           return { output: `${input.tier} model pinned to ${input.model} (was ${previous}). This persists across restarts; set_model again to change back.` }
         }

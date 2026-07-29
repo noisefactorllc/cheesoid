@@ -26,8 +26,9 @@ function translateToolDefsForResponses(anthropicTools) {
 /**
  * Translate Anthropic-format messages to Responses API input format.
  * The Responses API uses a flat array of items, not messages with roles.
+ * Exported (underscore-prefixed) for testing.
  */
-function translateToResponsesInput(messages) {
+export function _translateToResponsesInput(messages) {
   const input = []
 
   for (const msg of messages) {
@@ -35,7 +36,10 @@ function translateToResponsesInput(messages) {
       if (typeof msg.content === 'string') {
         input.push({ role: 'user', content: msg.content })
       } else if (Array.isArray(msg.content)) {
-        // tool_result blocks become function_call_output items
+        // tool_result blocks become function_call_output items; text + image
+        // blocks (media attachments) survive as a multimodal user message in
+        // the Responses input_text / input_image shape rather than being dropped.
+        const parts = []
         for (const block of msg.content) {
           if (block.type === 'tool_result') {
             input.push({
@@ -43,7 +47,17 @@ function translateToResponsesInput(messages) {
               call_id: block.tool_use_id,
               output: block.content,
             })
+          } else if (block.type === 'text') {
+            parts.push({ type: 'input_text', text: block.text })
+          } else if (block.type === 'image' && block.source?.type === 'base64') {
+            parts.push({
+              type: 'input_image',
+              image_url: `data:${block.source.media_type};base64,${block.source.data}`,
+            })
           }
+        }
+        if (parts.length > 0) {
+          input.push({ role: 'user', content: parts })
         }
       }
     } else if (msg.role === 'assistant') {
@@ -218,7 +232,7 @@ export function createOpenAIResponsesProvider(config) {
     supportsIntentRouting: false, // Responses API handles this natively via reasoning
 
     async streamMessage({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice, signal }, onEvent) {
-      const input = translateToResponsesInput(messages)
+      const input = _translateToResponsesInput(messages)
       const openaiTools = translateToolDefsForResponses(tools)
 
       // Flatten any system-prompt shape (string, openai layers, or a

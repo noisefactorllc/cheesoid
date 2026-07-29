@@ -1,6 +1,6 @@
 import http from 'node:http'
 import https from 'node:https'
-import { resolvePublicTarget } from './network-policy.js'
+import { resolvePublicTarget, tlsServername } from './network-policy.js'
 
 const INITIAL_RETRY_MS = 1000
 const MAX_RETRY_MS = 30000
@@ -86,7 +86,7 @@ export class RoomClient {
       },
       agent: false,
       lookup: target.lookup,
-      servername: streamUrl.hostname,
+      servername: tlsServername(streamUrl.hostname),
     }
 
     const connectionDeadline = setTimeout(() => {
@@ -235,7 +235,7 @@ export class RoomClient {
         ...options,
         agent: false,
         lookup: target.lookup,
-        servername: url.hostname,
+        servername: tlsServername(url.hostname),
       }, (res) => {
         const chunks = []
         let received = 0

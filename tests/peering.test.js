@@ -4,8 +4,10 @@ import {
   createPeerStore,
   isLegacyPeerLifecycleEntry,
   PENDING_TTL_MS,
+  peerFingerprint,
+  MAX_PENDING_PEERS,
 } from '../server/lib/peering.js'
-import { mkdtemp, readFile, writeFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, stat } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -330,5 +332,90 @@ describe('peering store', () => {
 
   it('exports PENDING_TTL_MS as 24 hours', () => {
     assert.equal(PENDING_TTL_MS, 24 * 60 * 60 * 1000)
+  })
+
+  // --- Finding #5: name-squatting — public record carries a comparable fingerprint ---
+  it('peerFingerprint is a deterministic, non-reversible short digest of the secret', () => {
+    assert.equal(typeof peerFingerprint, 'function')
+    const fp = peerFingerprint(SECRET_A)
+    assert.match(fp, /^[a-f0-9]{12}$/)
+    assert.equal(peerFingerprint(SECRET_A), fp)          // deterministic
+    assert.notEqual(peerFingerprint(SECRET_B), fp)       // secret-specific
+    assert.ok(!fp.includes(SECRET_A))                    // never the secret itself
+  })
+
+  it('publicRecord exposes the fingerprint and never leaks salt/hash/tokenLookup/secret', async () => {
+    const dir = await makeRuntimeDir()
+    const store = createPeerStore(dir)
+    const rec = await store.requestJoin({ name: 'Fingerling', secret: SECRET_A })
+    // The operator can compare this against a value the peer shared out-of-band.
+    assert.equal(rec.fingerprint, peerFingerprint(SECRET_A))
+    // The public projection still carries no secret material.
+    assert.equal(rec.salt, undefined)
+    assert.equal(rec.hash, undefined)
+    assert.equal(rec.tokenLookup, undefined)
+    const serialized = JSON.stringify(rec)
+    assert.ok(!serialized.includes(SECRET_A))
+    // The fingerprint is derived from the secret but is not the stored digests.
+    const [stored] = JSON.parse(await readFile(join(dir, 'peers.json'), 'utf8'))
+    assert.notEqual(rec.fingerprint, stored.hash)
+    assert.notEqual(rec.fingerprint, stored.tokenLookup)
+    assert.notEqual(rec.fingerprint, stored.salt)
+  })
+
+  it('the fingerprint survives approval and shows up in list()', async () => {
+    const dir = await makeRuntimeDir()
+    const store = createPeerStore(dir)
+    await store.requestJoin({ name: 'Fritz', secret: SECRET_A })
+    const [pending] = await store.list()
+    assert.equal(pending.fingerprint, peerFingerprint(SECRET_A))
+    const approved = await store.approve('Fritz', 'owner')
+    assert.equal(approved.fingerprint, peerFingerprint(SECRET_A))
+  })
+
+  // --- Finding #6: global cap on pending peers ---
+  it('caps the number of pending peer requests', async () => {
+    const dir = await makeRuntimeDir()
+    assert.equal(typeof MAX_PENDING_PEERS, 'number')
+    assert.ok(MAX_PENDING_PEERS > 0)
+    // Pre-seed the store at the cap by writing pending records straight to disk
+    // (same technique the prune tests use). The cap counts pending records, so
+    // this avoids paying scrypt per record while still exercising the ceiling.
+    const seeded = Array.from({ length: MAX_PENDING_PEERS }, (_, i) => ({
+      name: `pending-${i}`,
+      state: 'pending',
+      requested: new Date().toISOString(),
+    }))
+    await writeFile(join(dir, 'peers.json'), JSON.stringify(seeded))
+    const store = createPeerStore(dir)
+    await assert.rejects(
+      () => store.requestJoin({ name: 'one-too-many', secret: 'pending-secret-overflow-01' }),
+      /too many pending peer requests/,
+    )
+    // Approving one drains a slot, so a fresh request fits again.
+    await store.approve('pending-0', 'owner')
+    const rec = await store.requestJoin({ name: 'now-there-is-room', secret: 'pending-secret-after-approve' })
+    assert.equal(rec.state, 'pending')
+  })
+
+  // --- Finding #7: peers.json mode 0600, constant-time tokenLookup ---
+  it('persists peers.json with 0600 permissions', async () => {
+    const dir = await makeRuntimeDir()
+    const store = createPeerStore(dir)
+    await store.requestJoin({ name: 'Locky', secret: SECRET_A })
+    assert.equal((await stat(join(dir, 'peers.json'))).mode & 0o777, 0o600)
+    // A rewrite (approve persists again) must not widen the mode.
+    await store.approve('Locky', 'owner')
+    assert.equal((await stat(join(dir, 'peers.json'))).mode & 0o777, 0o600)
+  })
+
+  it('authenticate behavior is unchanged for valid and invalid secrets (constant-time lookup)', async () => {
+    const dir = await makeRuntimeDir()
+    const store = createPeerStore(dir)
+    await store.requestJoin({ name: 'Timmy', secret: SECRET_A })
+    await store.approve('Timmy', 'owner')
+    assert.equal(await store.authenticate(SECRET_A), 'Timmy')  // right secret authenticates
+    assert.equal(await store.authenticate(SECRET_B), null)     // wrong secret rejected
+    assert.equal(await store.authenticate('short'), null)      // trivially invalid rejected
   })
 })

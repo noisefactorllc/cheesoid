@@ -34,6 +34,12 @@ import { promisify } from 'node:util'
 
 export const PENDING_TTL_MS = 24 * 60 * 60 * 1000
 
+// Hard ceiling on simultaneously-pending (unapproved) peer requests. requestJoin
+// is reachable by unauthenticated callers, so without a cap a flood of join
+// requests could grow the store without bound. Approved and outbound peers do
+// not count against this; only 'pending' records do.
+export const MAX_PENDING_PEERS = 100
+
 const MAX_NAME_LENGTH = 40
 const MIN_SECRET_LENGTH = 16
 const MAX_SECRET_BYTES = 1024
@@ -56,6 +62,25 @@ async function hashSecret(salt, secret) {
   return (await scrypt(secret, salt, 32)).toString('hex')
 }
 
+/**
+ * A stable, non-secret fingerprint of a peer secret. The approval UI shows it so
+ * the operator can compare it against a value the peer shared out-of-band —
+ * closing the name-squatting gap where approval otherwise binds to an
+ * attacker-choosable name with an unverified secret.
+ *
+ * Domain-separated and truncated. It is NOT reversible to the secret and is
+ * deliberately independent of the per-record salt, so the peer and this server
+ * derive the same value from the same secret. It is never one of the stored
+ * digests (scrypt hash / HMAC tokenLookup), so exposing it leaks nothing usable.
+ */
+export function peerFingerprint(secret) {
+  return createHash('sha256')
+    .update('cheesoid-peer-fingerprint:v1\n')
+    .update(String(secret))
+    .digest('hex')
+    .slice(0, 12)
+}
+
 function constantTimeEqual(hexA, hexB) {
   const bufA = Buffer.from(hexA, 'hex')
   const bufB = Buffer.from(hexB, 'hex')
@@ -70,6 +95,7 @@ function publicRecord(rec) {
     note: rec.note,
     state: rec.state,
     requested: rec.requested,
+    fingerprint: rec.fingerprint ?? null,
     approvedBy: rec.approvedBy,
     approved: rec.approved,
   }
@@ -159,7 +185,12 @@ export function createPeerStore(runtimeDir) {
     await mkdir(runtimeDir, { recursive: true })
     const payload = JSON.stringify(Array.from(peers.values()), null, 2)
     const tmpPath = join(runtimeDir, `.peers.json.${process.pid}.${randomBytes(4).toString('hex')}.tmp`)
-    await writeFile(tmpPath, payload, 'utf8')
+    // peers.json holds per-peer salts and password digests — restrict it to the
+    // owner (0600) the same way .peer-lookup.key is. Set the mode on the tmp
+    // file before the rename so the final file is never briefly world-readable;
+    // chmod defends against a permissive umask masking the create mode.
+    await writeFile(tmpPath, payload, { encoding: 'utf8', mode: 0o600 })
+    await chmod(tmpPath, 0o600).catch(() => {})
     await rename(tmpPath, filePath)
   }
 
@@ -228,6 +259,13 @@ export function createPeerStore(runtimeDir) {
     }
     url = validateUrl(url)
 
+    // Reject before the expensive scrypt: an unauthenticated flood cannot both
+    // grow the store past the cap and burn KDF cycles doing it.
+    const pendingCount = [...peers.values()].filter(r => r.state === 'pending').length
+    if (pendingCount >= MAX_PENDING_PEERS) {
+      throw new Error(`too many pending peer requests (max ${MAX_PENDING_PEERS}); approve or deny existing requests before adding more`)
+    }
+
     const salt = randomBytes(16).toString('hex')
     const rec = {
       name,
@@ -235,6 +273,7 @@ export function createPeerStore(runtimeDir) {
       note,
       state: 'pending',
       requested: new Date().toISOString(),
+      fingerprint: peerFingerprint(secret),
       salt,
       kdf: 'scrypt',
       hash: await hashSecret(salt, secret),
@@ -290,11 +329,15 @@ export function createPeerStore(runtimeDir) {
     await pruneExpired()
     if (typeof secret !== 'string' || secret.length === 0) return null
     const lookup = tokenLookup(secret)
+    // The tokenLookup is a keyed HMAC index, not the verifier — the real check
+    // below is a scrypt + timingSafeEqual. Even so, compare the index in
+    // constant time so it leaks no per-character timing about a stored value.
     const direct = [...peers.values()].find(rec => (
       rec.state === 'approved'
-      && rec.tokenLookup === lookup
       && rec.salt
       && rec.hash
+      && rec.tokenLookup
+      && constantTimeEqual(rec.tokenLookup, lookup)
     ))
     if (direct) {
       const candidate = await hashSecret(direct.salt, secret)
@@ -344,6 +387,7 @@ export function createPeerStore(runtimeDir) {
       note: null,
       state: 'outbound',
       requested: now,
+      fingerprint: null,
       salt: null,
       hash: null,
       kdf: null,

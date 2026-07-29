@@ -1,7 +1,7 @@
 import { spawn } from 'node:child_process'
 import { randomUUID } from 'node:crypto'
 import { createWriteStream } from 'node:fs'
-import { readFile, writeFile, rename, mkdir, readdir, appendFile } from 'node:fs/promises'
+import { readFile, writeFile, rename, mkdir, readdir, appendFile, unlink } from 'node:fs/promises'
 import { join } from 'node:path'
 
 const ID_PATTERN = /^[a-f0-9]{8}$/
@@ -74,6 +74,9 @@ export function createTaskManager({
   timeoutKillGraceMs = TIMEOUT_KILL_GRACE_MS,
   shutdownTimeoutMs = 15_000,
   redact = text => String(text ?? ''),
+  createLogStream = null,
+  taskRetentionMs = 7 * 24 * 60 * 60 * 1000,
+  maxTaskRecords = 200,
 }) {
   const tasksDir = join(runtimeDir, 'tasks')
   const live = new Map() // id -> live entry (shell: {kind,record,child,...}; job: {kind,record})
@@ -82,6 +85,8 @@ export function createTaskManager({
 
   const recordPath = (id) => join(tasksDir, `${id}.json`)
   const logPath = (id) => join(tasksDir, `${id}.log`)
+  const pidPath = (id) => join(tasksDir, `${id}.pid`)
+  const makeLogStream = createLogStream || ((id) => createWriteStream(logPath(id), { flags: 'a' }))
 
   async function ensureTasksDir() {
     await mkdir(tasksDir, { recursive: true })
@@ -153,7 +158,11 @@ export function createTaskManager({
     const entry = live.get(id)
     if (!entry) return // already finalized (e.g. duplicate error+close)
     if (entry.timeoutHandle) clearTimeout(entry.timeoutHandle)
-    if (entry.reason) signalProcessTree(entry, 'SIGKILL')
+    // Always group-kill on finalize so a background daemon the shell spawned
+    // (e.g. `some-daemon & exit 0`) can't outlive the task past all caps. A
+    // setsid double-detach still escapes this without cgroups — a real limit of
+    // the "caps" guarantee for shell-enabled personas.
+    signalProcessTree(entry, 'SIGKILL')
     if (entry.killGraceHandle) clearTimeout(entry.killGraceHandle)
     entry.logStream.end()
 
@@ -191,7 +200,7 @@ export function createTaskManager({
     reserveSlot()
 
     const id = makeTaskId()
-    const effectiveTimeout = timeoutMs != null ? timeoutMs : defaultTimeoutMs
+    const effectiveTimeout = (timeoutMs != null && timeoutMs > 0) ? timeoutMs : defaultTimeoutMs
     const record = {
       id,
       name: name ? redact(String(name)).slice(0, 80) : 'shell task',
@@ -211,9 +220,16 @@ export function createTaskManager({
       throw err
     }
 
-    const logStream = createWriteStream(logPath(id), { flags: 'a' })
+    const logStream = makeLogStream(id)
     let bytesWritten = 0
     let capped = false
+    // A disk-full / EIO on the log stream must not surface as an unhandled
+    // 'error' that crashes the whole server — stop capturing, let the task
+    // finalize on the child's close event as usual.
+    logStream.on('error', (err) => {
+      capped = true
+      console.error(`[task-manager] log stream error for ${id}: ${err.message}`)
+    })
     const onData = (chunk) => {
       if (capped) return
       const remaining = LOG_CAP_BYTES - bytesWritten
@@ -256,6 +272,13 @@ export function createTaskManager({
     }
     entry.closed = new Promise((resolve) => { entry.resolveClosed = resolve })
     live.set(id, entry)
+
+    // Sidecar so a restart can find and SIGKILL a detached process group left
+    // behind by a crash — the record alone can't be trusted to hold a live pid.
+    const pgid = entry.processGroup ? child.pid : null
+    record.pid = child.pid
+    record.pgid = pgid
+    writeFile(pidPath(id), JSON.stringify({ pid: child.pid, pgid, started: record.started })).catch(() => {})
 
     child.stdout.on('data', onData)
     child.stderr.on('data', onData)
@@ -333,7 +356,7 @@ export function createTaskManager({
     reserveSlot()
 
     const id = makeTaskId()
-    const effectiveTimeout = timeoutMs != null ? timeoutMs : defaultTimeoutMs
+    const effectiveTimeout = (timeoutMs != null && timeoutMs > 0) ? timeoutMs : defaultTimeoutMs
     const record = {
       id,
       name: name ? redact(String(name)).slice(0, 80) : 'job',
@@ -384,6 +407,38 @@ export function createTaskManager({
     return record
   }
 
+  // Delete terminal (never running/live) task records that are older than the
+  // retention window, then cap the number retained — unbounded per-task files
+  // (each up to ~1MB of log) would otherwise grow without limit. Mutates
+  // `records` in place to drop the pruned entries.
+  async function pruneRecords(records) {
+    const nowMs = Date.now()
+    const ageOf = (r) => new Date(r.finished || r.started).getTime()
+    const terminal = records.filter(r => r.status !== 'running' && !live.has(r.id))
+    const toDelete = new Set()
+    if (taskRetentionMs != null) {
+      for (const r of terminal) {
+        const ts = ageOf(r)
+        if (Number.isFinite(ts) && nowMs - ts > taskRetentionMs) toDelete.add(r.id)
+      }
+    }
+    if (maxTaskRecords != null) {
+      const survivors = terminal
+        .filter(r => !toDelete.has(r.id))
+        .sort((a, b) => ageOf(b) - ageOf(a))
+      for (const r of survivors.slice(maxTaskRecords)) toDelete.add(r.id)
+    }
+    if (!toDelete.size) return
+    for (const id of toDelete) {
+      await unlink(recordPath(id)).catch(() => {})
+      await unlink(logPath(id)).catch(() => {})
+      await unlink(pidPath(id)).catch(() => {})
+    }
+    for (let i = records.length - 1; i >= 0; i--) {
+      if (toDelete.has(records[i].id)) records.splice(i, 1)
+    }
+  }
+
   async function list({ limit = 20 } = {}) {
     let entries
     try {
@@ -400,6 +455,7 @@ export function createTaskManager({
         // skip unreadable/corrupt record
       }
     }
+    await pruneRecords(records)
     records.sort((a, b) => {
       const aRunning = a.status === 'running' ? 0 : 1
       const bRunning = b.status === 'running' ? 0 : 1
@@ -508,6 +564,14 @@ export function createTaskManager({
         continue
       }
       if (record.status === 'running') {
+        // Kill the detached process group the previous run left behind. The
+        // sidecar's started must match the record so a recycled pid isn't hit.
+        try {
+          const sidecar = JSON.parse(await readFile(pidPath(record.id), 'utf8'))
+          if (sidecar?.pgid && sidecar.started === record.started) {
+            try { process.kill(-sidecar.pgid, 'SIGKILL') } catch { /* ESRCH: group already gone */ }
+          }
+        } catch { /* no sidecar — nothing to signal */ }
         record.status = 'failed'
         record.note = 'orphaned by restart'
         record.finished = new Date().toISOString()

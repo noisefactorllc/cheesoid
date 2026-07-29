@@ -1,3 +1,5 @@
+import { renderSafeMarkdown } from './safe-markdown.js'
+
 // Thread viewer — full reply-chain overlay backed by GET /api/chat/thread.
 // Currently DORMANT by operator direction: the per-message 🧵 button and the
 // search-hit thread action were both removed, so nothing opens this today.
@@ -5,8 +7,17 @@
 // thread views come back. Add-on module: integrates only through DOM
 // delegation and cheesoidChat.
 
-const esc = (s) => window.cheesoidChat?.escapeHtml?.(s ?? '') ?? String(s ?? '')
-const md = (s) => window.cheesoidChat?.renderMarkdown?.(s ?? '') ?? esc(s)
+// Fail-CLOSED: own the escaper and import the sanitizing renderer directly
+// rather than borrowing chat.js's copies via window.cheesoidChat, whose
+// optional-chaining fallbacks silently passed content through UNescaped /
+// unsanitized whenever chat.js had not finished loading.
+const esc = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
+const md = (s) => renderSafeMarkdown(s ?? '')
 
 let overlay = null
 

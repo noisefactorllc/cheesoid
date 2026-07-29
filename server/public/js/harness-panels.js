@@ -1,3 +1,5 @@
+import { renderSafeMarkdown } from './safe-markdown.js'
+
 // harness-panels.js — collapsible harness sidebar panels + peer approval
 // banner. Loaded as a module AFTER chat.js. Builds only on the documented
 // integration surface (window.cheesoidChat, window.cheesoidHooks) and
@@ -11,12 +13,21 @@
 
 const POLL_MS = 15000
 
-// Filled in from window.cheesoidChat during init(). Fallbacks exist only so
-// this module never throws if it somehow runs before chat.js finishes
-// (see resilience notes below) — in normal load order chat.js always sets
-// these first.
-let escapeHtml = (s) => String(s == null ? '' : s)
-let renderMarkdown = (s) => escapeHtml(s)
+// Real, fail-CLOSED rendering helpers. This module owns a proper 5-character
+// HTML escaper and imports the one sanitized-markdown boundary directly,
+// rather than borrowing them from window.cheesoidChat during init(). The old
+// borrow defaulted to identity functions and only upgraded `if (window
+// .cheesoidChat)`, so any load order where chat.js had not finished turned
+// every sink below into an injection point (fail-open).
+function escapeHtml(str) {
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
+}
+const renderMarkdown = renderSafeMarkdown
 
 // ---------------------------------------------------------------------------
 // fetch helpers — every network call funnels through these three. None of
@@ -677,15 +688,64 @@ function ensureWikiOverlay() {
 }
 
 // Turn the agent's [[slug]] wiki links and [[memory:file.md]] memory
-// references into in-overlay navigation, so users can drill from a wiki
-// page down into the memory topics it cites. Runs on the rendered HTML —
-// double-bracket syntax passes through marked untouched.
+// references into in-overlay navigation, so users can drill from a wiki page
+// down into the memory topics it cites.
+//
+// SECURITY: this runs on already-DOMPurify-sanitized HTML and rewrites ONLY
+// text nodes. The previous version ran the regex over the whole HTML string —
+// attribute values included — so a `[[ref]]` inside e.g. `title="[[a]]"` was
+// turned into an <a> that broke out of the attribute (and past the sanitizer,
+// which had already run). A TreeWalker never visits attributes, so walking
+// text nodes closes that sink structurally and leaves real anchors — including
+// the sanitizer's rel="nofollow noopener noreferrer" hook output — untouched.
+const WIKI_REF_RE = /\[\[memory:([\w][\w.-]{0,100}\.md)\]\]|\[\[([a-z0-9][a-z0-9-]{0,79})\]\]/g
+
+function buildWikiLink(memoryFile, slug) {
+  const a = document.createElement('a')
+  a.href = '#'
+  a.className = 'harness-wiki-link'
+  if (memoryFile) {
+    a.dataset.memory = memoryFile
+    a.textContent = `memory/${memoryFile}`
+  } else {
+    a.dataset.wiki = slug
+    a.textContent = slug
+  }
+  return a
+}
+
+function linkifyTextNode(node) {
+  const text = node.nodeValue
+  WIKI_REF_RE.lastIndex = 0
+  if (!WIKI_REF_RE.test(text)) return
+  const frag = document.createDocumentFragment()
+  let last = 0
+  let m
+  WIKI_REF_RE.lastIndex = 0
+  while ((m = WIKI_REF_RE.exec(text)) !== null) {
+    if (m.index > last) frag.appendChild(document.createTextNode(text.slice(last, m.index)))
+    frag.appendChild(buildWikiLink(m[1], m[2]))
+    last = m.index + m[0].length
+  }
+  if (last < text.length) frag.appendChild(document.createTextNode(text.slice(last)))
+  node.parentNode.replaceChild(frag, node)
+}
+
 function linkifyWikiRefs(html) {
-  return html
-    .replace(/\[\[memory:([\w][\w.-]{0,100}\.md)\]\]/g,
-      (_, file) => `<a href="#" class="harness-wiki-link" data-memory="${escapeHtml(file)}">memory/${escapeHtml(file)}</a>`)
-    .replace(/\[\[([a-z0-9][a-z0-9-]{0,79})\]\]/g,
-      (_, slug) => `<a href="#" class="harness-wiki-link" data-wiki="${escapeHtml(slug)}">${escapeHtml(slug)}</a>`)
+  // Parse the (already-sanitized) HTML into a detached container. Setting
+  // innerHTML never executes scripts, and the input carries no active content.
+  const container = document.createElement('div')
+  container.innerHTML = html
+  const walker = document.createTreeWalker(container, NodeFilter.SHOW_TEXT)
+  const nodes = []
+  // Snapshot first — replacing a node mid-walk would disturb the traversal.
+  for (let n = walker.nextNode(); n; n = walker.nextNode()) nodes.push(n)
+  for (const n of nodes) {
+    // Never nest a wiki link inside an existing anchor.
+    if (n.parentElement && n.parentElement.closest('a')) continue
+    linkifyTextNode(n)
+  }
+  return container.innerHTML
 }
 
 async function openWikiPage(slug, title) {
@@ -876,10 +936,6 @@ function handleHarnessEvent(ev) {
 function init() {
   const sidebar = document.getElementById('sidebar')
   if (!sidebar) return // headless page — nothing to attach to
-
-  const cc = window.cheesoidChat
-  if (cc && typeof cc.escapeHtml === 'function') escapeHtml = cc.escapeHtml
-  if (cc && typeof cc.renderMarkdown === 'function') renderMarkdown = cc.renderMarkdown
 
   ensureBanner()
   ensureWikiOverlay()

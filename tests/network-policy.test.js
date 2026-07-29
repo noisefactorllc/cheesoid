@@ -5,6 +5,7 @@ import {
   isGlobalAddress,
   requestPublic,
   resolvePublicTarget,
+  tlsServername,
 } from '../server/lib/network-policy.js'
 
 describe('outbound network policy', () => {
@@ -41,6 +42,42 @@ describe('outbound network policy', () => {
     }
     assert.equal(isGlobalAddress('8.8.8.8'), true)
     assert.equal(isGlobalAddress('2606:4700:4700::1111'), true)
+  })
+
+  it('blocks IPv4-translated (RFC 2765) and SRv6 (RFC 9602) ranges without breaking IPv4 egress', () => {
+    assert.equal(isGlobalAddress('::ffff:0:127.0.0.1'), false, 'IPv4-translated ::ffff:0:0:0/96 must be non-global')
+    assert.equal(isGlobalAddress('::ffff:0:1'), false, 'IPv4-translated range must be non-global')
+    assert.equal(isGlobalAddress('5f00::1'), false, 'SRv6 5f00::/16 must be non-global')
+    // Guard: these IPv6 subnets must not collaterally block the entire IPv4
+    // space (adding the IPv4-mapped ::ffff:0:0/96 would — Node checks it against
+    // IPv4 rules and every v4 address maps into it).
+    assert.equal(isGlobalAddress('8.8.8.8'), true)
+    assert.equal(isGlobalAddress('1.1.1.1'), true)
+    assert.equal(isGlobalAddress('2606:4700:4700::1111'), true)
+  })
+
+  it('does not echo the resolved internal IP in a refusal (DNS oracle)', async () => {
+    await assert.rejects(
+      () => resolvePublicTarget(new URL('https://oracle.example/'), {
+        lookup: async () => [{ address: '10.11.12.13', family: 4 }],
+      }),
+      (err) => {
+        assert.ok(
+          !err.message.includes('10.11.12.13'),
+          `refusal must not echo the internal IP: ${err.message}`,
+        )
+        assert.match(err.message, /non-global|private/i)
+        return true
+      },
+    )
+  })
+
+  it('omits TLS servername for IP literals (brackets stripped) but keeps it for DNS names', () => {
+    assert.equal(tlsServername('[::1]'), undefined)
+    assert.equal(tlsServername('[2001:db8::1]'), undefined)
+    assert.equal(tlsServername('127.0.0.1'), undefined)
+    assert.equal(tlsServername('example.com'), 'example.com')
+    assert.equal(tlsServername('sub.example.co.uk'), 'sub.example.co.uk')
   })
 
   it('resolves once, validates every answer, and pins the selected address', async () => {

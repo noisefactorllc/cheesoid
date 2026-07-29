@@ -15,6 +15,7 @@ import { RoomClient } from './room-client.js'
 import { allowPrivatePeers, resolvePublicTarget } from './network-policy.js'
 
 const OVERRIDES_FILE = 'model-overrides.json'
+const OVERRIDABLE_TIERS = ['model', 'attention', 'cognition', 'reasoner', 'reflection', 'subagent']
 
 /**
  * The harness composes the next-gen subsystems for one persona: secrets,
@@ -197,9 +198,10 @@ export function createHarness({ personaDir, config, registry }) {
 
   harness.modelAllowList = () => {
     const fromPolicy = Array.isArray(config.model_policy?.allow) ? config.model_policy.allow : []
-    const fromTiers = ['model', 'attention', 'cognition', 'reasoner', 'reflection', 'subagent']
-      .flatMap(t => config[t] || [])
-    const fromDefaults = Object.values(TIER_DEFAULTS).flat()
+    const fromTiers = OVERRIDABLE_TIERS.flatMap(t => config[t] || [])
+    // TIER_DEFAULTS are OpenRouter models; don't advertise them as allowed when
+    // the persona explicitly opted out of the default policy.
+    const fromDefaults = config.model_policy === 'none' ? [] : Object.values(TIER_DEFAULTS).flat()
     return [...new Set([...fromPolicy, ...fromTiers, ...fromDefaults])]
   }
 
@@ -217,9 +219,19 @@ export function createHarness({ personaDir, config, registry }) {
     let overrides
     try { overrides = JSON.parse(await readFile(file, 'utf8')) } catch { return }
     const allowed = harness.modelAllowList()
-    for (const [tierKey, model] of Object.entries(overrides)) {
-      if (!config[tierKey] || !allowed.includes(model)) continue
-      config[tierKey] = [model, ...config[tierKey].filter(m => m !== model)]
+    // Iterate only the known tier keys with hasOwn — a "__proto__" key from a
+    // hand-edited or injection-poisoned file would otherwise resolve
+    // config['__proto__'] to Object.prototype and throw on .filter, bricking
+    // every subsequent boot until the file is deleted by hand.
+    for (const tierKey of OVERRIDABLE_TIERS) {
+      if (!Object.hasOwn(overrides, tierKey)) continue
+      const model = overrides[tierKey]
+      const chain = config[tierKey]
+      if (!chain || !allowed.includes(model)) continue
+      // In-place mutation so a Modality constructed before start() sees the pin.
+      const rest = chain.filter(m => m !== model)
+      chain.length = 0
+      chain.push(model, ...rest)
       console.log(`[harness] restored model override: ${tierKey} → ${model}`)
     }
   }

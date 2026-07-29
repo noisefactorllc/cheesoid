@@ -213,6 +213,17 @@ function buildRoomTools(room, config) {
   }
 
   async function execute(name, input, options) {
+    // Autonomy gate. Room tools are dispatched here, NOT through the harness
+    // tool group that self-gates, so without this a self-directed turn could
+    // speak (send/reply/react) or wake a peer (internal) unprompted at any
+    // autonomy level. `internal` is only "speaking" when it triggers a peer;
+    // a thought-only backchannel is upkeep and stays ungated.
+    const autonomy = room.harness?.autonomy
+    if (autonomy && (name !== 'internal' || input?.trigger)) {
+      const origin = options?.origin || room?._turnOrigin || 'user'
+      const gate = autonomy.gate(name, origin)
+      if (!gate.allowed) return { output: gate.reason, is_error: true }
+    }
     switch (name) {
       case 'send_chat_message': {
         const chatMsgId = shortMsgId()

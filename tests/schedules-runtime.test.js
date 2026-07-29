@@ -1,6 +1,6 @@
 import { describe, it, afterEach } from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtemp, readFile } from 'node:fs/promises'
+import { mkdtemp, readFile, writeFile, mkdir } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createScheduleStore } from '../server/lib/schedule-store.js'
@@ -177,5 +177,98 @@ describe('schedule store', () => {
       () => store.create({ name: 's50', cron: '0 0 * * *', prompt: 'ping' }),
       /schedule limit reached/
     )
+  })
+
+  // A syntactically-valid cron whose next occurrence is unreachable within
+  // nextMatch's 366-day window (Feb 30 never exists; a leap-day far from a
+  // leap year is >366 days out). create() must reject BEFORE persisting so the
+  // poison record can never reach disk and brick list()/start() on every turn.
+  for (const cron of ['0 0 30 2 *', '0 0 29 2 *']) {
+    it(`create() rejects a poison cron (${cron}), persists nothing, and leaves list() working`, async () => {
+      const runtimeDir = await makeRuntimeDir()
+      // Pin now far from any leap day so '0 0 29 2 *' is reliably >366d out.
+      const store = makeStore(runtimeDir, { now: () => Date.UTC(2026, 6, 29, 12, 0, 0) })
+
+      await assert.rejects(
+        () => store.create({ name: 'poison', cron, prompt: 'p' }),
+        /invalid schedule: /
+      )
+
+      // Nothing was written to disk.
+      await assert.rejects(
+        () => readFile(join(runtimeDir, 'schedules.json'), 'utf8'),
+        /ENOENT/
+      )
+      // And list() still works (does not throw).
+      assert.deepEqual(await store.list(), [])
+    })
+  }
+
+  it('list()/start() tolerate a legacy poison-cron record already on disk', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    await mkdir(runtimeDir, { recursive: true })
+    const poison = {
+      id: 'deadbeef', name: 'legacy', cron: '0 0 30 2 *', at: null,
+      prompt: 'p', once: false, created: new Date().toISOString(),
+      createdBy: null, lastFired: null,
+    }
+    await writeFile(join(runtimeDir, 'schedules.json'), JSON.stringify([poison], null, 2))
+
+    const store = makeStore(runtimeDir)
+
+    const list = await store.list() // must not throw
+    assert.equal(list.length, 1)
+    assert.equal(list[0].id, 'deadbeef')
+    assert.equal(list[0].next, null, 'un-computable next degrades to null, not a throw')
+
+    await store.start() // must not throw
+  })
+
+  it('does not drop an unfired past-due one-shot on list(), and fires it once on start()', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    await mkdir(runtimeDir, { recursive: true })
+    const base = Date.now()
+    const rec = {
+      id: 'abcd1234', name: 'oneshot', cron: null,
+      at: new Date(base - 10_000).toISOString(), // already past-due, never fired
+      prompt: 'p', once: true, created: new Date(base - 20_000).toISOString(),
+      createdBy: null, lastFired: null,
+    }
+    await writeFile(join(runtimeDir, 'schedules.json'), JSON.stringify([rec], null, 2))
+
+    const fired = []
+    const store = makeStore(runtimeDir, { onFire: async ({ schedule }) => { fired.push(schedule.id) } })
+
+    const list = await store.list()
+    assert.equal(list.length, 1, 'past-due unfired one-shot must survive list()')
+    assert.equal(list[0].id, 'abcd1234')
+
+    await store.start()
+    await wait(80)
+    assert.deepEqual(fired, ['abcd1234'], 'past-due one-shot fires once on start()')
+    assert.equal((await store.list()).length, 0, 'fired one-shot is then removed')
+  })
+
+  it('a recurring leap-day cron does not crash on re-arm when the next match is beyond the search window', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    // Feb 27 2028 (UTC) — safely within 366d of Feb 29 2028 in every timezone.
+    let nowMs = Date.UTC(2028, 1, 27, 0, 0, 0)
+    const fired = []
+    const store = makeStore(runtimeDir, { now: () => nowMs, onFire: async ({ schedule }) => { fired.push(schedule.id) } })
+
+    const rec = await store.create({ name: 'leap', cron: '0 0 29 2 *', prompt: 'p' })
+
+    // Advance past the fired occurrence; the next Feb 29 (2032) is now beyond
+    // the 366-day window, so re-arm's nextMatch throws.
+    nowMs = Date.UTC(2028, 5, 1, 0, 0, 0)
+    const ok = await store._fire(rec.id) // must not throw on re-arm
+    assert.equal(ok, true)
+    assert.deepEqual(fired, [rec.id])
+
+    const list = await store.list() // must not throw despite un-computable next
+    assert.equal(list.length, 1, 'recurring schedule is retained')
+    assert.equal(list[0].id, rec.id)
+    assert.equal(typeof list[0].lastFired, 'string')
+    assert.equal(list[0].next, null, 'next match beyond the window degrades to null')
   })
 })

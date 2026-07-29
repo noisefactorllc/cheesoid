@@ -38,6 +38,12 @@ for (const [network, prefix] of [
   ['2001:db8::', 32],
   ['2002::', 16],
   ['3fff::', 20],
+  // SRv6 (RFC 9602) and IPv4-translated (RFC 2765). NOTE: the IPv4-*mapped*
+  // range ::ffff:0:0/96 is deliberately NOT added — Node's BlockList checks it
+  // against IPv4 rules, so it would match every IPv4 address and block all v4
+  // egress. Mapped addresses to private v4 are already caught by the v4 rules.
+  ['5f00::', 16],
+  ['::ffff:0:0:0', 96],
   ['fc00::', 7],
   ['fec0::', 10],
   ['fe80::', 10],
@@ -58,6 +64,18 @@ export function isGlobalAddress(address) {
   if (family === 4) return !NON_GLOBAL.check(address, 'ipv4')
   if (family === 6) return !NON_GLOBAL.check(address, 'ipv6')
   return false
+}
+
+/**
+ * The TLS SNI servername to use for a URL hostname, or `undefined` when it
+ * should be omitted. `new URL('https://[::1]/').hostname` keeps the brackets,
+ * which yields ERR_TLS_CERT_ALTNAME_INVALID if passed as `servername`; IPv4
+ * literals additionally trigger DEP0123. For any IP literal we omit SNI
+ * entirely (there's no certificate name to match); DNS names pass through.
+ */
+export function tlsServername(hostname) {
+  const bare = String(hostname).replace(/^\[/, '').replace(/\]$/, '')
+  return isIP(bare) ? undefined : hostname
 }
 
 /**
@@ -91,7 +109,11 @@ export async function resolvePublicTarget(input, {
   }))
   for (const answer of normalized) {
     if (!answer.family || (!allowPrivate && !isGlobalAddress(answer.address))) {
-      throw new Error(`refusing ${hostname} — non-global/private address ${answer.address}`)
+      // Log the offending address server-side for diagnosis, but never echo it
+      // back to the caller — returning the resolved internal IP turns refusals
+      // into a DNS-rebinding oracle the model could use to map a private network.
+      console.log(`[network-policy] refusing ${hostname}: resolved to non-global/private address ${answer.address}`)
+      throw new Error(`refusing ${hostname} — resolves to a non-global/private address`)
     }
   }
 
@@ -172,7 +194,7 @@ export async function requestPublic(input, {
       // freshly validated and pinned lookup.
       agent: false,
       lookup: target.lookup,
-      servername: url.hostname,
+      servername: tlsServername(url.hostname),
     }, (res) => {
       const chunks = []
       let received = 0

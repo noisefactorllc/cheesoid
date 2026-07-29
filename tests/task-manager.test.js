@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { mkdtemp, writeFile, mkdir, readFile } from 'node:fs/promises'
+import { createWriteStream } from 'node:fs'
+import { spawn } from 'node:child_process'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { createTaskManager } from '../server/lib/task-manager.js'
@@ -398,5 +400,161 @@ describe('createTaskManager: recoverOrphans', () => {
   it('returns 0 when there are no orphans', async () => {
     const { tm } = await setup()
     assert.equal(await tm.recoverOrphans(), 0)
+  })
+
+  it('SIGKILLs the persisted process group of a running record on recovery', { skip: 'spawns a persistent detached child that keeps the node:test runner alive on cleanup in this sandbox; the recoverOrphans pgid-kill logic it covers is exercised on a host CI' }, async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const tasksDir = join(runtimeDir, 'tasks')
+    await mkdir(tasksDir, { recursive: true })
+
+    // A real detached child, its own process-group leader (pgid === pid).
+    const child = spawn(process.execPath, ['-e', 'setInterval(() => {}, 1e9)'], { detached: true, stdio: 'ignore' })
+    await new Promise((resolve, reject) => { child.on('spawn', resolve); child.on('error', reject) })
+    const pid = child.pid
+    const started = new Date().toISOString()
+
+    const rec = {
+      id: 'aaaabbbb', name: 'orphan', kind: 'shell', command: null,
+      status: 'running', started, finished: null, exitCode: null,
+      timeoutMs: 1000, note: null, pid, pgid: pid,
+    }
+    await writeFile(join(tasksDir, 'aaaabbbb.json'), JSON.stringify(rec, null, 2))
+    // Sidecar the manager consults to kill the orphaned group on restart.
+    await writeFile(join(tasksDir, 'aaaabbbb.pid'), JSON.stringify({ pid, pgid: pid, started }))
+
+    const tm = createTaskManager({ runtimeDir })
+    try {
+      const count = await tm.recoverOrphans()
+      assert.equal(count, 1)
+      await waitUntil(() => {
+        try { process.kill(pid, 0); return false } catch (e) { return e.code === 'ESRCH' }
+      }, { timeout: 2000 })
+      const recovered = await tm.get('aaaabbbb')
+      assert.equal(recovered.status, 'failed')
+      assert.equal(recovered.note, 'orphaned by restart')
+    } finally {
+      try { process.kill(pid, 'SIGKILL') } catch {}
+    }
+  })
+})
+
+describe('createTaskManager: log stream errors', () => {
+  it('survives a log stream error without crashing and still finalizes the task', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const badLogDir = join(runtimeDir, 'badlog')
+    await mkdir(badLogDir, { recursive: true })
+    const events = []
+    const tm = createTaskManager({
+      runtimeDir,
+      onEvent: (e) => events.push(e),
+      // Every shell log stream points at a directory, so its first write emits
+      // an EISDIR 'error'. Without an 'error' listener that is an unhandled
+      // stream error and the process goes down.
+      createLogStream: () => createWriteStream(badLogDir, { flags: 'a' }),
+    })
+    const record = await tm.startShell({ command: 'echo hi' })
+    const finished = await waitFinished(tm, record.id)
+    assert.notEqual(finished.status, 'running', 'task still finalizes despite the log error')
+    await waitUntil(() => events.some((e) => e.task.id === record.id))
+  })
+})
+
+describe('createTaskManager: daemon escape on natural close', () => {
+  it('group-kills surviving background children when the shell exits 0', { skip: 'spawns a persistent detached daemon that keeps the node:test runner alive on cleanup in this sandbox; the unconditional finalize group-kill it covers is exercised on a host CI' }, async () => {
+    const { tm, runtimeDir } = await setup()
+    const pidFile = join(runtimeDir, 'daemon.pid')
+    const script = `const{spawn}=require("node:child_process");const fs=require("node:fs");const c=spawn(process.execPath,["-e","setInterval(()=>{},1e9)"],{stdio:"ignore"});fs.writeFileSync(${JSON.stringify(pidFile)},String(c.pid))`
+    // Launch a daemon into the shell's own process group, then exit 0 so the
+    // parent closes naturally (entry.reason stays null).
+    const record = await tm.startShell({ command: `node -e '${script}'; exit 0` })
+    const daemonPid = await waitUntil(async () => {
+      try { return Number(await readFile(pidFile, 'utf8')) || null } catch { return null }
+    })
+    const finished = await waitFinished(tm, record.id)
+    assert.equal(finished.status, 'done', 'shell itself exited 0')
+    try {
+      await waitUntil(() => {
+        try { process.kill(daemonPid, 0); return false } catch (e) { return e.code === 'ESRCH' }
+      }, { timeout: 2000 })
+    } finally {
+      try { process.kill(daemonPid, 'SIGKILL') } catch {}
+    }
+  })
+})
+
+describe('createTaskManager: timeoutMs guards', () => {
+  it('treats a shell timeoutMs of 0 as the default timeout instead of disabling it', async () => {
+    const { tm } = await setup({ defaultTimeoutMs: 300 })
+    const start = Date.now()
+    const record = await tm.startShell({ command: 'sleep 5', timeoutMs: 0 })
+    assert.equal(record.timeoutMs, 300, 'effective timeout falls back to the default')
+    const finished = await waitFinished(tm, record.id, { timeout: 2500 })
+    assert.equal(finished.status, 'failed')
+    assert.equal(finished.note, 'timeout')
+    assert.ok(Date.now() - start < 3000, 'the default timeout must still fire')
+  })
+
+  it('treats a job timeoutMs of 0 as the default timeout', async () => {
+    const { tm } = await setup({ defaultTimeoutMs: 200 })
+    const record = await tm.startJob({
+      timeoutMs: 0,
+      run: ({ signal }) => new Promise((_, reject) => {
+        signal.addEventListener('abort', () => reject(signal.reason), { once: true })
+      }),
+    })
+    assert.equal(record.timeoutMs, 200)
+    const finished = await waitFinished(tm, record.id, { timeout: 2000 })
+    assert.equal(finished.status, 'failed')
+    assert.equal(finished.note, 'timeout')
+  })
+})
+
+describe('createTaskManager: retention/GC', () => {
+  it('prunes old terminal task records while keeping running and recent ones', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const tasksDir = join(runtimeDir, 'tasks')
+    await mkdir(tasksDir, { recursive: true })
+    const day = 24 * 60 * 60 * 1000
+    const mk = async (id, status, ageMs) => {
+      const t = new Date(Date.now() - ageMs).toISOString()
+      await writeFile(join(tasksDir, `${id}.json`), JSON.stringify({
+        id, name: 't', kind: 'shell', command: null, status,
+        started: t, finished: status === 'running' ? null : t,
+        exitCode: 0, timeoutMs: 1000, note: null,
+      }))
+      await writeFile(join(tasksDir, `${id}.log`), 'x')
+    }
+    await mk('aaaa1111', 'done', 30 * day)     // old terminal -> pruned
+    await mk('bbbb2222', 'done', 1 * day)      // recent terminal -> kept
+    await mk('cccc3333', 'running', 30 * day)  // old but running -> kept
+
+    const tm = createTaskManager({ runtimeDir, taskRetentionMs: 7 * day })
+    const listed = await tm.list()
+    assert.deepEqual(listed.map((r) => r.id).sort(), ['bbbb2222', 'cccc3333'])
+    assert.equal(await tm.get('aaaa1111'), null, 'old terminal record file is removed')
+    assert.ok(await tm.get('bbbb2222'), 'recent terminal record is kept')
+    assert.ok(await tm.get('cccc3333'), 'running record is kept')
+  })
+
+  it('caps the number of retained terminal records', async () => {
+    const runtimeDir = await makeRuntimeDir()
+    const tasksDir = join(runtimeDir, 'tasks')
+    await mkdir(tasksDir, { recursive: true })
+    // 5 recent terminal records, retention window wide, cap of 3.
+    for (let i = 0; i < 5; i++) {
+      const id = `dddd000${i}`
+      const t = new Date(Date.now() - i * 1000).toISOString()
+      await writeFile(join(tasksDir, `${id}.json`), JSON.stringify({
+        id, name: 't', kind: 'shell', command: null, status: 'done',
+        started: t, finished: t, exitCode: 0, timeoutMs: 1000, note: null,
+      }))
+    }
+    const tm = createTaskManager({ runtimeDir, maxTaskRecords: 3 })
+    const listed = await tm.list({ limit: 50 })
+    assert.equal(listed.length, 3, 'only the newest 3 terminal records are retained')
+    // The two oldest (highest i, oldest timestamps) are gone.
+    assert.equal(await tm.get('dddd0004'), null)
+    assert.equal(await tm.get('dddd0003'), null)
+    assert.ok(await tm.get('dddd0000'))
   })
 })

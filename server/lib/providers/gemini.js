@@ -46,6 +46,16 @@ export function _translateMessages(system, messages) {
       for (const block of msg.content) {
         if (block.type === 'text') {
           parts.push({ text: block.text })
+        } else if (block.type === 'image' && block.source?.type === 'base64') {
+          // Media survival: carry an image block through as an inlineData part
+          // rather than dropping it. Mirrors the openai-compat translator, in
+          // Gemini's { inlineData: { mimeType, data } } shape.
+          parts.push({
+            inlineData: {
+              mimeType: block.source.media_type,
+              data: block.source.data,
+            },
+          })
         } else if (block.type === 'tool_use') {
           parts.push({
             functionCall: {

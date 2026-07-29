@@ -10,7 +10,7 @@ import chatRouter from './routes/chat.js'
 import healthRouter from './routes/health.js'
 import webhookRouter from './routes/webhook.js'
 import harnessRouter from './routes/harness.js'
-import { setUiSecurityHeaders } from './lib/security-headers.js'
+import { setUiSecurityHeaders, applyStaticUiHeaders } from './lib/security-headers.js'
 
 const __dirname = dirname(fileURLToPath(import.meta.url))
 const app = express()
@@ -50,7 +50,13 @@ if (!persona.config.headless) {
       html.replace('{{THEME}}', theme).replace('{{DATA_THEME}}', dataTheme)
     )
   })
-  app.use(express.static(join(__dirname, 'public'), { index: false }))
+  // Static HTML must carry the same UI CSP as the '/' route above; JS/CSS/etc.
+  // must not. applyStaticUiHeaders enforces that split. (Does not touch the
+  // media route, which is served by harnessRouter with its own sandboxed CSP.)
+  app.use(express.static(join(__dirname, 'public'), {
+    index: false,
+    setHeaders: applyStaticUiHeaders,
+  }))
 }
 
 app.locals.persona = persona

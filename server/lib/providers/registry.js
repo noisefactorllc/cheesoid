@@ -4,6 +4,31 @@ import { createOpenAIResponsesProvider } from './openai-responses.js'
 import { createGeminiProvider } from './gemini.js'
 import { resolveModel } from './resolve.js'
 
+// Standing operator policy: no x-ai / grok model, ever. Enforced HARD here
+// because resolve() is the one chokepoint every model id — persona tiers,
+// model_policy.allow, subagent overrides — must pass through. Matched after
+// the provider suffix is split off, so both "x-ai/grok:openrouter" and a bare
+// "x-ai/grok" are refused.
+const BANNED_MODEL_PATTERN = /^x-ai\//i
+
+/**
+ * Build the openai-compat config for a `type: openrouter` provider: OpenRouter
+ * defaults (fixed base_url, env api-key fallback, reasoning + web plugin on)
+ * merged with the persona's own settings. A persona-supplied base_url is
+ * HONORED — e.g. an OpenRouter-compatible proxy — rather than silently forced
+ * back to openrouter.ai. Exported for testing the merge precedence.
+ */
+export function _openrouterCompatConfig(config) {
+  return {
+    supports_reasoning_budget: true,
+    web_search: true,
+    ...config,
+    type: 'openai-compat',
+    base_url: config.base_url || 'https://openrouter.ai/api/v1',
+    api_key: config.api_key || process.env.OPENROUTER_API_KEY,
+  }
+}
+
 /**
  * Registry of named provider configs with lazy instantiation.
  *
@@ -82,19 +107,13 @@ export class ProviderRegistry {
       if (type === 'anthropic') {
         provider = createAnthropicProvider(config)
       } else if (type === 'openrouter') {
-        // openai-compat preconfigured for OpenRouter: the base_url is fixed,
-        // the key falls back to the environment, and capabilities OpenRouter
-        // actually supports — reasoning.max_tokens, the web plugin — default
-        // on instead of silently dropping (the trap that ate thinking_budget
-        // for every openai-compat OpenRouter deployment).
-        provider = createOpenAICompatProvider({
-          supports_reasoning_budget: true,
-          web_search: true,
-          ...config,
-          type: 'openai-compat',
-          base_url: 'https://openrouter.ai/api/v1',
-          api_key: config.api_key || process.env.OPENROUTER_API_KEY,
-        })
+        // openai-compat preconfigured for OpenRouter: base_url defaults to the
+        // OpenRouter endpoint but honors a persona override, the key falls back
+        // to the environment, and capabilities OpenRouter actually supports —
+        // reasoning.max_tokens, the web plugin — default on instead of silently
+        // dropping (the trap that ate thinking_budget for every openai-compat
+        // OpenRouter deployment).
+        provider = createOpenAICompatProvider(_openrouterCompatConfig(config))
       } else if (type === 'openai-compat') {
         provider = createOpenAICompatProvider(config)
       } else if (type === 'openai-responses') {
@@ -119,6 +138,11 @@ export class ProviderRegistry {
   resolve(modelString) {
     const knownProviders = new Set([...this._configs.keys(), 'anthropic'])
     const { modelId, providerName } = resolveModel(modelString, knownProviders)
+    if (BANNED_MODEL_PATTERN.test(modelId)) {
+      throw new Error(
+        `Refusing to resolve "${modelString}": x-ai / grok models are banned by standing operator policy.`,
+      )
+    }
     const name = providerName || this._defaultName
     return { modelId, provider: this.get(name) }
   }

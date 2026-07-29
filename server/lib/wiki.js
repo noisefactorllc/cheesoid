@@ -1,4 +1,5 @@
-import { readFile, writeFile, mkdir, readdir, stat, unlink } from 'node:fs/promises'
+import { constants } from 'node:fs'
+import { open, readFile, writeFile, mkdir, readdir, stat, unlink } from 'node:fs/promises'
 import { resolve, relative, join } from 'node:path'
 
 // Wiki page slugs are short, URL-safe, lowercase identifiers. This keeps
@@ -56,12 +57,19 @@ export function createWiki(personaDir) {
     return ''
   }
 
+  // O_NOFOLLOW matches memory.js: a page path that turns out to be a symlink
+  // (planted to escape the wiki dir) is refused rather than followed. A symlink
+  // yields ELOOP, which — like a missing file — reads as "no such page" (null).
   async function read(slug) {
     const filePath = resolvePagePath(slug)
+    let handle
     try {
-      return await readFile(filePath, 'utf8')
+      handle = await open(filePath, constants.O_RDONLY | (constants.O_NOFOLLOW || 0))
+      return await handle.readFile('utf8')
     } catch {
       return null
+    } finally {
+      await handle?.close()
     }
   }
 
@@ -121,7 +129,20 @@ export function createWiki(personaDir) {
       throw new Error(`wiki page too large: ${bytes} bytes exceeds ${WIKI_CONTENT_CAP_BYTES} byte cap`)
     }
     await mkdir(dir, { recursive: true })
-    await writeFile(filePath, content, 'utf8')
+    // O_NOFOLLOW + O_CREAT/O_TRUNC (memory.js parity): if a symlink was planted
+    // at the page path, open() fails with ELOOP before any truncation, so we
+    // never clobber a target outside the wiki directory.
+    let handle
+    try {
+      handle = await open(
+        filePath,
+        constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | (constants.O_NOFOLLOW || 0),
+        0o600,
+      )
+      await handle.writeFile(content, 'utf8')
+    } finally {
+      await handle?.close()
+    }
     await regenerateIndex()
   }
 

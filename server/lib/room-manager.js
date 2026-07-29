@@ -1,5 +1,5 @@
 // server/lib/room-manager.js
-import { Room, redactKeys } from './chat-session.js'
+import { Room, redactHistoryEntry } from './chat-session.js'
 
 /**
  * Manages multiple named rooms (channels) for a single agent.
@@ -93,7 +93,7 @@ export class RoomManager {
       timestamp: Date.now(),
     }
     if (model) event.model = model
-    const data = redactKeys(`data: ${JSON.stringify(event)}\n\n`, this.resolve()?.harness?.secrets?.values?.())
+    const data = `data: ${JSON.stringify(redactHistoryEntry(event, this.resolve()?.harness?.secrets?.values?.()))}\n\n`
 
     for (const name of [from, to]) {
       const clients = this._dmClients.get(name)

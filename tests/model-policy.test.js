@@ -1,6 +1,6 @@
 import { test } from 'node:test'
 import assert from 'node:assert'
-import { applyModelPolicy, TIER_DEFAULTS, tierChain, shouldEnableSleep } from '../server/lib/model-policy.js'
+import { applyModelPolicy, TIER_DEFAULTS, tierChain, shouldEnableSleep, validateRunnableModel } from '../server/lib/model-policy.js'
 
 test('fills all tiers for a zero-config persona when openrouter is available', () => {
   const config = { name: 'bare' }
@@ -99,4 +99,151 @@ test('sleep defaults only for policy-default personas or explicit sleep config',
   assert.equal(shouldEnableSleep({ model: ['legacy'], sleep: false }), false)
   assert.equal(shouldEnableSleep({ model: ['legacy'], sleep: { schedule: '0 4 * * *' } }), true)
   assert.equal(shouldEnableSleep({ _modelPolicy: { defaultsEnabled: true } }), true)
+})
+
+// Capture console.log for warning-assertion tests.
+function captureLogs() {
+  const original = console.log
+  const messages = []
+  console.log = (...args) => { messages.push(args.map(String).join(' ')) }
+  return {
+    messages,
+    find: (re) => messages.find(m => re.test(m)),
+    restore: () => { console.log = original },
+  }
+}
+
+// Finding 4: model_policy: 'default' with every extended tier set by hand fills
+// nothing, so the old code never wrote the defaultsEnabled marker and sleep was
+// silently disabled — contradicting the documented default schedule.
+test('model_policy default keeps sleep enabled even when all extended tiers are explicit', () => {
+  const config = {
+    name: 'fully-explicit',
+    model: ['legacy:anthropic'],
+    model_policy: 'default',
+    reflection: ['r:openrouter'],
+    transcription: ['t:openrouter'],
+    subagent: ['s:openrouter'],
+  }
+  const filled = applyModelPolicy(config, { hasOpenRouter: true })
+  assert.deepStrictEqual(filled, [], 'nothing needed filling')
+  assert.ok(config._modelPolicy, 'the policy marker is written anyway')
+  assert.strictEqual(config._modelPolicy.defaultsEnabled, true)
+  assert.equal(shouldEnableSleep(config), true)
+})
+
+// A zero-config persona still writes the marker (regression guard for finding 4).
+test('zero-config persona records defaultsEnabled', () => {
+  const config = { name: 'bare' }
+  applyModelPolicy(config, { hasOpenRouter: true })
+  assert.strictEqual(config._modelPolicy.defaultsEnabled, true)
+  assert.equal(shouldEnableSleep(config), true)
+})
+
+// Finding 5: a per-tier model_policy override of an explicit top-level tier is
+// still honored, but now logs a conflict warning so the clobber isn't silent.
+test('model_policy override of an explicit top-level tier logs a conflict warning', () => {
+  const logs = captureLogs()
+  let config
+  try {
+    config = {
+      name: 'conflict',
+      cognition: ['explicit/cog:openrouter'],
+      model_policy: { cognition: ['policy/cog:openrouter'] },
+    }
+    applyModelPolicy(config, { hasOpenRouter: true })
+  } finally {
+    logs.restore()
+  }
+  // Override still wins — behavior preserved.
+  assert.deepStrictEqual(config.cognition, ['policy/cog:openrouter'])
+  assert.ok(
+    logs.find(/model_policy\.cognition overrides the explicit top-level cognition tier/i),
+    'a conflict warning is logged',
+  )
+})
+
+// executor override of an explicit top-level execution (model) tier also warns.
+test('model_policy.executor override of an explicit execution tier warns', () => {
+  const logs = captureLogs()
+  let config
+  try {
+    config = {
+      name: 'exec-conflict',
+      model: ['explicit/exec:openrouter'],
+      model_policy: { executor: ['policy/exec:openrouter'] },
+    }
+    applyModelPolicy(config, { hasOpenRouter: true })
+  } finally {
+    logs.restore()
+  }
+  assert.deepStrictEqual(config.model, ['policy/exec:openrouter'])
+  assert.ok(
+    logs.find(/model_policy\.executor overrides the explicit top-level execution tier/i),
+    'a conflict warning is logged for the execution tier',
+  )
+})
+
+// Finding 5: an unrecognized key inside a model_policy object silently no-ops
+// today; warn so a typo'd tier name is visible.
+test('an unrecognized model_policy key is warned about (typo protection)', () => {
+  const logs = captureLogs()
+  let config
+  try {
+    config = {
+      name: 'typo',
+      model: ['m:openrouter'],
+      model_policy: { congition: ['x:openrouter'] }, // misspelled "cognition"
+    }
+    applyModelPolicy(config, { hasOpenRouter: true })
+  } finally {
+    logs.restore()
+  }
+  assert.strictEqual(config.cognition, undefined, 'the typo does nothing to cognition')
+  assert.ok(logs.find(/unrecognized model_policy key "congition"/i), 'the typo is flagged')
+})
+
+// A recognized key (allow, a valid tier) must NOT trip the typo warning.
+test('recognized model_policy keys do not trigger the typo warning', () => {
+  const logs = captureLogs()
+  try {
+    applyModelPolicy(
+      { name: 'ok', model: ['m:anthropic'], model_policy: { allow: ['m:anthropic'], subagent: ['s:openrouter'] } },
+      { hasOpenRouter: true },
+    )
+  } finally {
+    logs.restore()
+  }
+  assert.strictEqual(logs.find(/unrecognized model_policy key/i), undefined)
+})
+
+// Finding 7: a zero-config persona with no OPENROUTER key fills no model, then
+// the first turn throws `config.model[0]` inside the swallowing turn-catch —
+// the agent looks alive but never answers. validateRunnableModel makes that
+// state detectable up front.
+test('validateRunnableModel accepts any persona with a runnable tier', () => {
+  assert.equal(validateRunnableModel({ model: ['m:openrouter'] }).ok, true)
+  assert.equal(validateRunnableModel({ cognition: ['c:openrouter'] }).ok, true)
+  assert.equal(validateRunnableModel({ orchestrator: 'gpt:openai' }).ok, true)
+  assert.equal(validateRunnableModel({ reasoner: ['r:openrouter'] }).ok, true)
+})
+
+test('validateRunnableModel flags a persona with no runnable model tier', () => {
+  const result = validateRunnableModel({ name: 'empty' })
+  assert.equal(result.ok, false)
+  assert.match(result.reason, /OPENROUTER_API_KEY|model|tier/i)
+})
+
+test('a zero-config persona with no OPENROUTER key is detectably non-runnable', () => {
+  const config = { name: 'stranded' }
+  const filled = applyModelPolicy(config, { hasOpenRouter: false })
+  assert.deepStrictEqual(filled, [])
+  // The exact state that later dereferences an undefined config.model[0].
+  assert.equal(validateRunnableModel(config).ok, false)
+})
+
+test('the same persona becomes runnable once the policy can fill from defaults', () => {
+  const config = { name: 'rescued' }
+  applyModelPolicy(config, { hasOpenRouter: true })
+  assert.equal(validateRunnableModel(config).ok, true)
 })

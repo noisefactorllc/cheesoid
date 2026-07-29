@@ -15,14 +15,24 @@ export const AUTONOMY_LEVELS = ['low', 'medium', 'high']
 // not a liberty).
 const GATED = {
   // medium+: the agent may run background work and manage its own calendar,
-  // and may speak unprompted.
+  // and may speak unprompted. "Speaking" covers every way the agent puts words
+  // in front of others on its own initiative — a plain message, a reply that
+  // revives a thread, a reaction, or an `internal` backchannel that wakes a
+  // peer. All are held to the same bar as send_chat_message.
   task_start: 'medium',
   spawn_subagent: 'medium',
   schedule_create: 'medium',
   send_chat_message: 'medium',
+  reply_to_message: 'medium',
+  react_to_message: 'medium',
+  internal: 'medium',
   shell: 'medium',
-  // high only: changing the active model is the deepest self-directed
-  // control still exposed to the agent. Network topology is human-only.
+  // high only: changing the active model is the deepest self-directed control
+  // still exposed to the agent, and fetch_url is an unbounded data-exfiltration
+  // channel (the network policy filters destinations, not payload) that would
+  // otherwise run on self-directed turns with no human present. Network
+  // topology is human-only.
+  fetch_url: 'high',
   set_model: 'high',
 }
 
@@ -52,12 +62,12 @@ export function createAutonomy(config) {
     describe() {
       const lines = [`Your autonomy level is "${level}".`]
       if (rank >= 1) {
-        lines.push('On self-directed turns (idle, sleep, scheduled) you may start background tasks, spawn subagents, manage your schedules, and speak unprompted when you have something worth saying.')
+        lines.push('On self-directed turns (idle, sleep, scheduled) you may start background tasks, spawn subagents, manage your schedules, and speak on your own initiative — a message, a reply, a reaction, or a backchannel — when you have something worth saying.')
       } else {
-        lines.push('On self-directed turns, observe and maintain memory; do not start work or speak unprompted.')
+        lines.push('On self-directed turns, observe and maintain memory only; do not start work, and do not send messages, replies, or reactions unprompted.')
       }
       if (rank >= 2) {
-        lines.push('You may also join known peer rooms and adjust your own model within the allowed list — your judgment is trusted.')
+        lines.push('You may also adjust your own model within the allowed list — your judgment is trusted.')
       }
       return lines.join(' ')
     },

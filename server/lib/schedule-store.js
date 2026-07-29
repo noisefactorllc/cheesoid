@@ -96,7 +96,16 @@ export function createScheduleStore({ runtimeDir, onFire = null, now = () => Dat
     if (record.cron) {
       const schedule = parseCron(record.cron)
       if (!schedule) return null
-      return nextMatch(schedule, new Date(now())).getTime()
+      // nextMatch throws when a syntactically-valid cron has no occurrence
+      // within its 366-day window (Feb 30, a leap-day far from a leap year).
+      // Degrade to null so one bad (typically legacy/hand-edited) record can't
+      // break arm()/start() for the whole store; create() rejects such crons.
+      try {
+        return nextMatch(schedule, new Date(now())).getTime()
+      } catch (err) {
+        console.warn(`[schedule-store] no upcoming fire for ${record.id} (${record.name}): ${err.message}`)
+        return null
+      }
     }
     return null
   }
@@ -113,7 +122,10 @@ export function createScheduleStore({ runtimeDir, onFire = null, now = () => Dat
         armToward(id, target) // far-future chunk elapsed — re-arm toward the same target
         return
       }
-      void fireNow(id)
+      // fireNow re-arms the next occurrence, which can throw (a recurring
+      // cron whose next match falls outside the search window). Swallow it —
+      // an unhandled rejection here would crash the process.
+      fireNow(id).catch(err => console.error(`[schedule-store] fire failed for ${id}: ${err.message}`))
     }, delay)
     timers.set(id, handle)
   }
@@ -161,7 +173,15 @@ export function createScheduleStore({ runtimeDir, onFire = null, now = () => Dat
     if (record.cron) {
       const schedule = parseCron(record.cron)
       if (!schedule) return null
-      return nextMatch(schedule, new Date(nowMs)).toISOString()
+      // See targetMs: a valid cron may still have no occurrence within the
+      // search window. Degrade to null so list() never throws on one bad
+      // record (and so create()'s pre-persist validation can detect it).
+      try {
+        return nextMatch(schedule, new Date(nowMs)).toISOString()
+      } catch (err) {
+        console.warn(`[schedule-store] no upcoming fire for ${record.id} (${record.name}): ${err.message}`)
+        return null
+      }
     }
     return null
   }
@@ -217,6 +237,16 @@ export function createScheduleStore({ runtimeDir, onFire = null, now = () => Dat
       lastFired: null,
     }
 
+    // Validate the schedule can actually resolve a next occurrence BEFORE we
+    // persist anything. A syntactically-valid cron may still have no match
+    // within nextMatch's 366-day window (Feb 30 never exists; a leap-day far
+    // from a leap year is >366d out). computeNext degrades such a cron to null
+    // instead of throwing; either way we must reject and write NOTHING —
+    // persisting a poison record would brick list()/start() every turn.
+    if (computeNext(record, now()) == null) {
+      throw new Error('invalid schedule: cron has no upcoming occurrence within the search window')
+    }
+
     records.set(record.id, record)
     await persist()
     arm(record.id)
@@ -228,18 +258,12 @@ export function createScheduleStore({ runtimeDir, onFire = null, now = () => Dat
     await ensureLoaded()
     const nowMs = now()
 
-    // Sweep stale one-shot `at` schedules whose time has passed but that
-    // never got a chance to fire (e.g. the process wasn't running/started
-    // while wall-clock time passed them by).
-    let swept = false
-    for (const [id, record] of [...records]) {
-      if (record.at && new Date(record.at).getTime() <= nowMs) {
-        records.delete(id)
-        disarm(id)
-        swept = true
-      }
-    }
-    if (swept) await persist()
+    // NOTE: a past-due one-shot `at` schedule that has not yet fired is
+    // deliberately NOT swept here. It is retained so start()/arm() can still
+    // fire it exactly once (armToward gives a past target a zero delay);
+    // sweeping it in list() would silently drop it unfired if list() ran
+    // before start() after a restart. Fired one-shots remove themselves in
+    // fireNow(), so a persisted `at` record is by definition still pending.
 
     const projections = [...records.values()].map(record => ({
       ...record,

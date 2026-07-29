@@ -1,6 +1,8 @@
 import { describe, it } from 'node:test'
 import assert from 'node:assert/strict'
 import { translateToolDefs, translateMessages, flattenSystem } from '../server/lib/providers/translate.js'
+import { _translateMessages as translateGeminiMessages } from '../server/lib/providers/gemini.js'
+import { _translateToResponsesInput } from '../server/lib/providers/openai-responses.js'
 
 describe('flattenSystem', () => {
   it('returns a plain string unchanged', () => {
@@ -209,5 +211,70 @@ describe('translateMessages', () => {
     assert.equal(result[0].role, 'system')
     assert.equal(result[0].content, 'CORPUS\n\n---\n\nTS')
     assert.equal(result[1].role, 'user')
+  })
+})
+
+// Finding 3: the Gemini translator dropped media. Port the media-survival the
+// openai-compat translator already has (translate.js), adapted to Gemini's
+// inlineData:{ mimeType, data } part shape.
+describe('gemini _translateMessages media survival', () => {
+  it('maps a user text+image block array to text + inlineData parts', () => {
+    const messages = [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'what is this?' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/png', data: 'AAAA' } },
+      ],
+    }]
+    const contents = translateGeminiMessages(null, messages)
+    assert.equal(contents.length, 1)
+    assert.equal(contents[0].role, 'user')
+    const parts = contents[0].parts
+    assert.deepEqual(parts[0], { text: 'what is this?' })
+    const img = parts.find(p => p.inlineData)
+    assert.ok(img, 'the image survives as an inlineData part rather than being dropped')
+    assert.deepEqual(img.inlineData, { mimeType: 'image/png', data: 'AAAA' })
+  })
+
+  it('still translates a plain text message unchanged', () => {
+    const contents = translateGeminiMessages(null, [{ role: 'user', content: 'hello' }])
+    assert.deepEqual(contents, [{ role: 'user', parts: [{ text: 'hello' }] }])
+  })
+})
+
+// Finding 3: the Responses-API translator dropped text+image user block arrays
+// entirely. Port media survival in the Responses input shape (input_text /
+// input_image).
+describe('openai-responses _translateToResponsesInput media survival', () => {
+  it('maps a user text+image block array to input_text + input_image parts', () => {
+    const messages = [{
+      role: 'user',
+      content: [
+        { type: 'text', text: 'describe this' },
+        { type: 'image', source: { type: 'base64', media_type: 'image/jpeg', data: 'BBBB' } },
+      ],
+    }]
+    const input = _translateToResponsesInput(messages)
+    assert.equal(input.length, 1)
+    assert.equal(input[0].role, 'user')
+    const parts = input[0].content
+    assert.deepEqual(parts[0], { type: 'input_text', text: 'describe this' })
+    const img = parts.find(p => p.type === 'input_image')
+    assert.ok(img, 'the image survives as an input_image part rather than being dropped')
+    assert.equal(img.image_url, 'data:image/jpeg;base64,BBBB')
+  })
+
+  it('still turns tool_result blocks into function_call_output items', () => {
+    const input = _translateToResponsesInput([{
+      role: 'user',
+      content: [{ type: 'tool_result', tool_use_id: 'call_1', content: 'done' }],
+    }])
+    assert.equal(input.length, 1)
+    assert.deepEqual(input[0], { type: 'function_call_output', call_id: 'call_1', output: 'done' })
+  })
+
+  it('passes a plain user string through unchanged', () => {
+    const input = _translateToResponsesInput([{ role: 'user', content: 'hi' }])
+    assert.deepEqual(input, [{ role: 'user', content: 'hi' }])
   })
 })

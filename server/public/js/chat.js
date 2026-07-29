@@ -385,14 +385,14 @@ function handleEvent(e) {
           // recorded first server-side), fill the existing bubble's chat body
           // rather than creating a new message — keeps thought and chat in one
           // grouped render per turn.
-          const existing = msg.turnId ? document.querySelector(`[data-turn-id="${msg.turnId}"]`) : null
+          const existing = msg.turnId ? document.querySelector(`[data-turn-id="${CSS.escape(msg.turnId)}"]`) : null
           if (existing && existing.classList.contains('message')) {
             if (msg.id) existing.dataset.messageId = msg.id
             const body = existing.querySelector(':scope > .message-body')
             if (body) {
               let content = ''
               if (msg.tools && msg.tools.length > 0) {
-                content += `<div class="visitor-tools-summary">used: ${msg.tools.join(', ')}</div>`
+                content += `<div class="visitor-tools-summary">used: ${msg.tools.map(escapeHtml).join(', ')}</div>`
               }
               content += renderMarkdown(msg.text)
               body.innerHTML = content
@@ -411,7 +411,7 @@ function handleEvent(e) {
             if (body) {
               let content = ''
               if (msg.tools && msg.tools.length > 0) {
-                content += `<div class="visitor-tools-summary">used: ${msg.tools.join(', ')}</div>`
+                content += `<div class="visitor-tools-summary">used: ${msg.tools.map(escapeHtml).join(', ')}</div>`
               }
               content += renderMarkdown(msg.text)
               body.innerHTML = content
@@ -429,7 +429,7 @@ function handleEvent(e) {
           // (same turnId, rendered earlier in scrollback because thought is
           // recorded first), attach to that message. Otherwise render as a
           // standalone thought block so it never hides.
-          const sibling = msg.turnId ? document.querySelector(`[data-turn-id="${msg.turnId}"]`) : null
+          const sibling = msg.turnId ? document.querySelector(`[data-turn-id="${CSS.escape(msg.turnId)}"]`) : null
           if (sibling) {
             const block = ensureThoughtBlock(sibling)
             const body = block.querySelector('.assistant-thought-body')
@@ -1240,7 +1240,7 @@ messages.addEventListener('click', (e) => {
   const replyHeader = e.target.closest('.reply-header-linked')
   if (replyHeader) {
     const targetId = replyHeader.dataset.replyTarget
-    const target = document.querySelector(`[data-message-id="${targetId}"]`)
+    const target = document.querySelector(`[data-message-id="${CSS.escape(targetId)}"]`)
     if (target) {
       target.classList.add('reply-highlight')
       target.scrollIntoView({ behavior: 'smooth', block: 'center' })
@@ -1484,7 +1484,7 @@ function appendMessage(role, text, name, timestamp, fromAgent = false, model = n
 
 function renderReplyHeader(el, replyTo, preview = null) {
   if (el.querySelector('.reply-header')) return
-  const originalEl = document.querySelector(`[data-message-id="${replyTo}"]`)
+  const originalEl = document.querySelector(`[data-message-id="${CSS.escape(replyTo)}"]`)
   const header = document.createElement('div')
   header.className = 'reply-header'
 
@@ -1532,7 +1532,7 @@ function renderReplyHeader(el, replyTo, preview = null) {
 }
 
 function updateReactionPills(messageId, emoji, name, action) {
-  const msgEl = document.querySelector(`[data-message-id="${messageId}"]`)
+  const msgEl = document.querySelector(`[data-message-id="${CSS.escape(messageId)}"]`)
   if (!msgEl) return
 
   let container = msgEl.querySelector('.reactions-container')
@@ -1746,10 +1746,16 @@ function truncate(str, max) {
   return str.length > max ? str.slice(0, max) + '...' : str
 }
 
+// Escapes the five HTML-significant characters — including BOTH quote styles,
+// so values interpolated into attribute context (data-*, title, style, …)
+// cannot break out of the attribute and inject an event handler.
 function escapeHtml(str) {
-  const div = document.createElement('div')
-  div.textContent = str
-  return div.innerHTML
+  return String(str ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;')
 }
 
 // ---- Harness add-on integration surface ----

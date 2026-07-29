@@ -4,6 +4,7 @@ import { load as loadYaml } from 'js-yaml'
 import { loadPlugins } from './plugins.js'
 import { resolveModel } from './providers/resolve.js'
 import { applyModelPolicy } from './model-policy.js'
+import { resolveWebSearchProvider } from './web-search.js'
 
 // persona.yaml keys accepted here for operator readability but not read by any
 // code path in server/ (grep-verified) — false-confidence guardrails that look
@@ -57,8 +58,12 @@ function providerHonorsThinkingBudget(providerName, config) {
  * Resolve each tier's active model to the provider name that will serve it.
  * @returns {Map<string, string[]>} provider name -> tier labels it serves
  */
-function providersByTier(config) {
+export function providersByTier(config) {
   const knownProviders = new Set([...Object.keys(config.providers || {}), 'anthropic'])
+  // The auto-registered openrouter provider is a valid suffix target too. Without
+  // it here, a `foo:openrouter` tier fails to split and is misattributed to the
+  // default provider (anthropic), which blinds the web-search-drop warning below.
+  if (process.env.OPENROUTER_API_KEY) knownProviders.add('openrouter')
   const defaultProvider = config.provider && config.provider !== 'anthropic' ? config.provider : 'anthropic'
   const byProvider = new Map()
   for (const [key, label] of TIER_LABELS) {
@@ -78,12 +83,15 @@ function providersByTier(config) {
  * but only for a provider that opts in with `web_search`. Declaring the tool
  * without either of those means the model never gets it — silently.
  */
-function warnUnsuppliedWebSearch(config) {
+export function warnUnsuppliedWebSearch(config) {
   const declared = (config.server_tools || []).find(
     t => String(t.type || '').startsWith('web_search') || t.name === 'web_search',
   )
   if (!declared) return
-  if (Object.values(config.providers || {}).some(p => p.web_search)) return
+  // Reuse the exact resolver web-search.js uses, so the warning and the tool
+  // agree: if any provider — a declared one, or the auto-registered openrouter
+  // provider — can back the web plugin, the tool is supplied and nothing drops.
+  if (resolveWebSearchProvider(config)) return
 
   const name = config.name || 'unknown'
   const dropped = [...providersByTier(config).keys()].filter(p => p !== 'anthropic')

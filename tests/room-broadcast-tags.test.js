@@ -85,6 +85,9 @@ describe('Room broadcast tagging', () => {
     room.broadcast({ type: 'text_delta', text: 'secret-value' })
     room.broadcast({ type: 'assistant_message', text: 'super-secret-value' })
 
-    assert.deepStrictEqual(received, [{ type: 'assistant_message', text: '[redacted]' }])
+    // broadcast() now redacts via redactHistoryEntry (exact stored values AND
+    // the API-key pattern), applied to the object before serialization — so a
+    // stored value becomes the standard marker, not the mock redactDeep output.
+    assert.deepStrictEqual(received, [{ type: 'assistant_message', text: '**[Redacted by Cheesoid]**' }])
   })
 })

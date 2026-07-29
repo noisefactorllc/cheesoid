@@ -3,7 +3,16 @@
 // composer against that message so the reply threads off it, with the
 // referenced content carried server-side. Open with 🔍 or Cmd/Ctrl-K.
 
-const esc = (s) => window.cheesoidChat?.escapeHtml?.(s ?? '') ?? String(s ?? '')
+// Fail-CLOSED: own the escaper outright rather than borrowing chat.js's copy
+// via window.cheesoidChat, whose optional-chaining fallback (`?? String(s)`)
+// silently returned UNescaped text whenever chat.js had not finished — every
+// interpolation below (names, rooms, query, ids) is an injection point.
+const esc = (s) => String(s ?? '')
+  .replace(/&/g, '&amp;')
+  .replace(/</g, '&lt;')
+  .replace(/>/g, '&gt;')
+  .replace(/"/g, '&quot;')
+  .replace(/'/g, '&#39;')
 
 let overlay = null
 let inputEl = null
