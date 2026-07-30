@@ -22,8 +22,14 @@ import { fileURLToPath } from 'node:url'
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 const PUBLIC = join(root, 'server', 'public')
 
+// Probe for a usable chromium once at load. When the browser binary is absent
+// (e.g. CI without `npx playwright install`), SKIP these tests rather than
+// throw in a before-hook — an unhandled launch rejection there aborts this file
+// and cascades ("event loop already resolved") into other files sharing the
+// same `npm test` process.
 let browser = null
-before(async () => { browser = await chromium.launch({ headless: true }) })
+try { browser = await chromium.launch({ headless: true }) } catch { /* no chromium binary */ }
+const noBrowser = browser ? false : 'chromium unavailable (run `npx playwright install chromium`)'
 after(async () => { await browser?.close() })
 
 // Serve the real public dir plus caller-supplied routes (added first so they
@@ -114,7 +120,7 @@ async function bootChat(page, origin) {
 // ---------------------------------------------------------------------------
 // Finding 1 — escapeHtml must escape quotes, closing attribute-context XSS.
 // ---------------------------------------------------------------------------
-test('finding 1: escapeHtml escapes quotes so attribute interpolation cannot break out', async () => {
+test('finding 1: escapeHtml escapes quotes so attribute interpolation cannot break out', { skip: noBrowser }, async () => {
   const srv = await startServer(chatRoutes())
   await withPage(srv, async (page) => {
     await bootChat(page, srv.origin)
@@ -141,7 +147,7 @@ test('finding 1: escapeHtml escapes quotes so attribute interpolation cannot bre
 // ---------------------------------------------------------------------------
 // Finding 2 — assistant tool summary must escape tool names.
 // ---------------------------------------------------------------------------
-test('finding 2: assistant tool summary escapes tool names (no markup injection)', async () => {
+test('finding 2: assistant tool summary escapes tool names (no markup injection)', { skip: noBrowser }, async () => {
   const scrollback = [{
     type: 'assistant_message', name: 'evilbot', id: 'a1', timestamp: Date.now(),
     text: 'hello', tools: ['<img src=x onerror="window.__toolsXss=1">'],
@@ -166,7 +172,7 @@ test('finding 2: assistant tool summary escapes tool names (no markup injection)
 // Finding 5 — a '"' in a message id must be CSS.escape()d, not thrown on.
 // A poisoned reaction must not abort reaction replay for later messages.
 // ---------------------------------------------------------------------------
-test('finding 5: poisoned reaction id does not throw and does not break replay', async () => {
+test('finding 5: poisoned reaction id does not throw and does not break replay', { skip: noBrowser }, async () => {
   const scrollback = [
     { type: 'user_message', name: 'alice', text: 'poisoned', id: 'p"q', timestamp: Date.now() },
     { type: 'user_message', name: 'bob', text: 'normal', id: 'normal-1', timestamp: Date.now() },
@@ -198,7 +204,7 @@ test('finding 5: poisoned reaction id does not throw and does not break replay',
 // hook output must survive. Loads chat.js too so renderMarkdown is the real
 // sanitizing renderer (with the rel hook) even before the fix.
 // ---------------------------------------------------------------------------
-test('finding 3: linkifyWikiRefs rewrites text nodes only (no attribute breakout, rel preserved)', async () => {
+test('finding 3: linkifyWikiRefs rewrites text nodes only (no attribute breakout, rel preserved)', { skip: noBrowser }, async () => {
   const content = 'Intro [[realpage]] and [[memory:notes.md]].\n\n<a href="https://evil" title="[[a]]">x</a>'
   const srv = await startServer((app) => {
     chatRoutes({ extra: '<script type="module" src="/js/harness-panels.js"></script>' })(app)
@@ -247,7 +253,7 @@ const THREAD_PAGE = `<!doctype html><html><head><meta charset="utf-8"></head><bo
 <script type="module" src="/js/thread-ui.js"></script>
 </body></html>`
 
-test('finding 4: thread-ui escapes even without window.cheesoidChat (fail-closed)', async () => {
+test('finding 4: thread-ui escapes even without window.cheesoidChat (fail-closed)', { skip: noBrowser }, async () => {
   const srv = await startServer((app) => {
     app.get('/threadpage', (_req, res) => res.type('html').send(THREAD_PAGE))
     app.get('/api/chat/thread', (_req, res) => res.json({
@@ -294,7 +300,7 @@ const SEARCH_PAGE = `<!doctype html><html><head><meta charset="utf-8"></head><bo
 <script type="module" src="/js/search-ui.js"></script>
 </body></html>`
 
-test('finding 4: search-ui escapes results even without window.cheesoidChat (fail-closed)', async () => {
+test('finding 4: search-ui escapes results even without window.cheesoidChat (fail-closed)', { skip: noBrowser }, async () => {
   const srv = await startServer((app) => {
     app.get('/searchpage', (_req, res) => res.type('html').send(SEARCH_PAGE))
     app.get('/api/chat/search', (_req, res) => res.json({

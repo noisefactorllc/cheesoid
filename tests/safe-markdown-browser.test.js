@@ -12,7 +12,7 @@ import { UI_CONTENT_SECURITY_POLICY } from '../server/lib/security-headers.js'
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..')
 
-test('renderSafeMarkdown strips active and embed-capable content', async () => {
+test('renderSafeMarkdown strips active and embed-capable content', async (t) => {
   const app = express()
   app.use(express.static(join(root, 'server', 'public')))
   app.get('/test', (_req, res) => {
@@ -40,7 +40,10 @@ test('renderSafeMarkdown strips active and embed-capable content', async () => {
 
   let browser = null
   try {
-    browser = await chromium.launch({ headless: true })
+    // Skip (not fail) when the chromium binary is absent, e.g. CI without
+    // `npx playwright install` — a bare launch throw would fail the build.
+    browser = await chromium.launch({ headless: true }).catch(() => null)
+    if (!browser) { t.skip('chromium unavailable (run `npx playwright install chromium`)'); return }
     const page = await browser.newPage()
     await page.goto(`http://127.0.0.1:${server.address().port}/test`)
     await page.waitForFunction(() => typeof window.rendered === 'string')
