@@ -20,8 +20,11 @@ async function beforeDeadline(promise, deadlineAt, message) {
     return await Promise.race([
       promise,
       new Promise((_, reject) => {
+        // NOT unref'd: on node 22 an unref'd deadline can be abandoned when the
+        // raced promise (e.g. a hung DNS/target resolution) never settles and no
+        // socket is holding the loop open — the loop drains and the timeout never
+        // fires. Cleared in the finally below, so its lifetime stays bounded.
         timer = setTimeout(() => reject(new Error(message)), remaining)
-        timer.unref?.()
       }),
     ])
   } finally {
@@ -92,7 +95,6 @@ export class RoomClient {
     const connectionDeadline = setTimeout(() => {
       this._req?.destroy(new Error(timeoutMessage))
     }, Math.max(1, deadlineAt - Date.now()))
-    connectionDeadline.unref?.()
     this._req = mod.get(streamUrl, options, (res) => {
       clearTimeout(connectionDeadline)
       if (res.statusCode !== 200) {
@@ -263,7 +265,6 @@ export class RoomClient {
       const deadline = setTimeout(() => {
         req.destroy(new Error(timeoutMessage))
       }, remaining)
-      deadline.unref?.()
       req.on('error', fail)
       if (body != null) req.write(body)
       req.end()

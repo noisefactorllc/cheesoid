@@ -142,8 +142,9 @@ export async function resolveBeforeDeadline(input, options, deadlineAt, message)
     return await Promise.race([
       resolvePublicTarget(input, options),
       new Promise((_, reject) => {
+        // NOT unref'd: keep the loop alive so this deadline fires even when
+        // resolution hangs before any socket is open (cleared in finally below).
         timer = setTimeout(() => reject(new Error(message)), remaining)
-        timer.unref?.()
       }),
     ])
   } finally {
@@ -217,7 +218,6 @@ export async function requestPublic(input, {
     const deadline = setTimeout(() => {
       req.destroy(new Error(timeoutMessage))
     }, remaining)
-    deadline.unref?.()
     req.on('error', err => finish(reject, err))
     if (body != null) req.write(body)
     req.end()
