@@ -192,3 +192,68 @@ describe('_buildParams — prompt caching', () => {
     assert.deepEqual(params.messages, [])
   })
 })
+
+// Anthropic rejects the entire request with 400 "tools: Tool names must be
+// unique.", so a name collision between the two tool suppliers is fatal, not
+// cosmetic. It is reachable in ordinary config: an all-anthropic persona that
+// declares `server_tools: web_search` also gets web-search.js's client-side
+// shim, because that shim fires whenever any OpenRouter-backed provider is
+// reachable — including the one auto-registered from OPENROUTER_API_KEY, which
+// is set for every persona on the shared image. ask-agent hit exactly this.
+describe('_buildParams — duplicate tool names', () => {
+  const M = { model: 'claude-haiku-4-5', maxTokens: 1024, system: 'sys', messages: [] }
+  const names = params => params.tools.map(t => t.name)
+
+  it('drops a client-side tool that collides with a native server tool of the same name', () => {
+    const tools = [
+      { name: 'read_memory', input_schema: { type: 'object' } },
+      { name: 'web_search', input_schema: { type: 'object' } }, // web-search.js shim
+    ]
+    const serverTools = [{ type: 'web_search_20250305', name: 'web_search' }]
+    const params = _buildParams({ ...M, tools, serverTools })
+
+    assert.deepEqual(names(params), ['read_memory', 'web_search'])
+    // The NATIVE one survives: Anthropic runs it server-side, no extra
+    // round-trip and no OpenRouter key required.
+    assert.equal(params.tools.at(-1).type, 'web_search_20250305')
+  })
+
+  it('collapses duplicates within tools alone', () => {
+    const tools = [{ name: 'a' }, { name: 'b' }, { name: 'a' }]
+    const params = _buildParams({ ...M, tools })
+    assert.deepEqual(names(params), ['a', 'b'])
+  })
+
+  it('collapses duplicates within serverTools alone', () => {
+    const serverTools = [
+      { type: 'web_search_20250305', name: 'web_search' },
+      { type: 'web_search_20250305', name: 'web_search' },
+    ]
+    const params = _buildParams({ ...M, tools: [], serverTools })
+    assert.equal(params.tools.length, 1)
+  })
+
+  it('leaves a non-colliding tool set untouched, in order', () => {
+    const tools = [{ name: 'a' }, { name: 'b' }]
+    const serverTools = [{ type: 'web_search_20250305', name: 'web_search' }]
+    const params = _buildParams({ ...M, tools, serverTools })
+    assert.deepEqual(names(params), ['a', 'b', 'web_search'])
+  })
+
+  it('still marks the surviving last tool for caching after deduping', () => {
+    const tools = [{ name: 'a' }, { name: 'web_search' }]
+    const serverTools = [{ type: 'web_search_20250305', name: 'web_search' }]
+    const params = _buildParams({ ...M, tools, serverTools })
+    assert.deepEqual(params.tools.at(-1).cache_control, { type: 'ephemeral' })
+    assert.equal(params.tools.filter(t => t.cache_control).length, 1)
+  })
+
+  it('does not mutate the caller arrays', () => {
+    const tools = [{ name: 'web_search' }]
+    const serverTools = [{ type: 'web_search_20250305', name: 'web_search' }]
+    _buildParams({ ...M, tools, serverTools })
+    assert.equal(tools.length, 1)
+    assert.equal(serverTools.length, 1)
+    assert.equal(serverTools[0].cache_control, undefined)
+  })
+})

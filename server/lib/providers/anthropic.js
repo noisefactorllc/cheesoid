@@ -168,6 +168,57 @@ function _cacheControlMessages(messages) {
   )
 }
 
+// Merge the client-side tool definitions with the native server tools into the
+// single `tools` array the API takes, keeping names unique — Anthropic rejects
+// the whole request with 400 "tools: Tool names must be unique." rather than
+// ignoring the extra entry, so one collision takes the turn down.
+//
+// The collision is reachable from ordinary config, not just misconfiguration: a
+// persona that declares `server_tools: web_search` also picks up web-search.js's
+// client-side shim, which fires whenever any OpenRouter-backed provider is
+// reachable — including the one auto-registered from OPENROUTER_API_KEY, set for
+// every persona on the shared image. This is the only place that sees both
+// lists, so it is where precedence has to be settled.
+//
+// Native server tools win: Anthropic executes them server-side, with no extra
+// round-trip and no OpenRouter key. The shim stays registered in the toolset for
+// lanes served by providers that drop server tools (every non-anthropic one).
+function _mergeTools(tools, serverTools) {
+  const server = (serverTools || []).filter(Boolean)
+  const nativeNames = new Set(server.map(t => t.name).filter(Boolean))
+  const seen = new Set()
+  const dropped = []
+
+  // Shared by both passes: a tool with no name can't collide, and the first
+  // definition of a given name is the one that survives.
+  const keepUnique = (t) => {
+    if (!t.name) return true
+    if (seen.has(t.name)) {
+      dropped.push(t.name)
+      return false
+    }
+    seen.add(t.name)
+    return true
+  }
+
+  const client = (tools || []).filter(Boolean).filter(t => {
+    if (t.name && nativeNames.has(t.name)) {
+      dropped.push(t.name)
+      return false
+    }
+    return keepUnique(t)
+  })
+
+  const merged = [...client, ...server.filter(keepUnique)]
+  if (dropped.length) {
+    console.warn(
+      `[anthropic] dropped duplicate tool definition(s): ${[...new Set(dropped)].join(', ')} ` +
+      `— names must be unique; a native server tool of the same name takes precedence`,
+    )
+  }
+  return merged
+}
+
 // Build the Anthropic Messages API request params. Exported for unit testing.
 // Extended thinking is enabled for any Claude model whenever a thinking budget
 // is configured (this provider only ever serves Claude models). Two API
@@ -184,7 +235,7 @@ function _cacheControlMessages(messages) {
 // stable block), and the last message each call for incremental prefix caching.
 // All message/tool marking is copy-on-write — the caller's arrays never mutate.
 export function _buildParams({ model, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice }) {
-  const allTools = [...tools, ...(serverTools || [])]
+  const allTools = _mergeTools(tools, serverTools)
 
   const params = {
     model,
