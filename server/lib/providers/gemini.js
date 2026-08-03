@@ -17,6 +17,7 @@
 import circuitBreaker, { CircuitOpenError } from '../circuit-breaker.js'
 import { flattenSystem } from './translate.js'
 import { abortableDelay } from '../abort.js'
+import { assertStreamComplete } from './stream-guard.js'
 
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
@@ -261,7 +262,10 @@ export async function _processStream(stream, onEvent) {
     }
   }
 
-  if (!stopReason) stopReason = toolCalls.length > 0 ? 'tool_use' : 'end_turn'
+  // No invented default. A missing finishReason means the stream was cut off,
+  // and guessing one here shipped partial tool calls and half-answers as
+  // completed turns.
+  assertStreamComplete(stopReason, 'gemini')
   return { contentBlocks, stopReason, usage }
 }
 

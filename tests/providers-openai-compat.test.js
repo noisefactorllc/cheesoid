@@ -1,6 +1,6 @@
 import { describe, it, mock } from 'node:test'
 import assert from 'node:assert/strict'
-import { createOpenAICompatProvider, _processStream, _parseSSE } from '../server/lib/providers/openai-compat.js'
+import { createOpenAICompatProvider, _processStream, _parseSSE, SSE_DONE } from '../server/lib/providers/openai-compat.js'
 import circuitBreaker from '../server/lib/circuit-breaker.js'
 import { CircuitOpenError } from '../server/lib/circuit-breaker.js'
 
@@ -146,7 +146,7 @@ describe('_parseSSE', () => {
     }
     const chunks = []
     for await (const chunk of _parseSSE(body)) {
-      chunks.push(chunk)
+      if (chunk !== SSE_DONE) chunks.push(chunk)
     }
     assert.equal(chunks.length, 1)
     assert.equal(chunks[0].choices[0].delta.content, 'hi')
@@ -162,7 +162,7 @@ describe('_parseSSE', () => {
     }
     const chunks = []
     for await (const chunk of _parseSSE(body)) {
-      chunks.push(chunk)
+      if (chunk !== SSE_DONE) chunks.push(chunk)
     }
     assert.equal(chunks.length, 1)
     assert.equal(chunks[0].choices[0].delta.content, 'x')
@@ -178,7 +178,7 @@ describe('_parseSSE', () => {
     }
     const chunks = []
     for await (const chunk of _parseSSE(body)) {
-      chunks.push(chunk)
+      if (chunk !== SSE_DONE) chunks.push(chunk)
     }
     assert.equal(chunks.length, 1)
   })

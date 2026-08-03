@@ -1,4 +1,5 @@
 import { getClient } from '../ai-client.js'
+import { assertStreamComplete } from './stream-guard.js'
 
 const SONNET_FALLBACK = 'claude-sonnet-4-6'
 
@@ -21,7 +22,7 @@ function isUnavailableError(err) {
   return false
 }
 
-async function streamOnce(client, params, onEvent, signal) {
+export async function _streamOnce(client, params, onEvent, signal) {
   signal?.throwIfAborted()
   const stream = client.messages.stream(params, signal ? { signal } : undefined)
   const contentBlocks = []
@@ -75,6 +76,7 @@ async function streamOnce(client, params, onEvent, signal) {
     }
   }
 
+  assertStreamComplete(stopReason, 'anthropic')
   return { contentBlocks, stopReason, usage }
 }
 
@@ -271,7 +273,7 @@ export function createAnthropicProvider(_config) {
       const params = _buildParams({ model: activeModel, maxTokens, system, messages, tools, serverTools, thinkingBudget, toolChoice })
 
       try {
-        return await streamOnce(client, params, onEvent, signal)
+        return await _streamOnce(client, params, onEvent, signal)
       } catch (err) {
         signal?.throwIfAborted()
         if (isOpusModel(activeModel) && isUnavailableError(err)) {
@@ -279,7 +281,7 @@ export function createAnthropicProvider(_config) {
           onEvent({ type: 'model_fallback', from: activeModel, to: SONNET_FALLBACK })
           params.model = SONNET_FALLBACK
           delete params.thinking
-          return await streamOnce(client, params, onEvent, signal)
+          return await _streamOnce(client, params, onEvent, signal)
         }
         throw err
       }

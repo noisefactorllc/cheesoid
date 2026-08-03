@@ -1,12 +1,25 @@
 import { translateMessages, translateToolDefs } from './translate.js'
 import circuitBreaker, { CircuitOpenError } from '../circuit-breaker.js'
 import { abortableDelay } from '../abort.js'
+import { assertStreamComplete, withStallTimeout, STREAM_STALL_MS } from './stream-guard.js'
 
 const FINISH_REASON_MAP = {
   stop: 'end_turn',
   tool_calls: 'tool_use',
   length: 'max_tokens',
 }
+
+/**
+ * Yielded by _parseSSE when it reads the `data: [DONE]` sentinel.
+ *
+ * `[DONE]` is the protocol's own end-of-stream marker, so reaching it proves
+ * the response finished — separately from whether the backend bothered to send
+ * a `finish_reason`. Not every OpenAI-compatible backend does. Distinguishing
+ * "finished, reason unstated" from "the socket died mid-response" is the whole
+ * point: only the second is a truncation, and treating the first as one would
+ * take every turn on such a backend offline.
+ */
+export const SSE_DONE = Symbol('openai-compat.sse-done')
 
 /**
  * Process parsed SSE chunks into normalized content blocks.
@@ -20,8 +33,10 @@ export async function _processStream(stream, onEvent) {
   const usage = { input_tokens: 0, output_tokens: 0 }
   let hasText = false
   let hasThinking = false
+  let sawTerminator = false
 
   for await (const chunk of stream) {
+    if (chunk === SSE_DONE) { sawTerminator = true; continue }
     const choice = chunk.choices?.[0]
     if (!choice) {
       if (chunk.usage) {
@@ -105,6 +120,14 @@ export async function _processStream(stream, onEvent) {
     })
   }
 
+  // A backend that closed with [DONE] but never named a finish_reason still
+  // finished. Read the reason off what it actually emitted rather than
+  // rejecting a complete response — the stream is not in doubt here, only the
+  // label for it.
+  if (!stopReason && sawTerminator) {
+    stopReason = contentBlocks.some(b => b.type === 'tool_use') ? 'tool_use' : 'end_turn'
+  }
+  assertStreamComplete(stopReason, 'openai-compat')
   return { contentBlocks, stopReason, usage }
 }
 
@@ -113,29 +136,49 @@ export async function _processStream(stream, onEvent) {
  * Handles the `data: [DONE]` sentinel and ignores empty/comment lines.
  * Exported for testing.
  */
-export async function* _parseSSE(body) {
+export async function* _parseSSE(body, { stallMs = STREAM_STALL_MS } = {}) {
   const decoder = new TextDecoder()
   let buffer = ''
   let done = false
+  // Iterated by hand rather than with `for await` so each read can be raced
+  // against the stall budget. `for await` would have closed the body iterator
+  // on our behalf when the loop exits early; the finally below does it instead,
+  // so a stall or an abandoned generator still releases the connection.
+  const iterator = body[Symbol.asyncIterator]()
 
-  for await (const bytes of body) {
-    if (done) continue // drain remaining bytes to free connection
-    buffer += decoder.decode(bytes, { stream: true })
-    const lines = buffer.split('\n')
-    buffer = lines.pop() // keep incomplete line in buffer
+  try {
+    while (true) {
+      // The stall budget covers the live generation only. Once [DONE] has
+      // landed we are just draining bytes to free the socket, and a server that
+      // dawdles there is not a stalled generation — timing it out would turn a
+      // completed turn into a failed one.
+      const read = done
+        ? await iterator.next()
+        : await withStallTimeout(iterator.next(), stallMs, 'openai-compat')
+      if (read.done) break
+      const bytes = read.value
+      if (done) continue // drain remaining bytes to free connection
+      buffer += decoder.decode(bytes, { stream: true })
+      const lines = buffer.split('\n')
+      buffer = lines.pop() // keep incomplete line in buffer
 
-    for (const line of lines) {
-      const trimmed = line.trim()
-      if (!trimmed || trimmed.startsWith(':')) continue
-      if (!trimmed.startsWith('data: ')) continue
-      const data = trimmed.slice(6)
-      if (data === '[DONE]') { done = true; break }
-      try {
-        yield JSON.parse(data)
-      } catch {
-        // skip unparseable lines
+      for (const line of lines) {
+        const trimmed = line.trim()
+        if (!trimmed || trimmed.startsWith(':')) continue
+        if (!trimmed.startsWith('data: ')) continue
+        const data = trimmed.slice(6)
+        if (data === '[DONE]') { done = true; yield SSE_DONE; break }
+        try {
+          yield JSON.parse(data)
+        } catch {
+          // skip unparseable lines
+        }
       }
     }
+  } finally {
+    // Best-effort close. A body that is already finished or cancelled throws
+    // here, and that must never mask the error that got us out of the loop.
+    try { await iterator.return?.() } catch { /* already closed */ }
   }
 }
 

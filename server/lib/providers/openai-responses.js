@@ -8,6 +8,7 @@
 
 import { flattenSystem } from './translate.js'
 import { abortableDelay } from '../abort.js'
+import { assertStreamComplete } from './stream-guard.js'
 
 /**
  * Translate Anthropic tool defs to Responses API format.
@@ -188,6 +189,7 @@ export async function _processResponsesStream(stream, onEvent) {
     })
   }
 
+  assertStreamComplete(stopReason, 'openai-responses')
   return { contentBlocks, stopReason, usage }
 }
 

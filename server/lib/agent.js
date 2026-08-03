@@ -80,6 +80,26 @@ export function isMalformedRequestError(err) {
   return REQUEST_FIELD_PATH.test(message) || /tool names must be unique/i.test(message)
 }
 
+/**
+ * Report tool calls that arrived with a stop reason other than 'tool_use'.
+ *
+ * Both agent loops execute tool blocks only under a 'tool_use' stop reason and
+ * break otherwise, so any tool blocks on that turn are dropped. Dropping them
+ * is correct — a tool call the model never finished asking for must not run —
+ * but dropping them silently is how a turn ends up producing nothing at all
+ * with no trace of why, which is precisely what made Brad's 2026-08-01 silence
+ * unreadable from the logs.
+ */
+function logDiscardedToolCalls(assistantContent, stopReason, layer) {
+  const discarded = assistantContent.filter(b => b.type === 'tool_use').length
+  if (!discarded) return
+  const hadText = assistantContent.some(b => b.type === 'text' && b.text?.trim())
+  console.log(
+    `[${layer}] discarding ${discarded} tool call(s) — stop reason was ${stopReason}, not tool_use` +
+    `${hadText ? '' : '; turn produced no text either'}`,
+  )
+}
+
 export function inferProviderLabel(modelId) {
   if (!modelId || typeof modelId !== 'string') return null
   if (/^gpt-|^o\d/i.test(modelId)) return 'OpenAI'
@@ -386,6 +406,7 @@ export async function runAgent(systemPrompt, messages, tools, config, onEvent) {
     // to the thought lane downstream (chat-session.js splitChatAndThought);
     // nothing is dropped, nothing is retried. Both lanes render to the user.
     if (stopReason !== 'tool_use') {
+      logDiscardedToolCalls(assistantContent, stopReason, 'agent')
       consecutiveToolCalls = 0
       break
     }
@@ -940,6 +961,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     // text are split into chat and thought lanes downstream
     // (chat-session.js splitChatAndThought); nothing is dropped or retried.
     if (stopReason !== 'tool_use') {
+      logDiscardedToolCalls(assistantContent, stopReason, 'hybrid')
       consecutiveToolCalls = 0
       break
     }
