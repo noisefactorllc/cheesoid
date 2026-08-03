@@ -65,9 +65,12 @@ export function withStallTimeout(promise, stallMs, provider) {
   let timer
   const stall = new Promise((_, reject) => {
     timer = setTimeout(() => reject(new StreamStallError(provider, stallMs)), stallMs)
-    // Never hold the event loop open on behalf of the watchdog itself.
-    timer.unref?.()
   })
+  // The timer is deliberately NOT unref'd. It is the only thing keeping the
+  // process alive while a read is outstanding, and a watchdog that lets the
+  // event loop drain is a watchdog that never fires: the await it guards is
+  // then stranded forever instead of rejecting. clearTimeout runs on every
+  // settle path below, so holding the loop costs nothing and leaks nothing.
   return Promise.race([promise, stall]).finally(() => clearTimeout(timer))
 }
 

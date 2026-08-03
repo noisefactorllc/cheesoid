@@ -242,6 +242,36 @@ describe('stalled streams fail loud', () => {
     assert.equal(closed, true)
   })
 
+  // Run in a child process with nothing else pending, because that is the only
+  // condition under which the bug this guards against appears. An unref'd
+  // watchdog timer lets the event loop drain while a read is outstanding, so
+  // node exits instead of firing it and the awaited read is stranded rather
+  // than rejected. Inside the normal suite other handles mask it, which is why
+  // it passed locally and cancelled five tests in CI.
+  it('fires even when the stalled read is the only thing pending', { timeout: 20_000 }, async () => {
+    const { execFile } = await import('node:child_process')
+    const { promisify } = await import('node:util')
+    const guard = new URL('../server/lib/providers/stream-guard.js', import.meta.url).href
+
+    const program = `
+      const { withStallTimeout, StreamStallError } = await import(${JSON.stringify(guard)})
+      try {
+        await withStallTimeout(new Promise(() => {}), 50, 'test')
+        process.exit(2) // resolved, which cannot happen
+      } catch (err) {
+        process.exit(err instanceof StreamStallError ? 0 : 3)
+      }
+    `
+    // If the watchdog cannot hold the loop open, node exits 13 here
+    // (ERR_UNSETTLED_TOP_LEVEL_AWAIT) or hangs until this test times out.
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      ['--input-type=module', '--eval', program],
+      { timeout: 15_000 },
+    ).then(r => r, e => { throw new Error(`child exited ${e.code}: ${e.stderr || e.message}`) })
+    assert.equal(stdout, '')
+  })
+
   it('does not fire while draining a connection held open after [DONE]', async () => {
     // Post-[DONE] the generation is over and we are only freeing the socket.
     // A server that dawdles there is not a stalled generation.
