@@ -84,7 +84,7 @@ export class Modality {
         name: 'step_up',
         description:
           this._mode === 'attention'
-            ? 'Shift from attention mode to cognition mode. Call this when you are being directly addressed, need to engage substantively, or the moment calls for your full voice. This re-runs the current turn with a more capable model.'
+            ? 'Shift from attention mode to cognition mode. REQUIRED before doing real work: attention cannot run tools, answer complex questions, or speak in your persona voice. Call this when you are directly addressed, when a reply needs your voice, when the question has any depth, or when the turn needs any tool (tool calls attempted from attention are converted into this shift automatically). This re-runs the current turn with a more capable model.'
             : 'Shift from cognition mode to reasoner mode. Call this when a problem needs extended multi-step analysis — complex planning, subtle synthesis, hard diagnosis. This re-runs the current turn with the reasoning model, so use sparingly; reasoner turns are the most expensive.',
         input_schema: {
           type: 'object',
@@ -104,7 +104,7 @@ export class Modality {
         description:
           this._mode === 'reasoner'
             ? 'Shift down from reasoner mode. Default drops you back to attention (resting state). Pass target_layer: "cognition" to hold your full voice without the reasoner\'s cost. Takes effect on the next turn.'
-            : 'Shift from cognition mode back to attention mode. Call this when the conversation has gone quiet or monitoring is sufficient. Takes effect on the next turn.',
+            : 'Shift from cognition mode back to attention mode. Call this when the conversation has gone quiet or monitoring is sufficient. Attention can only observe, route, and escalate — no tools, no persona-voice replies — so do not step down mid-task. Takes effect on the next turn.',
         input_schema: {
           type: 'object',
           properties: {

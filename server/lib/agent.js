@@ -797,10 +797,28 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
   const calledTools = new Set() // track tool+args for dedup across executor turns
   const metrics = { models: {}, totalLatencyMs: 0, fallbackCount: 0, duplicateToolCalls: 0, startTime: Date.now() }
 
+  // ATTENTION MAY NOT EXECUTE. The resting gear exists to triage: stay
+  // quiet, route the floor, escalate. The only tools it may touch are the
+  // gear shifts and the moderation backchannel — everything else is
+  // execution and belongs to cognition. Enforced on both sides of the
+  // request: the offered toolset is filtered here, and calls that slip
+  // through anyway (hallucinated names, narrated-call rescue) are converted
+  // into an automatic step_up by the response guard below. The permission
+  // follows the GEAR, not the model — a cognition model that stepped down
+  // mid-call is bound by attention's limits on its next request.
+  const ATTENTION_SAFE_TOOLS = new Set(['step_up', 'step_down', 'internal'])
+
   while (iterations < maxTurns) {
+    // Gear at request time; the response guard keys on this same value so a
+    // mid-response gear shift can't change which rules the reply is judged by.
+    const gearAtRequest = config.modality?.mode || null
+    const offeredDefs = gearAtRequest === 'attention'
+      ? tools.definitions.filter(t => ATTENTION_SAFE_TOOLS.has(t.name))
+      : tools.definitions
+
     // Intent routing — applies when orchestrator is openai-compat
     let toolChoice = undefined
-    if (orchestrator.supportsIntentRouting && tools.definitions.length > 0) {
+    if (orchestrator.supportsIntentRouting && offeredDefs.length > 0) {
       const lastMsg = messages[messages.length - 1]
       const isPostToolResult = Array.isArray(lastMsg?.content) &&
         lastMsg.content.some(b => b.type === 'tool_result')
@@ -824,7 +842,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
               model: config.model,
               system: systemPrompt,
               messages,
-              tools: tools.definitions,
+              tools: offeredDefs,
             })
           } catch (err) {
             // Classifier failure is non-fatal — defaulting to 'auto' lets the
@@ -853,7 +871,7 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
         maxTokens: config.maxOutputTokens || 16384,
         system: systemPrompt,
         messages,
-        tools: toolChoice === 'none' ? [] : tools.definitions,
+        tools: toolChoice === 'none' ? [] : offeredDefs,
         serverTools: config.serverTools || [],
         thinkingBudget: config.thinkingBudget || null,
         toolChoice: toolChoice === 'none' ? undefined : toolChoice,
@@ -975,13 +993,52 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
     if (orchestratorToolNames.length > 0) {
       console.log(`[hybrid] orchestrator tools: ${orchestratorToolNames.join(', ')}`)
     }
+
+    // --- MODALITY: attention may not call execution tools ---
+    // A tool request from attention IS the step_up signal, so the harness
+    // performs the shift the model should have made: nothing executes (a
+    // discarded turn must leave no side effects — not even tools sitting
+    // next to an explicit step_up in the same response), the attention
+    // exchange is dropped, and the turn re-runs in cognition with the full
+    // toolset. Mirrors the explicit step_up re-run below. If the one
+    // re-run is already spent, the calls are refused instead of executed
+    // and the model is told to shift up itself.
+    let attentionRefusedExecution = false
+    if (gearAtRequest === 'attention') {
+      const disallowed = orchestratorToolNames.filter(n => !ATTENTION_SAFE_TOOLS.has(n))
+      if (disallowed.length > 0) {
+        if (!stepUpUsed) {
+          const { changed } = config.modality.stepUp(`attention requested: ${disallowed.join(', ')}`)
+          if (changed) {
+            messages.pop()
+            const resolved = config.registry.resolve(config.modality.model)
+            config.model = resolved.modelId
+            config.provider = resolved.provider
+            orchestrator = resolved.provider
+            stepUpUsed = true
+            console.log(`[hybrid] attention tool call (${disallowed.join(', ')}) — auto step_up to cognition`)
+            continue
+          }
+        }
+        attentionRefusedExecution = true
+        console.log(`[hybrid] attention tool call (${disallowed.join(', ')}) refused — step_up required`)
+      }
+    }
+
     for (const block of assistantContent.filter(b => b.type === 'tool_use')) {
       calledTools.add(`${block.name}(${JSON.stringify(block.input)})`)
       let toolResult
-      try {
-        toolResult = await tools.execute(block.name, block.input, { onEvent, model: actualModel || config.model })
-      } catch (err) {
-        toolResult = { output: `Tool error: ${err.message}`, is_error: true }
+      if (attentionRefusedExecution && !ATTENTION_SAFE_TOOLS.has(block.name)) {
+        toolResult = {
+          output: 'Unavailable in attention mode. Call step_up to shift into cognition, then use tools.',
+          is_error: true,
+        }
+      } else {
+        try {
+          toolResult = await tools.execute(block.name, block.input, { onEvent, model: actualModel || config.model })
+        } catch (err) {
+          toolResult = { output: `Tool error: ${err.message}`, is_error: true }
+        }
       }
       if (toolResult._stepUp) stepUpTriggered = true
       if (toolResult._endTurn) {

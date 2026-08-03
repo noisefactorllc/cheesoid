@@ -229,3 +229,94 @@ describe('modality integration — step_up re-run', () => {
     assert.equal(cognitionProvider.streamMessage.mock.callCount(), 2)
   })
 })
+
+describe('modality — attention may not call execution tools', () => {
+  const BASH_DEF = { name: 'bash', description: 'run', input_schema: { type: 'object', properties: {} } }
+  const INTERNAL_DEF = { name: 'internal', description: 'backchannel', input_schema: { type: 'object', properties: {} } }
+
+  function makeRig({ attentionResponses, cognitionResponses }) {
+    const modality = new Modality({ attention: ['fast:or'], cognition: ['smart:or'] })
+    const attentionProvider = makeProvider(attentionResponses)
+    const cognitionProvider = makeProvider(cognitionResponses || [{
+      contentBlocks: [{ type: 'text', text: 'cognition answer' }],
+      stopReason: 'end_turn',
+      usage: { input_tokens: 10, output_tokens: 5 },
+    }])
+    const registry = {
+      resolve: (m) => m === 'smart:or'
+        ? { modelId: 'smart', provider: cognitionProvider }
+        : { modelId: 'fast', provider: attentionProvider },
+    }
+    const executeFn = mock.fn(async (name, input) => {
+      const result = modality.executeTool(name, input)
+      if (result) return result
+      return { output: `result of ${name}` }
+    })
+    const tools = { definitions: [...modality.toolDefinitions(), BASH_DEF, INTERNAL_DEF], execute: executeFn }
+    const config = { model: 'fast', provider: attentionProvider, maxTurns: 5, registry, modality }
+    return { modality, attentionProvider, cognitionProvider, tools, config }
+  }
+
+  it('auto-steps-up when attention calls an execution tool, without executing it', async () => {
+    const { modality, attentionProvider, cognitionProvider, tools, config } = makeRig({
+      attentionResponses: [{
+        contentBlocks: [{ type: 'tool_use', id: 't1', name: 'bash', input: { command: 'ls' } }],
+        stopReason: 'tool_use',
+        usage: { input_tokens: 50, output_tokens: 10 },
+      }],
+    })
+    const { onEvent } = collectEvents()
+    const result = await runHybridAgent('system', [{ role: 'user', content: 'list files' }], tools, config, onEvent)
+
+    assert.equal(modality.mode, 'cognition')
+    // bash must never have executed from the attention gear
+    const executed = tools.execute.mock.calls.map(c => c.arguments[0])
+    assert.ok(!executed.includes('bash'), `bash executed: ${executed}`)
+    assert.equal(attentionProvider.streamMessage.mock.callCount(), 1)
+    assert.equal(cognitionProvider.streamMessage.mock.callCount(), 1)
+    const finalAssistant = result.messages.filter(m => m.role === 'assistant').pop()
+    const finalText = Array.isArray(finalAssistant?.content)
+      ? finalAssistant.content.filter(b => b.type === 'text').map(b => b.text).join('')
+      : String(finalAssistant?.content ?? '')
+    assert.match(finalText, /cognition answer/)
+  })
+
+  it('offers attention only the gear-shift and moderation tools', async () => {
+    const { attentionProvider, tools, config } = makeRig({
+      attentionResponses: [{
+        contentBlocks: [{ type: 'text', text: 'quiet' }],
+        stopReason: 'end_turn',
+        usage: { input_tokens: 20, output_tokens: 2 },
+      }],
+    })
+    const { onEvent } = collectEvents()
+    await runHybridAgent('system', [{ role: 'user', content: 'ambient chatter' }], tools, config, onEvent)
+
+    const params = attentionProvider.streamMessage.mock.calls[0].arguments[0]
+    const offered = params.tools.map(t => t.name).sort()
+    assert.deepEqual(offered, ['internal', 'step_up'])
+  })
+
+  it('lets moderation internal execute from attention without escalating', async () => {
+    const { modality, tools, config } = makeRig({
+      attentionResponses: [
+        {
+          contentBlocks: [{ type: 'tool_use', id: 't1', name: 'internal', input: { trigger: true } }],
+          stopReason: 'tool_use',
+          usage: { input_tokens: 30, output_tokens: 8 },
+        },
+        {
+          contentBlocks: [{ type: 'text', text: '' }],
+          stopReason: 'end_turn',
+          usage: { input_tokens: 30, output_tokens: 1 },
+        },
+      ],
+    })
+    const { onEvent } = collectEvents()
+    await runHybridAgent('system', [{ role: 'user', content: 'Blue, you take this' }], tools, config, onEvent)
+
+    const executed = tools.execute.mock.calls.map(c => c.arguments[0])
+    assert.ok(executed.includes('internal'))
+    assert.equal(modality.mode, 'attention')
+  })
+})
