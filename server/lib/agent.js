@@ -32,6 +32,54 @@ export function isQuotaExhaustedError(err) {
   return QUOTA_EXHAUSTED_PATTERNS.test(err.message)
 }
 
+// Anthropic SDK errors arrive as "<status> <json body>"; other providers may
+// only set a flat message. Pull out the human-readable API message either way,
+// so callers match against (and display) "tools: Tool names must be unique."
+// rather than the whole serialized envelope.
+export function apiErrorMessage(err) {
+  const structured = err?.error?.error?.message || err?.error?.message
+  if (typeof structured === 'string') return structured
+  const raw = typeof err?.message === 'string' ? err.message : ''
+  const embedded = raw.match(/"message"\s*:\s*"((?:[^"\\]|\\.)*)"/)
+  if (!embedded) return raw
+  try {
+    return JSON.parse(`"${embedded[1]}"`)
+  } catch {
+    return embedded[1]
+  }
+}
+
+// Validation failures name the offending request field first — "tools: Tool
+// names must be unique.", "messages.0.content.1: unexpected block type".
+const REQUEST_FIELD_PATH = new RegExp(
+  '^(?:tools|messages|system|tool_choice|max_tokens|thinking|temperature|top_p|top_k|stop_sequences|metadata|model|stream)' +
+  '(?:\\.\\w+)*\\s*:\\s',
+  'i',
+)
+
+/**
+ * Is this a request the API will never accept, no matter who serves it?
+ *
+ * A malformed payload is deterministic: the same body fails on every model and
+ * every provider, so the fallback chain can only repeat the same 400 more
+ * expensively, and "retrying until a provider returns" describes a wait that
+ * never ends.
+ *
+ * Deliberately an allowlist. The opposite mistake is already in the regression
+ * record — classifying every 400 non-retryable took the cognition layer offline
+ * on a credit-balance error, which a cross-provider fallback absorbs cleanly.
+ * Anything not positively recognized as a payload-shape failure keeps the
+ * existing fall-back-and-retry behavior, so an unfamiliar 4xx can only ever be
+ * handled as well as it is today, never worse.
+ */
+export function isMalformedRequestError(err) {
+  const status = err?.status ?? err?.statusCode
+  if (status !== 400 && status !== 422) return false
+  const message = apiErrorMessage(err)
+  if (!message) return false
+  return REQUEST_FIELD_PATH.test(message) || /tool names must be unique/i.test(message)
+}
+
 export function inferProviderLabel(modelId) {
   if (!modelId || typeof modelId !== 'string') return null
   if (/^gpt-|^o\d/i.test(modelId)) return 'OpenAI'
@@ -612,6 +660,12 @@ async function callExecutorWithFallback(config, params, onEvent) {
       return { result, model: modelId }
     } catch (err) {
       lastErr = err
+      if (isMalformedRequestError(err)) {
+        // The body, not the model, is what was rejected — the rest of the
+        // chain would fail identically.
+        console.log(`[hybrid] executor ${modelId} rejected the request as malformed: ${apiErrorMessage(err)} — skipping remaining models`)
+        break
+      }
       if (err.isCircuitOpen) {
         console.log(`[hybrid] executor ${modelId} skipped: circuit open for ${err.url}`)
       } else {
@@ -622,6 +676,7 @@ async function callExecutorWithFallback(config, params, onEvent) {
   const finalErr = lastErr || new Error('All executor models failed')
   finalErr.layer = 'execution'
   finalErr.triedModels = triedModels
+  if (isMalformedRequestError(finalErr)) finalErr.isMalformedRequest = true
   throw finalErr
 }
 
@@ -643,6 +698,17 @@ async function callOrchestratorWithFallback(config, params, onEvent) {
     // balance), auth (401/403), rate limits (429), overload (529), server
     // errors — all warrant trying the backup.
     maybeEmitQuotaEvent(err, params.model)
+    // ...except a malformed payload, which is not a per-provider failure at
+    // all. Every backup would reject the identical body, so walking the chain
+    // just multiplies the same 400. Fail fast and mark it, so the caller
+    // reports a request bug instead of a provider outage.
+    if (isMalformedRequestError(err)) {
+      console.log(`[hybrid] ${layer} request rejected as malformed: ${apiErrorMessage(err)} — no fallback can accept it`)
+      err.layer = err.layer || layer
+      err.triedModels = triedModels
+      err.isMalformedRequest = true
+      throw err
+    }
     if (!config.orchestratorFallbackModels?.length) {
       err.layer = err.layer || layer
       err.triedModels = triedModels
@@ -1022,6 +1088,10 @@ export async function runHybridAgent(systemPrompt, messages, tools, config, onEv
               break // success
             } catch (retryErr) {
               lastRetryErr = retryErr
+              if (isMalformedRequestError(retryErr)) {
+                console.log(`[hybrid] executor turn ${execTurn + 1} rejected as malformed: ${apiErrorMessage(retryErr)} — not retrying`)
+                break
+              }
               if (retry < MAX_EXECUTOR_RETRIES - 1) {
                 const delayMs = EXECUTOR_BACKOFF_BASE_MS * Math.pow(2, retry)
                 console.log(`[hybrid] executor turn ${execTurn + 1} retry ${retry + 1}/${MAX_EXECUTOR_RETRIES} failed: ${retryErr.message} — backoff ${delayMs}ms`)

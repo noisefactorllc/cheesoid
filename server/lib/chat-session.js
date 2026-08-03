@@ -19,7 +19,7 @@ import { State } from './state.js'
 import { ToolJournal } from './tool-journal.js'
 import { ChatLog } from './chat-log.js'
 import { loadTools } from './tools.js'
-import { runAgent, runHybridAgent } from './agent.js'
+import { runAgent, runHybridAgent, isMalformedRequestError, apiErrorMessage } from './agent.js'
 import { ProviderRegistry } from './providers/index.js'
 import { Modality } from './modality.js'
 import { RoomClient } from './room-client.js'
@@ -193,6 +193,28 @@ function composeSystem(assembled, { addendum = '', state = null } = {}) {
 export function stripChatNarration(text) {
   if (!text) return text
   return splitChatAndThought(text).chat.trim()
+}
+
+/**
+ * Render a failed turn for the room. Exported for unit testing.
+ *
+ * Two failures land here and they call for opposite things from whoever reads
+ * the message. A provider outage clears on its own, so the honest report is
+ * "waiting". A malformed request never clears — the payload is wrong and every
+ * model rejects it identically — so promising retries sends the reader off to
+ * wait out a bug that needs a fix. ask-agent's duplicate `web_search` tool read
+ * as a flaky attention layer for exactly that reason.
+ */
+export function _providerStatusMessage(err) {
+  if (err.isMalformedRequest || isMalformedRequestError(err)) {
+    return `**${err.layer} layer request rejected**\n` +
+      `- **Model:** \`${err.triedModels[0]}\`\n` +
+      `- **Error:** ${apiErrorMessage(err)}\n\n` +
+      `_The request itself is malformed, so no provider will accept it and retrying can't clear it — this needs a config or code fix._`
+  }
+  const reason = err.isCircuitOpen ? (err.lastError || `circuit open for \`${err.url}\``) : err.message
+  const triedList = err.triedModels.map((m, i) => `  ${i + 1}. \`${m}\``).join('\n')
+  return `**${err.layer} layer unavailable**\n- **Tried:**\n${triedList}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
 }
 
 const IDLE_THOUGHT_INTERVAL = 120 * 60 * 1000 // 120 minutes, 8x falloff each cycle
@@ -2160,9 +2182,7 @@ export class Room {
         // Only show provider-unavailable status for errors that carry model info.
         // Errors without .layer/.triedModels are config/init errors, not provider outages.
         if (!err.layer || !err.triedModels?.length) return
-        const reason = err.isCircuitOpen ? (err.lastError || `circuit open for \`${err.url}\``) : err.message
-        const triedList = err.triedModels.map((m, i) => `  ${i + 1}. \`${m}\``).join('\n')
-        const statusMsg = `**${err.layer} layer unavailable**\n- **Tried:**\n${triedList}\n- **Error:** ${reason}\n\n_Retrying until a provider returns. I'll catch up on scrollback when I'm back._`
+        const statusMsg = _providerStatusMessage(err)
         if (this._pendingRoom === 'home') {
           this.broadcast({ type: 'error', message: statusMsg })
         } else {
