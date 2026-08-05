@@ -8,6 +8,7 @@
 
 import { flattenSystem } from './translate.js'
 import { abortableDelay } from '../abort.js'
+import { isQuotaExhaustedError } from '../quota.js'
 import { assertStreamComplete } from './stream-guard.js'
 
 /**
@@ -262,6 +263,7 @@ export function createOpenAIResponsesProvider(config) {
       const RETRY_DELAY_MS = 2000
       let response
       let lastErr
+      let errorBody = ''
 
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         signal?.throwIfAborted()
@@ -288,7 +290,15 @@ export function createOpenAIResponsesProvider(config) {
         if (response && response.status === 429) {
           const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
           const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
-          lastErr = new Error(`OpenAI Responses rate limited (429)`)
+          // This loop leaves the body unread, so it is still available here —
+          // read it to tell a transient rate limit from a dead account, and
+          // stash it so the post-loop error keeps the reason.
+          errorBody = await response.text().catch(() => '')
+          lastErr = new Error(`OpenAI Responses API error 429: ${errorBody}`)
+          if (isQuotaExhaustedError({ message: errorBody })) {
+            console.log(`[openai-responses] quota exhausted, not retrying: ${errorBody.trim()}`)
+            break
+          }
           if (attempt < MAX_RETRIES - 1) await abortableDelay(delay, signal)
         } else if (response && response.status >= 500) {
           const text = await response.text().catch(() => '')
@@ -302,7 +312,7 @@ export function createOpenAIResponsesProvider(config) {
       if (!response) throw lastErr
 
       if (!response.ok) {
-        const text = await response.text().catch(() => '')
+        const text = errorBody || await response.text().catch(() => '')
         throw new Error(`OpenAI Responses API error ${response.status}: ${text}`)
       }
 

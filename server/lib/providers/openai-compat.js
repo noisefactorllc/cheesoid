@@ -2,6 +2,7 @@ import { translateMessages, translateToolDefs } from './translate.js'
 import circuitBreaker, { CircuitOpenError } from '../circuit-breaker.js'
 import { abortableDelay } from '../abort.js'
 import { assertStreamComplete, withStallTimeout, STREAM_STALL_MS } from './stream-guard.js'
+import { isQuotaExhaustedError } from '../quota.js'
 
 const FINISH_REASON_MAP = {
   stop: 'end_turn',
@@ -334,6 +335,7 @@ export function createOpenAICompatProvider(config) {
       const RETRY_DELAY_MS = 2000
       let response
       let lastErr
+      let errorBody = ''
 
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         signal?.throwIfAborted()
@@ -367,15 +369,22 @@ export function createOpenAICompatProvider(config) {
           break
         }
 
+        // Read the body once and keep it. It used to be drained purely to free
+        // the connection, which left the post-loop error message re-reading an
+        // empty body — and the body is the only place that distinguishes a
+        // transient rate limit from an account with no credits left.
+        if (response) errorBody = await response.text().catch(() => '')
+
         if (response && response.status === 429) {
-          const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
-          const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
-          await response.text().catch(() => '') // consume body to free connection
-          lastErr = new Error(`OpenAI-compat rate limited (429), retrying in ${Math.round(delay / 1000)}s`)
+          lastErr = new Error(`OpenAI-compat API error 429: ${errorBody}`)
           circuitBreaker.recordFailure(baseUrl, lastErr.message)
+          // No amount of backoff produces credit.
+          if (isQuotaExhaustedError({ message: errorBody })) {
+            console.log(`[openai-compat] quota exhausted, not retrying: ${errorBody.trim()}`)
+            break
+          }
         } else if (response && response.status >= 500) {
-          const text = await response.text().catch(() => '')
-          lastErr = new Error(`OpenAI-compat server error ${response.status}: ${text}`)
+          lastErr = new Error(`OpenAI-compat server error ${response.status}: ${errorBody}`)
           circuitBreaker.recordFailure(baseUrl, lastErr.message)
         }
 
@@ -392,7 +401,9 @@ export function createOpenAICompatProvider(config) {
       if (!response) throw lastErr
 
       if (!response.ok) {
-        const text = await response.text().catch(() => '')
+        // Prefer the copy the loop already took; statuses that break out before
+        // reading (4xx other than 429) still have an unread body waiting.
+        const text = errorBody || await response.text().catch(() => '')
         throw new Error(`OpenAI-compat API error ${response.status}: ${text}`)
       }
 

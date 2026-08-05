@@ -18,6 +18,7 @@ import circuitBreaker, { CircuitOpenError } from '../circuit-breaker.js'
 import { flattenSystem } from './translate.js'
 import { abortableDelay } from '../abort.js'
 import { assertStreamComplete } from './stream-guard.js'
+import { isQuotaExhaustedError } from '../quota.js'
 
 const DEFAULT_BASE_URL = 'https://generativelanguage.googleapis.com/v1beta'
 
@@ -447,6 +448,7 @@ export function createGeminiProvider(config) {
       const RETRY_DELAY_MS = 2000
       let response
       let lastErr
+      let errorBody = ''
 
       for (let attempt = 0; attempt < MAX_RETRIES; attempt++) {
         signal?.throwIfAborted()
@@ -481,15 +483,26 @@ export function createGeminiProvider(config) {
           break
         }
 
+        // Read the body once and keep it. A response body can only be read
+        // once, and this loop used to drain it just to free the connection —
+        // leaving the post-loop error message to re-read an empty body and
+        // report `Gemini API error 429:` with nothing after the colon. The
+        // body is the only place that says whether this is a rate limit or a
+        // dead account, so it has to survive.
+        if (response) errorBody = await response.text().catch(() => '')
+
         if (response && response.status === 429) {
-          const retryAfter = parseInt(response.headers.get('retry-after') || '0', 10)
-          const delay = retryAfter > 0 ? retryAfter * 1000 : RETRY_DELAY_MS * (attempt + 1)
-          await response.text().catch(() => '')
-          lastErr = new Error(`Gemini rate limited (429), retrying in ${Math.round(delay / 1000)}s`)
+          lastErr = new Error(`Gemini API error 429: ${errorBody}`)
           circuitBreaker.recordFailure(baseUrl, lastErr.message)
+          // Depleted credits are not a transient condition. Backing off and
+          // asking again cannot produce credit; it only spends more requests
+          // against an endpoint that is already refusing them.
+          if (isQuotaExhaustedError({ message: errorBody })) {
+            console.log(`[gemini] quota exhausted, not retrying: ${errorBody.trim()}`)
+            break
+          }
         } else if (response && response.status >= 500) {
-          const text = await response.text().catch(() => '')
-          lastErr = new Error(`Gemini server error ${response.status}: ${text}`)
+          lastErr = new Error(`Gemini server error ${response.status}: ${errorBody}`)
           circuitBreaker.recordFailure(baseUrl, lastErr.message)
         }
 
@@ -505,7 +518,9 @@ export function createGeminiProvider(config) {
       if (!response) throw lastErr
 
       if (!response.ok) {
-        const text = await response.text().catch(() => '')
+        // Prefer the copy the loop already took; statuses that break out before
+        // reading (4xx other than 429) still have an unread body waiting.
+        const text = errorBody || await response.text().catch(() => '')
         throw new Error(`Gemini API error ${response.status}: ${text}`)
       }
 

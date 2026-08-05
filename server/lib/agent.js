@@ -1,4 +1,5 @@
 import { CircuitOpenError } from './circuit-breaker.js'
+import { isQuotaExhaustedError } from './quota.js'
 
 /**
  * Heuristic intent classifier — determines tool vs text without an API call.
@@ -25,12 +26,11 @@ export function classifyIntentHeuristic(lastUserContent) {
   return 'uncertain'
 }
 
-const QUOTA_EXHAUSTED_PATTERNS = /insufficient_quota|RESOURCE_EXHAUSTED|credits?\s+(are\s+)?depleted|exceeded your.*quota|quota.*exceeded/i
-
-export function isQuotaExhaustedError(err) {
-  if (!err?.message) return false
-  return QUOTA_EXHAUSTED_PATTERNS.test(err.message)
-}
+// Canonical definition lives in quota.js so the providers can apply it to a raw
+// response body, before the body is consumed and the reason is lost. Imported
+// (not bare re-exported) because this module calls it too, and re-exported
+// because this has been agent.js's public surface for a while.
+export { isQuotaExhaustedError }
 
 // Anthropic SDK errors arrive as "<status> <json body>"; other providers may
 // only set a flat message. Pull out the human-readable API message either way,
